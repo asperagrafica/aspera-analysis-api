@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.43.0
+ * Version: 1.43.1
  * Author: Aspera
  */
 
@@ -20,12 +20,14 @@ $aspera_updater->setAuthentication( base64_decode( 'Z2l0aHViX3BhdF8xMUNBRUY3Nkkw
 $aspera_updater->setBranch( 'main' );
 // ─────────────────────────────────────────────────────────────────────────────
 
-// ─── Activation: genereer secret key als die nog niet bestaat ────────────────
-register_activation_hook( __FILE__, function () {
+// ─── Secret key: genereer als die nog niet bestaat (activation + runtime) ────
+register_activation_hook( __FILE__, 'aspera_ensure_secret_key' );
+add_action( 'admin_init', 'aspera_ensure_secret_key' );
+function aspera_ensure_secret_key(): void {
     if ( ! get_option( 'aspera_secret_key' ) ) {
         update_option( 'aspera_secret_key', wp_generate_password( 48, false ), false );
     }
-} );
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
