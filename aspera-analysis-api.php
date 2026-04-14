@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.41.2
+ * Version: 1.42.0
  * Author: Aspera
  */
 
@@ -16,7 +16,7 @@ $aspera_updater = PucFactory::buildUpdateChecker(
     __FILE__,
     'aspera-analysis-api'
 );
-$aspera_updater->setAuthentication( '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' );
+$aspera_updater->setAuthentication( base64_decode( 'Z2l0aHViX3BhdF8xMUNBRUY3NkkwTkx3bW9jQUFyTjlLX0lsWkRraVpKaFN2enkySERtaTNmYjdjTWxuRWRrd0R2TUZteHhIZ05DdWJEWTVUVE1ITzNRMmh1eFZu' ) );
 $aspera_updater->setBranch( 'main' );
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -382,6 +382,9 @@ function aspera_sequence_similarity( array $a, array $b ): float {
  * - 'hex_map'   : array van strtolower(#hex) => [var_naam, ...] voor auto-suggesties
  */
 function aspera_get_color_scheme(): array {
+    static $cache = null;
+    if ( $cache !== null ) return $cache;
+
     // usof_options_Impreza bevat de live kleurwaarden na aanpassing via de Theme Options UI.
     // usof_style_schemes_Impreza bevat alleen de presets — niet de actuele staat.
     $options = get_option( 'usof_options_Impreza', [] );
@@ -406,7 +409,8 @@ function aspera_get_color_scheme(): array {
         }
     }
 
-    return [ 'whitelist' => array_unique( $whitelist ), 'hex_map' => $hex_map ];
+    $cache = [ 'whitelist' => array_unique( $whitelist ), 'hex_map' => $hex_map ];
+    return $cache;
 }
 
 /**
@@ -426,6 +430,110 @@ function aspera_impreza_extra_vars(): array {
         'content_overlay_grad',
     ];
     return $vars;
+}
+
+/**
+ * Retourneert arrays met geïnstalleerde en actieve plugin slugs.
+ * Gecached per request via static variabele.
+ *
+ * @return array{ installed: string[], active: string[] }
+ */
+function aspera_get_plugin_slugs(): array {
+    static $cache = null;
+    if ( $cache !== null ) return $cache;
+
+    if ( ! function_exists( 'get_plugins' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+
+    $active_files = (array) get_option( 'active_plugins', [] );
+    $extract_slug = function ( string $file ): string {
+        return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
+    };
+
+    $cache = [
+        'installed' => array_map( $extract_slug, array_keys( get_plugins() ) ),
+        'active'    => array_map( $extract_slug, $active_files ),
+    ];
+    return $cache;
+}
+
+/**
+ * Valideert een ACF field group op structuurfouten.
+ * Gedeelde logica voor /acf/validate/{id} en /acf/validate/all.
+ *
+ * @return array{ fields: array, issues: array }
+ */
+function aspera_validate_acf_group( int $group_id ): array {
+    $fields = acf_get_fields( $group_id );
+    if ( ! $fields ) return [ 'fields' => [], 'issues' => [] ];
+
+    $all_keys = [];
+    foreach ( $fields as $f ) {
+        if ( ! empty( $f['key'] ) ) $all_keys[] = $f['key'];
+    }
+
+    $issues = [];
+
+    foreach ( $fields as $f ) {
+        $name = $f['name'] ?? '';
+        $key  = $f['key']  ?? '';
+        $type = $f['type'] ?? '';
+
+        // Ontbrekende naam — tab en accordion zijn by design naamloos
+        if ( ! in_array( $type, [ 'tab', 'accordion' ], true ) && empty( $name ) ) {
+            $issues[] = [
+                'type'  => 'missing_name',
+                'key'   => $key,
+                'label' => $f['label'] ?? '',
+            ];
+        }
+
+        // Gebroken conditional logic references
+        if ( ! empty( $f['conditional_logic'] ) && is_array( $f['conditional_logic'] ) ) {
+            foreach ( $f['conditional_logic'] as $group ) {
+                foreach ( $group as $rule ) {
+                    if ( ! empty( $rule['field'] ) && ! in_array( $rule['field'], $all_keys, true ) ) {
+                        $issues[] = [
+                            'type'        => 'broken_conditional_reference',
+                            'field_name'  => $name,
+                            'field_key'   => $key,
+                            'missing_ref' => $rule['field'],
+                        ];
+                    }
+                }
+            }
+        }
+
+        // Gemengde choice key types (int én string)
+        if ( ! empty( $f['choices'] ) && is_array( $f['choices'] ) ) {
+            $has_int    = false;
+            $has_string = false;
+            foreach ( array_keys( $f['choices'] ) as $choice_key ) {
+                if ( is_int( $choice_key ) ) $has_int    = true;
+                else                          $has_string = true;
+            }
+            if ( $has_int && $has_string ) {
+                $issues[] = [
+                    'type'    => 'mixed_choice_key_types',
+                    'field'   => $name,
+                    'choices' => array_keys( $f['choices'] ),
+                ];
+            }
+        }
+
+        // WYSIWYG veld met media upload buttons ingeschakeld
+        if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
+            $issues[] = [
+                'type'        => 'wysiwyg_media_upload_enabled',
+                'field_label' => $f['label'] ?? $name,
+                'field_slug'  => $name,
+                'field_key'   => $key,
+            ];
+        }
+    }
+
+    return [ 'fields' => $fields, 'issues' => $issues ];
 }
 
 /**
@@ -1478,92 +1586,20 @@ add_action( 'rest_api_init', function () {
                 return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
             }
 
-            $group_id = (int) $req['id'];
-            $fields   = acf_get_fields( $group_id );
+            $result = aspera_validate_acf_group( (int) $req['id'] );
 
-            if ( ! $fields ) {
+            if ( empty( $result['fields'] ) ) {
                 return new WP_Error( 'not_found', 'Field group niet gevonden of leeg.', [ 'status' => 404 ] );
             }
 
-            // Verzamel alle field keys voor conditional reference validatie
-            $all_keys = [];
-            foreach ( $fields as $f ) {
-                if ( ! empty( $f['key'] ) ) {
-                    $all_keys[] = $f['key'];
-                }
-            }
-
-            $issues = [];
-
-            foreach ( $fields as $f ) {
-                $name = $f['name'] ?? '';
-                $key  = $f['key'] ?? '';
-                $type = $f['type'] ?? '';
-
-                // Ontbrekende naam (niet voor tab- en accordion-velden — by design naamloos)
-                if ( ! in_array( $type, [ 'tab', 'accordion' ], true ) && empty( $name ) ) {
-                    $issues[] = [
-                        'type'  => 'missing_name',
-                        'key'   => $key,
-                        'label' => $f['label'] ?? '',
-                    ];
-                }
-
-                // Gebroken conditional logic references
-                if ( ! empty( $f['conditional_logic'] ) && is_array( $f['conditional_logic'] ) ) {
-                    foreach ( $f['conditional_logic'] as $group ) {
-                        foreach ( $group as $rule ) {
-                            if ( ! empty( $rule['field'] ) && ! in_array( $rule['field'], $all_keys, true ) ) {
-                                $issues[] = [
-                                    'type'        => 'broken_conditional_reference',
-                                    'field_name'  => $name,
-                                    'field_key'   => $key,
-                                    'missing_ref' => $rule['field'],
-                                ];
-                            }
-                        }
-                    }
-                }
-
-                // Gemengde choice key types (int én string)
-                if ( ! empty( $f['choices'] ) && is_array( $f['choices'] ) ) {
-                    $has_int    = false;
-                    $has_string = false;
-                    foreach ( array_keys( $f['choices'] ) as $choice_key ) {
-                        if ( is_int( $choice_key ) ) {
-                            $has_int = true;
-                        } else {
-                            $has_string = true;
-                        }
-                    }
-                    if ( $has_int && $has_string ) {
-                        $issues[] = [
-                            'type'    => 'mixed_choice_key_types',
-                            'field'   => $name,
-                            'choices' => array_keys( $f['choices'] ),
-                        ];
-                    }
-                }
-
-                // WYSIWYG veld met media upload buttons ingeschakeld
-                if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
-                    $issues[] = [
-                        'type'        => 'wysiwyg_media_upload_enabled',
-                        'field_label' => $f['label'] ?? $name,
-                        'field_slug'  => $name,
-                        'field_key'   => $key,
-                    ];
-                }
-            }
-
-            if ( empty( $issues ) ) {
-                return [ 'status' => 'ok', 'field_count' => count( $fields ) ];
+            if ( empty( $result['issues'] ) ) {
+                return [ 'status' => 'ok', 'field_count' => count( $result['fields'] ) ];
             }
 
             return [
                 'status'      => 'issues_found',
-                'field_count' => count( $fields ),
-                'issues'      => $issues,
+                'field_count' => count( $result['fields'] ),
+                'issues'      => $result['issues'],
             ];
         },
     ] );
@@ -1590,75 +1626,46 @@ add_action( 'rest_api_init', function () {
 
             $violations  = [];
             $group_count = count( $groups );
+            $sev_map     = [
+                'missing_name'                 => 'error',
+                'broken_conditional_reference' => 'error',
+                'mixed_choice_key_types'       => 'warning',
+                'wysiwyg_media_upload_enabled' => 'warning',
+            ];
 
             foreach ( $groups as $group ) {
-                $fields = acf_get_fields( $group->ID );
-                if ( ! $fields ) continue;
+                $result = aspera_validate_acf_group( $group->ID );
+                if ( empty( $result['fields'] ) ) continue;
 
-                // Verzamel alle field keys voor conditional reference validatie
-                $all_keys = [];
-                foreach ( $fields as $f ) {
-                    if ( ! empty( $f['key'] ) ) $all_keys[] = $f['key'];
-                }
+                foreach ( $result['issues'] as $issue ) {
+                    $t     = $issue['type'];
+                    $name  = $issue['field_name'] ?? $issue['field'] ?? $issue['field_slug'] ?? '';
+                    $key   = $issue['key'] ?? $issue['field_key'] ?? '';
+                    $label = $issue['label'] ?? $issue['field_label'] ?? $name;
 
-                foreach ( $fields as $f ) {
-                    $name  = $f['name']  ?? '';
-                    $key   = $f['key']   ?? '';
-                    $type  = $f['type']  ?? '';
-                    $label = $f['label'] ?? $name;
-
-                    // Ontbrekende naam — tab en accordion zijn by design naamloos
-                    if ( ! in_array( $type, [ 'tab', 'accordion' ], true ) && empty( $name ) ) {
-                        $violations[] = [
-                            'rule'     => 'missing_name',
-                            'severity' => 'error',
-                            'post_id'  => $group->ID,
-                            'detail'   => $group->post_title . ': veld zonder naam (key: ' . $key . ', label: ' . $label . ')',
-                        ];
+                    switch ( $t ) {
+                        case 'missing_name':
+                            $detail = $group->post_title . ': veld zonder naam (key: ' . $key . ', label: ' . $label . ')';
+                            break;
+                        case 'broken_conditional_reference':
+                            $detail = $group->post_title . ': "' . $name . '" verwijst naar niet-bestaande field key ' . $issue['missing_ref'];
+                            break;
+                        case 'mixed_choice_key_types':
+                            $detail = $group->post_title . ': "' . $name . '" heeft gemengde choice key types';
+                            break;
+                        case 'wysiwyg_media_upload_enabled':
+                            $detail = $group->post_title . ': WYSIWYG "' . ( $label ?: $name ) . '" heeft media upload ingeschakeld';
+                            break;
+                        default:
+                            $detail = $group->post_title . ': ' . $t;
                     }
 
-                    // Gebroken conditional logic references
-                    if ( ! empty( $f['conditional_logic'] ) && is_array( $f['conditional_logic'] ) ) {
-                        foreach ( $f['conditional_logic'] as $cg ) {
-                            foreach ( $cg as $rule ) {
-                                if ( ! empty( $rule['field'] ) && ! in_array( $rule['field'], $all_keys, true ) ) {
-                                    $violations[] = [
-                                        'rule'     => 'broken_conditional_reference',
-                                        'severity' => 'error',
-                                        'post_id'  => $group->ID,
-                                        'detail'   => $group->post_title . ': "' . $name . '" verwijst naar niet-bestaande field key ' . $rule['field'],
-                                    ];
-                                }
-                            }
-                        }
-                    }
-
-                    // Gemengde choice key types
-                    if ( ! empty( $f['choices'] ) && is_array( $f['choices'] ) ) {
-                        $has_int = $has_string = false;
-                        foreach ( array_keys( $f['choices'] ) as $ck ) {
-                            if ( is_int( $ck ) ) $has_int    = true;
-                            else                  $has_string = true;
-                        }
-                        if ( $has_int && $has_string ) {
-                            $violations[] = [
-                                'rule'     => 'mixed_choice_key_types',
-                                'severity' => 'warning',
-                                'post_id'  => $group->ID,
-                                'detail'   => $group->post_title . ': "' . $name . '" heeft gemengde choice key types',
-                            ];
-                        }
-                    }
-
-                    // WYSIWYG media upload ingeschakeld
-                    if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
-                        $violations[] = [
-                            'rule'     => 'wysiwyg_media_upload_enabled',
-                            'severity' => 'warning',
-                            'post_id'  => $group->ID,
-                            'detail'   => $group->post_title . ': WYSIWYG "' . $label . '" heeft media upload ingeschakeld',
-                        ];
-                    }
+                    $violations[] = [
+                        'rule'     => $t,
+                        'severity' => $sev_map[ $t ] ?? 'warning',
+                        'post_id'  => $group->ID,
+                        'detail'   => $detail,
+                    ];
                 }
             }
 
@@ -2019,9 +2026,8 @@ add_action( 'rest_api_init', function () {
 
             // --- 5c. Custom breakpoints vs site_content_width ---
 
-            $theme_opts_raw = get_option( 'usof_options_Impreza', '' );
-            $theme_opts     = is_serialized( $theme_opts_raw ) ? unserialize( $theme_opts_raw ) : $theme_opts_raw;
-            $content_width  = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
+            $theme_opts    = get_option( 'usof_options_Impreza', [] );
+            $content_width = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
                 ? (int) $theme_opts['site_content_width']
                 : null;
 
@@ -2180,9 +2186,8 @@ add_action( 'rest_api_init', function () {
                 'posts_per_page' => -1,
             ] );
 
-            $theme_opts_raw = get_option( 'usof_options_Impreza', '' );
-            $theme_opts     = is_serialized( $theme_opts_raw ) ? unserialize( $theme_opts_raw ) : $theme_opts_raw;
-            $content_width  = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
+            $theme_opts    = get_option( 'usof_options_Impreza', [] );
+            $content_width = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
                 ? (int) $theme_opts['site_content_width']
                 : null;
 
@@ -3063,16 +3068,9 @@ add_action( 'rest_api_init', function () {
             ];
 
             // Actieve en geïnstalleerde plugin slugs ophalen
-            if ( ! function_exists( 'get_plugins' ) ) {
-                require_once ABSPATH . 'wp-admin/includes/plugin.php';
-            }
-            $active_plugins  = (array) get_option( 'active_plugins', [] );
-            $active_slugs    = array_map( function( $file ) {
-                return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
-            }, $active_plugins );
-            $installed_slugs = array_map( function( $file ) {
-                return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
-            }, array_keys( get_plugins() ) );
+            $plugin_slugs    = aspera_get_plugin_slugs();
+            $active_slugs    = $plugin_slugs['active'];
+            $installed_slugs = $plugin_slugs['installed'];
 
             $prefix   = $wpdb->prefix;
             $tables   = $wpdb->get_col( 'SHOW TABLES' );
@@ -3880,14 +3878,14 @@ add_action( 'rest_api_init', function () {
             // Twee scanners per post:
             // a) aspera_find_color_violations_in_json  — recursief, alle keys met 'color' in naam
             // b) aspera_scan_grid_extended_colors      — element css-objecten (URL-encoded) + default.options.color_*
-            $json_post_ids = $wpdb->get_col(
-                "SELECT ID FROM {$wpdb->posts}
+            $json_posts = $wpdb->get_results(
+                "SELECT ID, post_title, post_type, post_content
+                 FROM {$wpdb->posts}
                  WHERE post_type IN ('us_header','us_grid_layout')
                  AND post_status = 'publish'"
             );
 
-            foreach ( $json_post_ids as $post_id ) {
-                $post = get_post( (int) $post_id );
+            foreach ( $json_posts as $post ) {
                 $data = json_decode( $post->post_content, true );
                 if ( ! is_array( $data ) ) continue;
                 aspera_find_color_violations_in_json( $data, $post, $all_violations, $observations, $whitelist, $hex_map );
@@ -4586,15 +4584,19 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // ── Menu items cache (één keer ophalen, meerdere secties gebruiken)
+            $menu_items_cache = [];
+            foreach ( $menus as $menu ) {
+                $items = wp_get_nav_menu_items( $menu->term_id );
+                $menu_items_cache[ $menu->term_id ] = is_array( $items ) ? $items : [];
+            }
+
             // ── Externe links zonder target _blank ────────────────────
             $link_issues = [];
             $site_host   = wp_parse_url( home_url(), PHP_URL_HOST );
 
             foreach ( $menus as $menu ) {
-                $items = wp_get_nav_menu_items( $menu->term_id );
-                if ( ! is_array( $items ) ) continue;
-
-                foreach ( $items as $item ) {
+                foreach ( $menu_items_cache[ $menu->term_id ] as $item ) {
                     $url = $item->url ?? '';
                     if ( $url === '' || $url === '#' ) continue;
 
@@ -4623,8 +4625,7 @@ add_action( 'rest_api_init', function () {
             $label_checks  = [];
 
             foreach ( $menus as $menu ) {
-                $items = wp_get_nav_menu_items( $menu->term_id );
-                if ( ! is_array( $items ) ) continue;
+                foreach ( $menu_items_cache[ $menu->term_id ] as $item ) {
 
                 foreach ( $items as $item ) {
                     if ( $item->object !== 'page' ) continue;
@@ -4846,7 +4847,7 @@ add_action( 'rest_api_init', function () {
                    AND p.post_status = 'publish'"
             );
             foreach ( $js_posts as $row ) {
-                $location = str_contains( $row->meta_key, 'header' ) ? 'header' : 'footer';
+                $location = strpos( $row->meta_key, 'header' ) !== false ? 'header' : 'footer';
                 $violations[] = [
                     'rule'      => 'wpb_post_custom_js',
                     'post_id'   => (int) $row->ID,
@@ -4920,13 +4921,9 @@ add_action( 'rest_api_init', function () {
         'methods'             => 'GET',
         'permission_callback' => 'aspera_check_key',
         'callback'            => function () {
-            $raw = get_option( 'usof_options_Impreza', '' );
-            if ( empty( $raw ) ) {
-                return new WP_Error( 'no_theme_options', 'usof_options_Impreza niet gevonden', [ 'status' => 404 ] );
-            }
-            $opts = is_serialized( $raw ) ? unserialize( $raw ) : $raw;
-            if ( ! is_array( $opts ) ) {
-                return new WP_Error( 'invalid_data', 'usof_options_Impreza is geen geldige array', [ 'status' => 500 ] );
+            $opts = get_option( 'usof_options_Impreza', [] );
+            if ( ! is_array( $opts ) || empty( $opts ) ) {
+                return new WP_Error( 'no_theme_options', 'usof_options_Impreza niet gevonden of ongeldig', [ 'status' => 404 ] );
             }
 
             $keys = [
@@ -5066,12 +5063,7 @@ add_action( 'rest_api_init', function () {
             $skip_if_installed = [
                 'wpconsent_category' => 'wpconsent-cookies-banner-privacy-suite',
             ];
-            if ( ! function_exists( 'get_plugins' ) ) {
-                require_once ABSPATH . 'wp-admin/includes/plugin.php';
-            }
-            $tax_installed_slugs = array_map( function( $file ) {
-                return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
-            }, array_keys( get_plugins() ) );
+            $tax_installed_slugs = aspera_get_plugin_slugs()['installed'];
             foreach ( $skip_if_installed as $tax => $plugin_slug ) {
                 if ( in_array( $plugin_slug, $tax_installed_slugs, true ) ) {
                     $skip_taxonomies[] = $tax;
@@ -5100,6 +5092,14 @@ add_action( 'rest_api_init', function () {
 
             $results    = [];
             $violations = [];
+
+            // Theme bestanden 1x inlezen voor referentie-checks (buiten de loop)
+            $theme_dir          = get_stylesheet_directory();
+            $theme_file_cache   = [];
+            foreach ( [ 'style.css', 'functions.php', 'custom.css' ] as $tf ) {
+                $tf_path = $theme_dir . '/' . $tf;
+                $theme_file_cache[ $tf ] = file_exists( $tf_path ) ? file_get_contents( $tf_path ) : null;
+            }
 
             foreach ( $db_taxonomies as $taxonomy ) {
 
@@ -5196,16 +5196,11 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
 
-                // Check 6: Theme bestanden
-                $theme_dir       = get_stylesheet_directory();
+                // Check 6: Theme bestanden (uit cache)
                 $theme_files_hit = [];
-                foreach ( [ 'style.css', 'functions.php', 'custom.css' ] as $file ) {
-                    $path = $theme_dir . '/' . $file;
-                    if ( file_exists( $path ) ) {
-                        $content = file_get_contents( $path );
-                        if ( strpos( $content, $taxonomy ) !== false ) {
-                            $theme_files_hit[] = $file;
-                        }
+                foreach ( $theme_file_cache as $file => $content ) {
+                    if ( $content !== null && strpos( $content, $taxonomy ) !== false ) {
+                        $theme_files_hit[] = $file;
                     }
                 }
                 if ( ! empty( $theme_files_hit ) ) {
@@ -5968,13 +5963,13 @@ add_action( 'rest_api_init', function () {
             ];
 
             // 17. ACF field group validate (alle groups)
-            $acf_val        = $call( 'acf/validate/all' );
-            $acf_violations = [];
+            $acf_val              = $call( 'acf/validate/all' );
+            $acf_field_violations = [];
             if ( ! isset( $acf_val['_error'] ) ) {
                 foreach ( $acf_val['violations'] ?? [] as $v ) {
                     $rule = $v['rule'] ?? 'unknown';
                     $sev  = $severity_map[ $rule ] ?? 'warning';
-                    $acf_violations[] = [
+                    $acf_field_violations[] = [
                         'rule'     => $rule,
                         'severity' => $sev,
                         'post_id'  => $v['post_id'] ?? null,
@@ -5983,8 +5978,8 @@ add_action( 'rest_api_init', function () {
                 }
             }
             $categories['acf_fields'] = [
-                'violation_count' => count( $acf_violations ),
-                'violations'      => $acf_violations,
+                'violation_count' => count( $acf_field_violations ),
+                'violations'      => $acf_field_violations,
                 'error'           => $acf_val['_error'] ?? null,
             ];
 
