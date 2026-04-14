@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.39.1
+ * Version: 1.40.0
  * Author: Aspera
  */
 
@@ -939,6 +939,9 @@ function aspera_dashboard_widget_render(): void {
         'widgets'          => 'Widgets',
         'wpb_templates'    => 'Opgeslagen WPBakery Templates',
         'taxonomy'         => 'Taxonomieën',
+        'header_config'    => 'Header Configuratie',
+        'acf_fields'       => 'ACF Field Groups',
+        'meta_orphaned'    => 'Orphaned ACF Meta',
     ];
 
     $sev_colors = [
@@ -1319,8 +1322,8 @@ add_action( 'rest_api_init', function () {
                 $key  = $f['key'] ?? '';
                 $type = $f['type'] ?? '';
 
-                // Ontbrekende naam (niet voor tab-velden)
-                if ( $type !== 'tab' && empty( $name ) ) {
+                // Ontbrekende naam (niet voor tab- en accordion-velden — by design naamloos)
+                if ( ! in_array( $type, [ 'tab', 'accordion' ], true ) && empty( $name ) ) {
                     $issues[] = [
                         'type'  => 'missing_name',
                         'key'   => $key,
@@ -1383,6 +1386,108 @@ add_action( 'rest_api_init', function () {
                 'status'      => 'issues_found',
                 'field_count' => count( $fields ),
                 'issues'      => $issues,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/acf/validate/all
+     * Aggregeert /acf/validate/{id} over alle actieve ACF field groups.
+     * Geeft violations terug per group met post_id voor directe navigatie naar de editor.
+     */
+    register_rest_route( 'aspera/v1', '/acf/validate/all', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_fields' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $groups = get_posts( [
+                'post_type'      => 'acf-field-group',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
+
+            $violations  = [];
+            $group_count = count( $groups );
+
+            foreach ( $groups as $group ) {
+                $fields = acf_get_fields( $group->ID );
+                if ( ! $fields ) continue;
+
+                // Verzamel alle field keys voor conditional reference validatie
+                $all_keys = [];
+                foreach ( $fields as $f ) {
+                    if ( ! empty( $f['key'] ) ) $all_keys[] = $f['key'];
+                }
+
+                foreach ( $fields as $f ) {
+                    $name  = $f['name']  ?? '';
+                    $key   = $f['key']   ?? '';
+                    $type  = $f['type']  ?? '';
+                    $label = $f['label'] ?? $name;
+
+                    // Ontbrekende naam — tab en accordion zijn by design naamloos
+                    if ( ! in_array( $type, [ 'tab', 'accordion' ], true ) && empty( $name ) ) {
+                        $violations[] = [
+                            'rule'     => 'missing_name',
+                            'severity' => 'error',
+                            'post_id'  => $group->ID,
+                            'detail'   => $group->post_title . ': veld zonder naam (key: ' . $key . ', label: ' . $label . ')',
+                        ];
+                    }
+
+                    // Gebroken conditional logic references
+                    if ( ! empty( $f['conditional_logic'] ) && is_array( $f['conditional_logic'] ) ) {
+                        foreach ( $f['conditional_logic'] as $cg ) {
+                            foreach ( $cg as $rule ) {
+                                if ( ! empty( $rule['field'] ) && ! in_array( $rule['field'], $all_keys, true ) ) {
+                                    $violations[] = [
+                                        'rule'     => 'broken_conditional_reference',
+                                        'severity' => 'error',
+                                        'post_id'  => $group->ID,
+                                        'detail'   => $group->post_title . ': "' . $name . '" verwijst naar niet-bestaande field key ' . $rule['field'],
+                                    ];
+                                }
+                            }
+                        }
+                    }
+
+                    // Gemengde choice key types
+                    if ( ! empty( $f['choices'] ) && is_array( $f['choices'] ) ) {
+                        $has_int = $has_string = false;
+                        foreach ( array_keys( $f['choices'] ) as $ck ) {
+                            if ( is_int( $ck ) ) $has_int    = true;
+                            else                  $has_string = true;
+                        }
+                        if ( $has_int && $has_string ) {
+                            $violations[] = [
+                                'rule'     => 'mixed_choice_key_types',
+                                'severity' => 'warning',
+                                'post_id'  => $group->ID,
+                                'detail'   => $group->post_title . ': "' . $name . '" heeft gemengde choice key types',
+                            ];
+                        }
+                    }
+
+                    // WYSIWYG media upload ingeschakeld
+                    if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
+                        $violations[] = [
+                            'rule'     => 'wysiwyg_media_upload_enabled',
+                            'severity' => 'warning',
+                            'post_id'  => $group->ID,
+                            'detail'   => $group->post_title . ': WYSIWYG "' . $label . '" heeft media upload ingeschakeld',
+                        ];
+                    }
+                }
+            }
+
+            return [
+                'status'      => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations'  => $violations,
+                'group_count' => $group_count,
             ];
         },
     ] );
@@ -1876,6 +1981,149 @@ add_action( 'rest_api_init', function () {
                 'changes'      => count( $changes ),
                 'change_log'   => $changes,
                 'observations' => $observations,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/header/validate
+     * Read-only validatie van alle us_header posts op configuratiefouten:
+     * custom breakpoint volgorde, exceeds content width, orientation, menu mobile_width.
+     * Tegenhanger van /header/migrate (schrijftool) — deze endpoint schrijft niets terug.
+     */
+    register_rest_route( 'aspera/v1', '/header/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $headers = get_posts( [
+                'post_type'      => 'us_header',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
+
+            $theme_opts_raw = get_option( 'usof_options_Impreza', '' );
+            $theme_opts     = is_serialized( $theme_opts_raw ) ? unserialize( $theme_opts_raw ) : $theme_opts_raw;
+            $content_width  = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
+                ? (int) $theme_opts['site_content_width']
+                : null;
+
+            $bp_device_order = [ 'laptops', 'tablets', 'mobiles' ];
+            $violations      = [];
+            $observations    = [];
+
+            foreach ( $headers as $post ) {
+                $raw = json_decode( $post->post_content, true );
+                if ( ! is_array( $raw ) ) continue;
+
+                $title            = $post->post_title;
+                $custom_bp_values = [];
+
+                // ── Custom breakpoints ────────────────────────────────────
+                foreach ( $bp_device_order as $bp ) {
+                    $bp_opts   = $raw[ $bp ]['options'] ?? [];
+                    $is_custom = ( $bp_opts['custom_breakpoint'] ?? 0 ) == 1;
+                    if ( ! $is_custom ) continue;
+
+                    $bp_val = (int) $bp_opts['breakpoint'];
+                    $custom_bp_values[ $bp ] = $bp_val;
+
+                    $observations[] = [
+                        'rule'     => 'custom_breakpoint_active',
+                        'severity' => 'observation',
+                        'post_id'  => $post->ID,
+                        'detail'   => $title . ': ' . $bp . ' heeft custom breakpoint (' . $bp_opts['breakpoint'] . ')',
+                    ];
+                }
+
+                // Ongeldige volgorde: kleiner device >= groter device
+                $prev_bp  = null;
+                $prev_val = null;
+                foreach ( $bp_device_order as $bp ) {
+                    if ( ! isset( $custom_bp_values[ $bp ] ) ) { $prev_bp = null; $prev_val = null; continue; }
+                    if ( $prev_bp !== null && $custom_bp_values[ $bp ] >= $prev_val ) {
+                        $violations[] = [
+                            'rule'     => 'custom_breakpoint_invalid_order',
+                            'severity' => 'error',
+                            'post_id'  => $post->ID,
+                            'detail'   => $title . ': ' . $bp . ' (' . $custom_bp_values[ $bp ] . 'px) >= ' . $prev_bp . ' (' . $prev_val . 'px) — kleiner device mag geen hogere breakpoint hebben',
+                        ];
+                    }
+                    $prev_bp  = $bp;
+                    $prev_val = $custom_bp_values[ $bp ];
+                }
+
+                // Custom breakpoint > site_content_width
+                if ( $content_width !== null ) {
+                    foreach ( $custom_bp_values as $bp => $bp_val ) {
+                        if ( $bp_val > $content_width ) {
+                            $violations[] = [
+                                'rule'     => 'custom_breakpoint_exceeds_content_width',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $bp . ' (' . $bp_val . 'px) > site_content_width (' . $content_width . 'px)',
+                            ];
+                        }
+                    }
+                }
+
+                // ── Orientation: tablets en mobiles moeten horizontal zijn ─
+                foreach ( [ 'tablets', 'mobiles' ] as $bp ) {
+                    $orientation = $raw[ $bp ]['options']['orientation'] ?? 'hor';
+                    if ( $orientation === 'ver' ) {
+                        $violations[] = [
+                            'rule'     => 'orientation_vertical_forbidden',
+                            'severity' => 'error',
+                            'post_id'  => $post->ID,
+                            'detail'   => $title . ': ' . $bp . ' heeft vertical orientation — moet altijd horizontal zijn',
+                        ];
+                    }
+                }
+
+                // ── Menu mobile_width checks ──────────────────────────────
+                if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
+                    $highest_bp = 0;
+                    foreach ( $bp_device_order as $bp ) {
+                        $bpv = (int) ( $raw[ $bp ]['options']['breakpoint'] ?? 0 );
+                        if ( $bpv > $highest_bp ) $highest_bp = $bpv;
+                    }
+
+                    foreach ( $raw['data'] as $el_id => $el ) {
+                        if ( strpos( $el_id, 'menu:' ) !== 0 ) continue;
+                        $mw = isset( $el['mobile_width'] ) ? (int) $el['mobile_width'] : null;
+                        if ( $mw === null ) continue;
+
+                        if ( $mw > 10000 ) {
+                            $observations[] = [
+                                'rule'     => 'menu_mobile_always',
+                                'severity' => 'observation',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_width (' . $el['mobile_width'] . ') > 10000px — always-hamburger',
+                            ];
+                        } elseif ( $content_width !== null && $mw > $content_width ) {
+                            $observations[] = [
+                                'rule'     => 'menu_mobile_exceeds_content_width',
+                                'severity' => 'observation',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_width (' . $mw . 'px) > site_content_width (' . $content_width . 'px)',
+                            ];
+                        } elseif ( $highest_bp > 0 && $mw > $highest_bp ) {
+                            $observations[] = [
+                                'rule'     => 'menu_mobile_exceeds_breakpoints',
+                                'severity' => 'observation',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_width (' . $mw . 'px) > hoogste header breakpoint (' . $highest_bp . 'px)',
+                            ];
+                        }
+                    }
+                }
+            }
+
+            return [
+                'status'       => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations'   => $violations,
+                'observations' => $observations,
+                'header_count' => count( $headers ),
             ];
         },
     ] );
@@ -5049,6 +5297,25 @@ add_action( 'rest_api_init', function () {
                 // taxonomy/validate
                 'orphaned_taxonomy'                    => 'warning',
                 'orphaned_taxonomy_has_dependencies'    => 'warning',
+
+                // header/validate
+                'custom_breakpoint_invalid_order'        => 'error',
+                'custom_breakpoint_exceeds_content_width'=> 'warning',
+                'custom_breakpoint_active'               => 'observation',
+                'orientation_vertical_forbidden'         => 'error',
+                'menu_mobile_always'                     => 'observation',
+                'menu_mobile_exceeds_content_width'      => 'observation',
+                'menu_mobile_exceeds_breakpoints'        => 'observation',
+
+                // acf/validate/all
+                'missing_name'                           => 'error',
+                'broken_conditional_reference'           => 'error',
+                'mixed_choice_key_types'                 => 'warning',
+                'wysiwyg_media_upload_enabled'           => 'warning',
+
+                // meta/validate
+                'orphaned_meta'                          => 'warning',
+                'orphaned_meta_in_templates'             => 'error',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -5068,6 +5335,9 @@ add_action( 'rest_api_init', function () {
                 'widgets'          =>  10,
                 'wpb_templates'    =>   5,
                 'taxonomy'         =>   5,
+                'header_config'    =>   5,
+                'acf_fields'       =>  10,
+                'meta_orphaned'    =>   5,
             ];
 
             $severity_points = [
@@ -5474,6 +5744,68 @@ add_action( 'rest_api_init', function () {
                 'violation_count' => count( $tax_violations ),
                 'violations'      => $tax_violations,
                 'error'           => $tax['_error'] ?? null,
+            ];
+
+            // 16. Header config validate
+            $hdr_val        = $call( 'header/validate' );
+            $hdr_violations = [];
+            if ( ! isset( $hdr_val['_error'] ) ) {
+                foreach ( array_merge( $hdr_val['violations'] ?? [], $hdr_val['observations'] ?? [] ) as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'observation';
+                    $hdr_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['header_config'] = [
+                'violation_count' => count( $hdr_violations ),
+                'violations'      => $hdr_violations,
+                'error'           => $hdr_val['_error'] ?? null,
+            ];
+
+            // 17. ACF field group validate (alle groups)
+            $acf_val        = $call( 'acf/validate/all' );
+            $acf_violations = [];
+            if ( ! isset( $acf_val['_error'] ) ) {
+                foreach ( $acf_val['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $acf_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['acf_fields'] = [
+                'violation_count' => count( $acf_violations ),
+                'violations'      => $acf_violations,
+                'error'           => $acf_val['_error'] ?? null,
+            ];
+
+            // 18. Orphaned ACF meta
+            $meta_val        = $call( 'meta/validate' );
+            $meta_violations = [];
+            if ( ! isset( $meta_val['_error'] ) ) {
+                foreach ( $meta_val['orphaned'] ?? [] as $m ) {
+                    $rule = $m['in_templates'] ? 'orphaned_meta_in_templates' : 'orphaned_meta';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $meta_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $m['meta_key'] . ' (' . $m['rows'] . ' rijen' . ( $m['in_templates'] ? ', gevonden in templates' : '' ) . ')',
+                    ];
+                }
+            }
+            $categories['meta_orphaned'] = [
+                'violation_count' => count( $meta_violations ),
+                'violations'      => $meta_violations,
+                'error'           => $meta_val['_error'] ?? null,
             ];
 
             // ── Health score berekenen ────────────────────────────────────
