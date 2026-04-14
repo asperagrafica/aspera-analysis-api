@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.41.0
+ * Version: 1.41.1
  * Author: Aspera
  */
 
@@ -3035,6 +3035,8 @@ add_action( 'rest_api_init', function () {
                 'wcpdf'       => [ 'plugin' => 'PDF Invoices & Packing Slips',     'slug' => 'woocommerce-pdf-invoices-packing-slips' ],
                 'spu'         => [ 'plugin' => 'Popup by Supsystic',               'slug' => 'popup-by-supsystic' ],
                 'wppopups'    => [ 'plugin' => 'WP Popups',                        'slug' => 'wp-popups-lite' ],
+                // installed_only: true — alleen flaggen als plugin volledig niet geïnstalleerd is (actief én inactief zijn OK)
+                'wpconsent'   => [ 'plugin' => 'WPConsent', 'slug' => 'wpconsent-cookies-banner-privacy-suite', 'installed_only' => true ],
             ];
 
             // Tabelpatronen van bekende essentiële of veelgebruikte plugins — niet flaggen
@@ -3060,14 +3062,17 @@ add_action( 'rest_api_init', function () {
                 'woocommerce_payment_tokenmeta', 'woocommerce_log',
             ];
 
-            // Actieve plugin slugs ophalen
+            // Actieve en geïnstalleerde plugin slugs ophalen
             if ( ! function_exists( 'get_plugins' ) ) {
                 require_once ABSPATH . 'wp-admin/includes/plugin.php';
             }
-            $active_plugins = (array) get_option( 'active_plugins', [] );
-            $active_slugs   = array_map( function( $file ) {
+            $active_plugins  = (array) get_option( 'active_plugins', [] );
+            $active_slugs    = array_map( function( $file ) {
                 return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
             }, $active_plugins );
+            $installed_slugs = array_map( function( $file ) {
+                return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
+            }, array_keys( get_plugins() ) );
 
             $prefix   = $wpdb->prefix;
             $tables   = $wpdb->get_col( 'SHOW TABLES' );
@@ -3091,8 +3096,9 @@ add_action( 'rest_api_init', function () {
                 $matched = false;
                 foreach ( $known_patterns as $pattern => $info ) {
                     if ( strpos( $bare, $pattern ) === 0 ) {
-                        $matched = true;
-                        if ( ! in_array( $info['slug'], $active_slugs, true ) ) {
+                        $matched      = true;
+                        $check_slugs  = ! empty( $info['installed_only'] ) ? $installed_slugs : $active_slugs;
+                        if ( ! in_array( $info['slug'], $check_slugs, true ) ) {
                             $orphaned[] = [
                                 'table'         => $table,
                                 'pattern'       => $pattern . '_*',
