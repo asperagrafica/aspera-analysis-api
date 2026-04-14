@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.40.0
+ * Version: 1.41.0
  * Author: Aspera
  */
 
@@ -914,6 +914,51 @@ add_action( 'wp_ajax_aspera_refresh_audit', function () {
     wp_send_json_success( [ 'reload' => true ] );
 } );
 
+add_action( 'wp_ajax_aspera_add_exception', function () {
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
+
+    $category = sanitize_text_field( wp_unslash( $_POST['category'] ?? '' ) );
+    $rule     = sanitize_text_field( wp_unslash( $_POST['rule']     ?? '' ) );
+    $post_id  = intval( $_POST['post_id'] ?? 0 );
+
+    if ( ! $category || ! $rule ) wp_die( -1 );
+
+    $exc_id     = md5( $category . '|' . $rule . '|' . $post_id );
+    $exceptions = get_option( 'aspera_audit_exceptions', [] );
+    if ( ! is_array( $exceptions ) ) $exceptions = [];
+
+    foreach ( $exceptions as $e ) {
+        if ( $e['id'] === $exc_id ) {
+            wp_send_json_success( [ 'id' => $exc_id ] );
+        }
+    }
+
+    $exceptions[] = [
+        'id'         => $exc_id,
+        'category'   => $category,
+        'rule'       => $rule,
+        'post_id'    => $post_id,
+        'created_at' => current_time( 'Y-m-d' ),
+    ];
+    update_option( 'aspera_audit_exceptions', $exceptions );
+    wp_send_json_success( [ 'id' => $exc_id ] );
+} );
+
+add_action( 'wp_ajax_aspera_remove_exception', function () {
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+    if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
+
+    $exc_id = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
+    if ( ! $exc_id ) wp_die( -1 );
+
+    $exceptions = get_option( 'aspera_audit_exceptions', [] );
+    if ( ! is_array( $exceptions ) ) $exceptions = [];
+    $exceptions = array_values( array_filter( $exceptions, fn( $e ) => $e['id'] !== $exc_id ) );
+    update_option( 'aspera_audit_exceptions', $exceptions );
+    wp_send_json_success();
+} );
+
 function aspera_dashboard_widget_render(): void {
     $score    = get_option( 'aspera_audit_score',    null );
     $date_raw = get_option( 'aspera_audit_date',     null );
@@ -953,6 +998,14 @@ function aspera_dashboard_widget_render(): void {
 
     $nonce = wp_create_nonce( 'aspera_refresh_nonce' );
 
+    // ── Uitzonderingen laden ───────────────────────────────────────────────────
+    $exceptions_raw = get_option( 'aspera_audit_exceptions', [] );
+    if ( ! is_array( $exceptions_raw ) ) $exceptions_raw = [];
+    $exc_index = [];
+    foreach ( $exceptions_raw as $e ) {
+        $exc_index[ $e['id'] ] = true;
+    }
+
     // ── Inline stijlen (native WP admin kleuren) ──────────────────────────────
     echo '<style>
         #aspera_audit_widget details > summary { list-style: none; user-select: none; }
@@ -960,6 +1013,11 @@ function aspera_dashboard_widget_render(): void {
         #aspera_audit_widget details[open] .aspera-chevron { transform: rotate(90deg); }
         #aspera_audit_widget .aspera-chevron { display:inline-block; transition: transform 0.15s; margin-right:4px; color:#72777c; }
         #aspera_audit_widget .aspera-viol-row:last-child { border-bottom: none !important; }
+        #aspera_audit_widget .aspera-exc-btn { background:none; border:none; padding:0; cursor:pointer; font-size:11px; color:#a7aaad; text-decoration:underline; flex-shrink:0; margin-left:auto; }
+        #aspera_audit_widget .aspera-exc-btn:hover { color:#d63638; }
+        #aspera_audit_widget .aspera-exc-btn.is-excepted { color:#a7aaad; }
+        #aspera_audit_widget .aspera-exc-btn.is-excepted:hover { color:#2271b1; }
+        #aspera_audit_widget .aspera-ignored { opacity:0.45; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -992,12 +1050,16 @@ function aspera_dashboard_widget_render(): void {
     echo '</div>';
 
     // ── Severity badges ────────────────────────────────────────────────────────
+    $ignored_total = count( $exceptions_raw );
     echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
     foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
         $bg  = $cnt > 0 ? ( $sev_colors[ $sev ] ) : '#dcdcde';
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
         echo '<span style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</span>';
+    }
+    if ( $ignored_total > 0 ) {
+        echo '<span style="background:#dcdcde;color:#50575e;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;margin-left:4px;">' . $ignored_total . '&nbsp;genegeerd</span>';
     }
     echo '</div>';
 
@@ -1011,16 +1073,33 @@ function aspera_dashboard_widget_render(): void {
         $v_count = (int) ( $cat['violation_count'] ?? 0 );
         $viols   = $cat['violations'] ?? [];
         $cat_err = $cat['error'] ?? null;
-        $is_open = ( $v_count > 0 || $cat_err ) ? ' open' : '';
+        $is_open = ''; // wordt hieronder opnieuw bepaald na splits
 
-        $row_bg   = $v_count > 0 ? '#fff8f8' : '#f6f7f7';
-        // Badge kleur op basis van ergste severity in deze categorie
-        if ( $v_count === 0 ) {
+        // Splits violations in actief en genegeerd op basis van exception_id
+        $active_viols  = [];
+        $ignored_viols = [];
+        foreach ( $viols as $_v ) {
+            $pid   = (int) ( $_v['post_id'] ?? 0 );
+            $eid   = md5( $key . '|' . ( $_v['rule'] ?? '' ) . '|' . $pid );
+            $_v['_exc_id'] = $eid;
+            if ( isset( $exc_index[ $eid ] ) ) {
+                $ignored_viols[] = $_v;
+            } else {
+                $active_viols[] = $_v;
+            }
+        }
+        $active_count  = count( $active_viols );
+        $ignored_count = count( $ignored_viols );
+        $is_open       = ( $active_count > 0 || $cat_err ) ? ' open' : '';
+
+        $row_bg   = $active_count > 0 ? '#fff8f8' : '#f6f7f7';
+        // Badge kleur op basis van ergste severity in actieve violations
+        if ( $active_count === 0 ) {
             $badge_bg = '#00a32a';
         } else {
             $sev_prio = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
             $worst    = 'observation';
-            foreach ( $viols as $_v ) {
+            foreach ( $active_viols as $_v ) {
                 $_s = $_v['severity'] ?? 'observation';
                 if ( ( $sev_prio[ $_s ] ?? 3 ) < ( $sev_prio[ $worst ] ?? 3 ) ) {
                     $worst = $_s;
@@ -1031,47 +1110,91 @@ function aspera_dashboard_widget_render(): void {
 
         echo '<details' . $is_open . ' style="border-bottom:1px solid #dcdcde;">';
         echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:' . esc_attr( $row_bg ) . ';">';
-        echo '<span style="font-size:13px;font-weight:' . ( $v_count > 0 ? '600' : '400' ) . ';color:#1d2327;">';
+        echo '<span style="font-size:13px;font-weight:' . ( $active_count > 0 ? '600' : '400' ) . ';color:#1d2327;">';
         echo '<span class="aspera-chevron">▶</span>' . esc_html( $label );
         echo '</span>';
-        echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $v_count . '</span>';
+        echo '<span style="display:flex;align-items:center;gap:5px;">';
+        echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $active_count . '</span>';
+        if ( $ignored_count > 0 ) {
+            echo '<span style="background:#dcdcde;color:#50575e;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;" title="Genegeerde violations">' . $ignored_count . ' &#x1F6AB;</span>';
+        }
+        echo '</span>';
         echo '</summary>';
 
         echo '<div style="padding:8px 12px;background:#fff;font-size:13px;">';
 
         if ( $cat_err ) {
             echo '<p style="color:#d63638;margin:4px 0;">⚠ Endpoint fout: ' . esc_html( $cat_err ) . '</p>';
-        } elseif ( empty( $viols ) ) {
+        } elseif ( empty( $active_viols ) && empty( $ignored_viols ) ) {
             echo '<p style="color:#00a32a;margin:4px 0;">✓ Geen violations gevonden.</p>';
         } else {
-            // Sorteren: critical → error → warning → observation
             $sev_order = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
-            usort( $viols, function ( $a, $b ) use ( $sev_order ) {
-                return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
-            } );
 
-            foreach ( $viols as $v ) {
-                $sev     = $v['severity'] ?? 'warning';
-                $rule    = esc_html( $v['rule'] ?? '' );
-                $detail  = esc_html( $v['detail'] ?? '' );
-                $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
-                $dot_col = $sev_colors[ $sev ] ?? '#72777c';
+            // ── Actieve violations ────────────────────────────────────────
+            if ( empty( $active_viols ) && $ignored_count > 0 ) {
+                echo '<p style="color:#00a32a;margin:4px 0 6px;">✓ Geen actieve issues.</p>';
+            } else {
+                usort( $active_viols, function ( $a, $b ) use ( $sev_order ) {
+                    return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
+                } );
+                foreach ( $active_viols as $v ) {
+                    $sev     = $v['severity'] ?? 'warning';
+                    $rule    = esc_html( $v['rule'] ?? '' );
+                    $detail  = esc_html( $v['detail'] ?? '' );
+                    $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
+                    $dot_col = $sev_colors[ $sev ] ?? '#72777c';
+                    $eid     = esc_attr( $v['_exc_id'] ?? '' );
+                    $cat_key_attr = esc_attr( $key );
+                    $rule_attr    = esc_attr( $v['rule'] ?? '' );
+                    $pid_attr     = esc_attr( (string) ( $post_id ?? 0 ) );
 
-                echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
-                echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
-                echo '<div style="flex:1;min-width:0;">';
-                echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
-                echo '&ensp;<span style="font-size:11px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
-                if ( $post_id ) {
-                    $edit_url   = get_edit_post_link( $post_id );
-                    $post_title = get_the_title( $post_id );
-                    $link_label = $post_title ?: ( 'Post #' . $post_id );
-                    echo ' &mdash; <a href="' . esc_url( (string) $edit_url ) . '" style="font-size:12px;" target="_blank">' . esc_html( $link_label ) . '</a>';
+                    echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
+                    echo '<div style="flex:1;min-width:0;">';
+                    echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
+                    echo '&ensp;<span style="font-size:11px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
+                    if ( $post_id ) {
+                        $edit_url   = get_edit_post_link( $post_id );
+                        $post_title = get_the_title( $post_id );
+                        $link_label = $post_title ?: ( 'Post #' . $post_id );
+                        echo ' &mdash; <a href="' . esc_url( (string) $edit_url ) . '" style="font-size:12px;" target="_blank">' . esc_html( $link_label ) . '</a>';
+                    }
+                    if ( $detail ) {
+                        echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
+                    }
+                    echo '</div>';
+                    echo '<button class="aspera-exc-btn" data-action="add" data-nonce="' . esc_attr( $nonce ) . '" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '" title="Negeer deze violation">Negeer</button>';
+                    echo '</div>';
                 }
-                if ( $detail ) {
-                    echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
+            }
+
+            // ── Genegeerde violations ─────────────────────────────────────
+            if ( ! empty( $ignored_viols ) ) {
+                echo '<div style="margin-top:4px;border-top:1px dashed #dcdcde;padding-top:4px;">';
+                foreach ( $ignored_viols as $v ) {
+                    $sev     = $v['severity'] ?? 'warning';
+                    $rule    = esc_html( $v['rule'] ?? '' );
+                    $detail  = esc_html( $v['detail'] ?? '' );
+                    $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
+                    $eid     = esc_attr( $v['_exc_id'] ?? '' );
+
+                    echo '<div class="aspera-viol-row aspera-ignored" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<span style="color:#a7aaad;font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
+                    echo '<div style="flex:1;min-width:0;">';
+                    echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;text-decoration:line-through;color:#a7aaad;">' . $rule . '</code>';
+                    echo '&ensp;<span style="font-size:11px;color:#a7aaad;font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
+                    if ( $post_id ) {
+                        $post_title = get_the_title( $post_id );
+                        $link_label = $post_title ?: ( 'Post #' . $post_id );
+                        echo ' &mdash; <span style="font-size:12px;color:#a7aaad;">' . esc_html( $link_label ) . '</span>';
+                    }
+                    if ( $detail ) {
+                        echo '<br><span style="color:#a7aaad;font-size:12px;word-break:break-word;">' . $detail . '</span>';
+                    }
+                    echo '</div>';
+                    echo '<button class="aspera-exc-btn is-excepted" data-action="remove" data-nonce="' . esc_attr( $nonce ) . '" data-exc-id="' . $eid . '" title="Herstel deze violation">Herstel</button>';
+                    echo '</div>';
                 }
-                echo '</div>';
                 echo '</div>';
             }
         }
@@ -1096,34 +1219,89 @@ function aspera_dashboard_widget_script(): void {
     ?>
     <script>
     (function () {
-        var btn = document.getElementById('aspera-refresh-btn');
-        if (!btn) return;
-        btn.addEventListener('click', function () {
-            btn.disabled = true;
-            var status = document.getElementById('aspera-refresh-status');
-            status.style.color = '#72777c';
-            status.textContent = 'Audit wordt uitgevoerd\u2026 (dit kan 5\u201320 seconden duren)';
+        var refreshBtn = document.getElementById('aspera-refresh-btn');
+        var status     = document.getElementById('aspera-refresh-status');
+
+        function runAudit(statusMsg) {
+            if (!refreshBtn) return;
+            refreshBtn.disabled = true;
+            if (status) {
+                status.style.color   = '#72777c';
+                status.textContent   = statusMsg || 'Audit wordt uitgevoerd\u2026 (dit kan 5\u201320 seconden duren)';
+            }
             fetch(ajaxurl, {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body:    'action=aspera_refresh_audit&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                body:    'action=aspera_refresh_audit&nonce=' + encodeURIComponent(refreshBtn.dataset.nonce)
             })
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (data.success) {
-                    status.style.color = '#00a32a';
-                    status.textContent = 'Klaar \u2014 pagina herlaadt\u2026';
+                    if (status) {
+                        status.style.color  = '#00a32a';
+                        status.textContent  = 'Klaar \u2014 pagina herlaadt\u2026';
+                    }
                     setTimeout(function () { location.reload(); }, 800);
                 } else {
-                    status.style.color = '#d63638';
-                    status.textContent = 'Fout: ' + (data.data || 'onbekend');
-                    btn.disabled = false;
+                    if (status) {
+                        status.style.color = '#d63638';
+                        status.textContent = 'Fout: ' + (data.data || 'onbekend');
+                    }
+                    refreshBtn.disabled = false;
                 }
             })
             .catch(function () {
-                status.style.color = '#d63638';
-                status.textContent = 'Netwerkfout \u2014 probeer opnieuw.';
-                btn.disabled = false;
+                if (status) {
+                    status.style.color = '#d63638';
+                    status.textContent = 'Netwerkfout \u2014 probeer opnieuw.';
+                }
+                refreshBtn.disabled = false;
+            });
+        }
+
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', function () { runAudit(); });
+        }
+
+        // ── Negeer / Herstel knoppen ──────────────────────────────────────────
+        document.querySelectorAll('.aspera-exc-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var action   = btn.dataset.action;
+                var nonce    = btn.dataset.nonce;
+                var excId    = btn.dataset.excId;
+                var category = btn.dataset.category;
+                var rule     = btn.dataset.rule;
+                var postId   = btn.dataset.postId || '0';
+
+                btn.disabled    = true;
+                btn.textContent = '\u2026';
+
+                var body = action === 'add'
+                    ? 'action=aspera_add_exception&nonce=' + encodeURIComponent(nonce)
+                        + '&category=' + encodeURIComponent(category)
+                        + '&rule='     + encodeURIComponent(rule)
+                        + '&post_id='  + encodeURIComponent(postId)
+                    : 'action=aspera_remove_exception&nonce=' + encodeURIComponent(nonce)
+                        + '&exception_id=' + encodeURIComponent(excId);
+
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    body
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        runAudit('Uitzondering opgeslagen \u2014 audit wordt bijgewerkt\u2026');
+                    } else {
+                        btn.disabled    = false;
+                        btn.textContent = action === 'add' ? 'Negeer' : 'Herstel';
+                    }
+                })
+                .catch(function () {
+                    btn.disabled    = false;
+                    btn.textContent = action === 'add' ? 'Negeer' : 'Herstel';
+                });
             });
         });
     })();
@@ -5808,6 +5986,32 @@ add_action( 'rest_api_init', function () {
                 'error'           => $meta_val['_error'] ?? null,
             ];
 
+            // ── Uitzonderingen laden en markeren ─────────────────────────
+            $exc_raw   = get_option( 'aspera_audit_exceptions', [] );
+            $exc_index = [];
+            if ( is_array( $exc_raw ) ) {
+                foreach ( $exc_raw as $e ) {
+                    $exc_index[ $e['id'] ] = true;
+                }
+            }
+            // Voeg exception_id toe aan elke violation; markeer genegeerde
+            foreach ( $categories as $cat_key => &$cat_ref ) {
+                $active = 0;
+                foreach ( $cat_ref['violations'] as &$vref ) {
+                    $pid  = (int) ( $vref['post_id'] ?? 0 );
+                    $eid  = md5( $cat_key . '|' . ( $vref['rule'] ?? '' ) . '|' . $pid );
+                    $vref['exception_id'] = $eid;
+                    if ( isset( $exc_index[ $eid ] ) ) {
+                        $vref['is_excepted'] = true;
+                    } else {
+                        $active++;
+                    }
+                }
+                unset( $vref );
+                $cat_ref['violation_count'] = $active;
+            }
+            unset( $cat_ref );
+
             // ── Health score berekenen ────────────────────────────────────
             $total_deductions = 0;
             $category_scores  = [];
@@ -5820,6 +6024,7 @@ add_action( 'rest_api_init', function () {
                 } else {
                     $deductions = 0;
                     foreach ( $cat_data['violations'] as $v ) {
+                        if ( $v['is_excepted'] ?? false ) continue; // genegeerd — niet aftrekken
                         $sev = $v['severity'] ?? 'warning';
                         $deductions += $severity_points[ $sev ] ?? 1;
                     }
@@ -5847,10 +6052,11 @@ add_action( 'rest_api_init', function () {
                 $traffic_light = 'red';
             }
 
-            // ── Severity summary ──────────────────────────────────────────
+            // ── Severity summary (alleen actieve violations) ──────────────
             $severity_counts = [ 'critical' => 0, 'error' => 0, 'warning' => 0, 'observation' => 0 ];
             foreach ( $categories as $cat_data ) {
                 foreach ( $cat_data['violations'] as $v ) {
+                    if ( $v['is_excepted'] ?? false ) continue;
                     $sev = $v['severity'] ?? 'warning';
                     if ( isset( $severity_counts[ $sev ] ) ) {
                         $severity_counts[ $sev ]++;
