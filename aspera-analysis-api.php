@@ -1,0 +1,5272 @@
+<?php
+/**
+ * Plugin Name: Aspera Analysis API
+ * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
+ * Version: 1.35.0
+ * Author: Aspera
+ */
+
+if ( ! defined( 'ABSPATH' ) ) exit;
+
+// ─── Plugin Update Checker ────────────────────────────────────────────────────
+require_once plugin_dir_path( __FILE__ ) . 'plugin-update-checker/plugin-update-checker.php';
+use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
+$aspera_updater = PucFactory::buildUpdateChecker(
+    'https://github.com/asperagrafica/aspera-analysis-api/',
+    __FILE__,
+    'aspera-analysis-api'
+);
+$aspera_updater->setAuthentication( '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' );
+$aspera_updater->setBranch( 'main' );
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Strips only empty strings and empty arrays recursively.
+ * Preserves all theme-specific values including animation, color,
+ * visibility, and hide_on_states — these are workflow-relevant.
+ */
+function aspera_strip_empty( array $data ): array {
+    $result = [];
+    foreach ( $data as $key => $value ) {
+        if ( $value === '' || $value === [] ) continue;
+        if ( is_array( $value ) ) {
+            $value = aspera_strip_empty( $value );
+            if ( $value === [] ) continue;
+        }
+        $result[ $key ] = $value;
+    }
+    return $result;
+}
+
+/**
+ * Valideert de WPBakery shortcodes van één post op beleidsschendingen.
+ * Geeft een array terug met 'violations' en 'shortcode_count'.
+ * Wordt gebruikt door zowel /wpb/validate/{id} als /wpb/validate/all.
+ */
+function aspera_wpb_validate_post( WP_Post $post ): array {
+
+    $content   = get_post_field( 'post_content', $post->ID, 'raw' );
+    $post_type = $post->post_type;
+
+    // Hardcoded tekst alleen controleren in template post types
+    $check_text = in_array( $post_type, [ 'us_content_template', 'us_page_block' ], true );
+
+    preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $matches, PREG_SET_ORDER );
+
+    // Pre-pass: tel siblings per container voor us_page_block parent_row controle.
+    $container_tags_list = [ 'vc_row', 'vc_column', 'vc_row_inner', 'vc_column_inner' ];
+    $cstack              = [];
+    $pb_sibling          = [];
+
+    preg_match_all( '/\[(\/?[\w]+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $all_sc, PREG_SET_ORDER );
+
+    foreach ( $all_sc as $sc ) {
+        $raw_tag    = $sc[1];
+        $sc_attrs   = trim( $sc[2] );
+        $is_closing = ( $raw_tag[0] === '/' );
+        $clean_tag  = $is_closing ? substr( $raw_tag, 1 ) : $raw_tag;
+
+        if ( $is_closing && in_array( $clean_tag, $container_tags_list, true ) ) {
+            if ( ! empty( $cstack ) ) {
+                $finished = array_pop( $cstack );
+                foreach ( $finished['pb_attrs'] as $pb_key ) {
+                    $pb_sibling[ $pb_key ] = $finished['count'];
+                }
+            }
+        } elseif ( ! $is_closing && in_array( $clean_tag, $container_tags_list, true ) ) {
+            $cstack[] = [ 'count' => 0, 'pb_attrs' => [] ];
+        } elseif ( ! $is_closing && ! empty( $cstack ) ) {
+            $top = count( $cstack ) - 1;
+            $cstack[ $top ]['count']++;
+            if ( $clean_tag === 'us_page_block' ) {
+                $cstack[ $top ]['pb_attrs'][] = $sc_attrs;
+            }
+        }
+    }
+
+    $violations = [];
+
+    foreach ( $matches as $m ) {
+        $tag     = $m[1];
+        $attrs   = $m[2];
+        $snippet = substr( trim( $attrs ), 0, 80 );
+
+        $attr = function ( string $name ) use ( $attrs ): ?string {
+            return preg_match( '/\b' . $name . '="([^"]*)"/', $attrs, $v ) ? $v[1] : null;
+        };
+
+        // ─── vc_row / vc_column ───────────────────────────────────────
+        if ( in_array( $tag, [ 'vc_row', 'vc_column' ], true ) ) {
+
+            if ( preg_match( '/\bcss="/', $attrs ) ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'css_forbidden',
+                    'detail' => 'css= attribuut aanwezig', 'snippet' => $snippet ];
+            }
+
+            if ( $tag === 'vc_row' ) {
+
+                if ( preg_match( '/\bscroll_effect="1"/', $attrs ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'scroll_effect_forbidden',
+                        'detail' => 'scroll_effect="1" aanwezig', 'snippet' => $snippet ];
+                }
+
+                $bg_image = $attr( 'us_bg_image' );
+                if ( $bg_image !== null && ctype_digit( $bg_image ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_bg_image',
+                        'detail' => 'us_bg_image="' . $bg_image . '" — gebruik ACF veldslug in us_bg_image_source',
+                        'snippet' => $snippet ];
+                }
+
+                $bg_video = $attr( 'us_bg_video' );
+                if ( $bg_video !== null && preg_match( '/^https?:/', $bg_video ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_bg_video',
+                        'detail' => 'us_bg_video="' . $bg_video . '" — gebruik {{veldslug}}',
+                        'snippet' => $snippet ];
+                }
+            }
+        }
+
+        // ─── us_post_custom_field ─────────────────────────────────────
+        if ( $tag === 'us_post_custom_field' ) {
+            $key = $attr( 'key' ) ?? '';
+
+            if ( preg_match( '/\bcss="/', $attrs ) ) {
+                $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'css_forbidden',
+                    'detail' => 'css= attribuut aanwezig' ];
+            }
+
+            if ( $attr( 'hide_empty' ) !== '1' ) {
+                $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_hide_empty',
+                    'detail' => 'hide_empty="1" ontbreekt' ];
+            }
+
+            if ( $attr( 'color_link' ) !== '0' ) {
+                $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_color_link',
+                    'detail' => 'color_link="0" ontbreekt' ];
+            }
+        }
+
+        // ─── us_btn ───────────────────────────────────────────────────
+        if ( $tag === 'us_btn' ) {
+            $label     = $attr( 'label' ) ?? '';
+            $link_raw  = $attr( 'link' );
+            $link_data = $link_raw !== null ? json_decode( urldecode( $link_raw ), true ) : null;
+
+            if ( $attr( 'hide_with_empty_link' ) !== '1' ) {
+                $violations[] = [ 'tag' => $tag, 'label' => $label,
+                    'rule' => 'missing_hide_with_empty_link',
+                    'detail' => 'hide_with_empty_link="1" ontbreekt' ];
+            }
+
+            $el_class = $attr( 'el_class' );
+            if ( $el_class === null || $el_class === '' ) {
+                $violations[] = [ 'tag' => $tag, 'label' => $label,
+                    'rule' => 'missing_el_class',
+                    'detail' => 'el_class ontbreekt op us_btn' ];
+            }
+
+            // ─── empty_btn_style: style="" aanwezig ────────────────────────
+            $style = $attr( 'style' );
+            if ( $style !== null && $style === '' ) {
+                $violations[] = [ 'tag' => $tag, 'label' => $label,
+                    'rule'   => 'empty_btn_style',
+                    'detail' => 'style="" — stijl was ingesteld maar het button-stijlobject bestaat niet meer in Impreza' ];
+            }
+
+            if ( preg_match( '/\{\{bl_[\w_]+\}\}/', $label ) ) {
+                if ( ! isset( $link_data['type'] ) || $link_data['type'] !== 'custom_field' || empty( $link_data['custom_field'] ) ) {
+                    $violations[] = [ 'tag' => $tag, 'label' => $label,
+                        'rule'   => 'missing_acf_link',
+                        'detail' => 'label verwijst naar ACF bl_-veld maar link= heeft geen custom_field verwijzing' ];
+                }
+            }
+
+            // ─── hardcoded_link: hardcoded URL in link= ───────────────
+            if ( is_array( $link_data )
+                 && ( ! isset( $link_data['type'] ) || $link_data['type'] !== 'custom_field' )
+                 && ! empty( $link_data['url'] ) ) {
+                $violations[] = [ 'tag' => $tag, 'label' => $label,
+                    'rule'   => 'hardcoded_link',
+                    'detail' => 'link= bevat hardcoded URL "' . $link_data['url'] . '" — gebruik een ACF custom_field verwijzing' ];
+            }
+
+            // ─── wrong_link_field_prefix: opt_ veld zonder option/ ────
+            if ( isset( $link_data['type'] ) && $link_data['type'] === 'custom_field'
+                 && ! empty( $link_data['custom_field'] )
+                 && preg_match( '/^opt_/', $link_data['custom_field'] ) ) {
+                $violations[] = [ 'tag' => $tag, 'label' => $label,
+                    'rule'   => 'wrong_link_field_prefix',
+                    'detail' => 'link= verwijst naar option page veld "' . $link_data['custom_field'] . '" zonder option/ prefix — gebruik "option/' . $link_data['custom_field'] . '"' ];
+            }
+        }
+
+        // ─── us_page_block ────────────────────────────────────────────
+        if ( $tag === 'us_page_block' ) {
+            $remove_rows = $attr( 'remove_rows' );
+            $pb_id       = $attr( 'id' ) ?? '';
+            $pb_title    = $pb_id ? get_the_title( (int) $pb_id ) : '';
+            $pb_ref      = $pb_id ? 'page block #' . $pb_id . ( $pb_title ? ' (' . $pb_title . ')' : '' ) : '';
+
+            if ( $remove_rows === null || $remove_rows === '' ) {
+                $violations[] = [
+                    'tag'    => $tag, 'id' => $pb_id,
+                    'rule'   => 'missing_remove_rows',
+                    'detail' => $pb_ref . ' — remove_rows ontbreekt — voeg remove_rows="1" toe',
+                ];
+            } elseif ( $remove_rows === 'parent_row' ) {
+                $sibling_count = $pb_sibling[ trim( $attrs ) ] ?? 0;
+                if ( $sibling_count > 1 ) {
+                    $violations[] = [
+                        'tag'    => $tag, 'id' => $pb_id,
+                        'rule'   => 'parent_row_with_siblings',
+                        'detail' => $pb_ref . ' — remove_rows="parent_row" maar de parent container bevat ' . $sibling_count . ' elementen — gebruik remove_rows="1"',
+                    ];
+                }
+            }
+        }
+
+        // ─── us_image ─────────────────────────────────────────────────
+        if ( $tag === 'us_image' ) {
+            $image = $attr( 'image' );
+            if ( $image !== null && ctype_digit( $image ) ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_image',
+                    'detail' => 'image="' . $image . '" — hardcoded media-ID; gebruik {{veldslug}} of een ACF-veldverwijzing' ];
+            }
+        }
+
+        // ─── vc_video ─────────────────────────────────────────────────
+        if ( $tag === 'vc_video' ) {
+            if ( preg_match( '/\bkey="/', $attrs ) && $attr( 'source' ) === null ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'vc_video_wrong_attribute',
+                    'detail' => 'key= aanwezig — gebruik source= voor de oEmbed veldslug',
+                    'snippet' => $snippet ];
+            }
+        }
+
+        // ─── empty_style_attr: lege *_style attribuut op us_* elementen ─
+        if ( strpos( $tag, 'us_' ) === 0 ) {
+            if ( preg_match_all( '/\b((?:\w+_)?style)=""/', $attrs, $style_m ) ) {
+                foreach ( $style_m[1] as $style_attr ) {
+                    // us_btn style="" wordt al afgevangen als empty_btn_style
+                    if ( $tag === 'us_btn' && $style_attr === 'style' ) continue;
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'empty_style_attr',
+                        'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza' ];
+                }
+            }
+        }
+
+        // ─── Wrong option syntax: {{option: in plaats van {{option/ ──
+        if ( strpos( $attrs, '{{option:' ) !== false ) {
+            if ( preg_match_all( '/\b([\w_]+)="([^"]*\{\{option:[^}]*\}\}[^"]*)"/', $attrs, $opt_m, PREG_SET_ORDER ) ) {
+                foreach ( $opt_m as $om ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'wrong_option_syntax',
+                        'detail' => $om[1] . '="' . $om[2] . '" — gebruik {{option/veldslug}} in plaats van {{option:veldslug}}' ];
+                }
+            }
+        }
+
+        // ─── Hardcoded tekst (alleen templates en page blocks) ────────
+        if ( $check_text ) {
+            foreach ( [ 'label', 'text' ] as $attr_name ) {
+                $val = $attr( $attr_name );
+                if ( $val === null || $val === '' ) continue;
+                if ( preg_match( '/^\{\{[\w_\/]+\}\}$/', $val ) ) continue;
+                if ( strpos( $val, '%7B' ) === 0 || strpos( $val, '%7b' ) === 0 ) continue;
+                if ( preg_match( '/[a-zA-Z]/', $val ) && ! preg_match( '/^[\w_]+$/', $val ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_' . $attr_name,
+                        'detail' => $attr_name . '="' . $val . '" — hardcoded tekst in template/page block' ];
+                }
+            }
+        }
+
+        // ─── animate_detected: appear animatie aanwezig (universeel) ──
+        $animate = $attr( 'animate' );
+        if ( $animate !== null && $animate !== '' ) {
+            $violations[] = [ 'tag' => $tag, 'rule' => 'animate_detected',
+                'detail' => 'animate="' . $animate . '" — appear animatie aanwezig', 'snippet' => $snippet ];
+        }
+
+        // ─── responsive_hide_detected: verborgen op breakpoint (universeel) ──
+        $hide_bps = [];
+        foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+            if ( $attr( 'hide_on_' . $bp ) === '1' ) {
+                $hide_bps[] = $bp;
+            }
+        }
+        if ( ! empty( $hide_bps ) ) {
+            $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_hide_detected',
+                'detail' => 'verborgen op: ' . implode( ', ', $hide_bps ), 'snippet' => $snippet ];
+        }
+    }
+
+    return [
+        'violations'      => $violations,
+        'shortcode_count' => count( $matches ),
+        'post_type'       => $post_type,
+    ];
+}
+
+/**
+ * Extraheert een genormaliseerde tag-reeks uit WPBakery post_content.
+ * Attributen worden genegeerd — alleen de volgorde van shortcode-tags telt.
+ * Sluitende tags worden uitgefilterd zodat alleen opening tags overblijven.
+ */
+function aspera_tag_sequence( string $content ): array {
+    preg_match_all( '/\[(\w+)(?:"[^"]*"|\'[^\']*\'|[^\]])*\]/', $content, $m );
+    return $m[1];
+}
+
+/**
+ * Berekent de structurele gelijkenis tussen twee tag-reeksen via LCS.
+ * Geeft een waarde tussen 0.0 (volledig anders) en 1.0 (identiek).
+ * Formule: 2 * LCS_lengte / (lengte_a + lengte_b)
+ */
+function aspera_sequence_similarity( array $a, array $b ): float {
+    $la = count( $a );
+    $lb = count( $b );
+    if ( $la === 0 && $lb === 0 ) return 1.0;
+    if ( $la === 0 || $lb === 0 ) return 0.0;
+
+    // Longest Common Subsequence via dynamisch programmeren
+    $dp = array_fill( 0, $la + 1, array_fill( 0, $lb + 1, 0 ) );
+    for ( $i = 1; $i <= $la; $i++ ) {
+        for ( $j = 1; $j <= $lb; $j++ ) {
+            $dp[$i][$j] = ( $a[ $i - 1 ] === $b[ $j - 1 ] )
+                ? $dp[$i-1][$j-1] + 1
+                : max( $dp[$i-1][$j], $dp[$i][$j-1] );
+        }
+    }
+
+    return ( 2 * $dp[$la][$lb] ) / ( $la + $lb );
+}
+
+/**
+ * Whitelist van geldige Impreza CSS var-namen.
+ * Formaat: naam zonder --color- prefix, hyphens vervangen door underscores.
+ * In shortcodes/JSON opgeslagen als _varnaam; in CSS als var(--color-varnaam).
+ * Leest dynamisch de actieve Impreza kleurenschema-waarden uit de database.
+ * Geeft een array terug met twee keys:
+ * - 'whitelist' : array van var-namen (zonder _-prefix) die geldig zijn
+ * - 'hex_map'   : array van strtolower(#hex) => [var_naam, ...] voor auto-suggesties
+ */
+function aspera_get_color_scheme(): array {
+    // usof_options_Impreza bevat de live kleurwaarden na aanpassing via de Theme Options UI.
+    // usof_style_schemes_Impreza bevat alleen de presets — niet de actuele staat.
+    $options = get_option( 'usof_options_Impreza', [] );
+    if ( empty( $options ) || ! is_array( $options ) ) {
+        return [ 'whitelist' => [], 'hex_map' => [] ];
+    }
+
+    $whitelist = [];
+    $hex_map   = [];
+
+    foreach ( $options as $key => $value ) {
+        if ( strpos( $key, 'color_' ) !== 0 ) continue;
+        if ( ! is_string( $value ) ) continue;
+
+        $var_name    = substr( $key, 6 );
+        $whitelist[] = $var_name;
+
+        // Alleen simpele hex-waarden opnemen in hex_map
+        if ( preg_match( '/^#[0-9a-fA-F]{3,8}$/', $value ) ) {
+            $hex_lower = strtolower( $value );
+            $hex_map[ $hex_lower ][] = $var_name;
+        }
+    }
+
+    return [ 'whitelist' => array_unique( $whitelist ), 'hex_map' => $hex_map ];
+}
+
+/**
+ * Bekende Impreza vars die buiten het kleurenschema (usof_style_schemes_Impreza) vallen.
+ * Herkomst onbekend — mogelijk interne Impreza vars voor transparante header-modus.
+ * Worden als geldig behandeld totdat Impreza uitsluitsel geeft.
+ *
+ * @return string[]
+ */
+function aspera_impreza_extra_vars(): array {
+    static $vars = [
+        'header_top_transparent_bg',
+        'header_top_transparent_text',
+        'header_top_transparent_text_hover',
+        'header_transparent_bg',
+        'alt_content_overlay_grad',
+        'content_overlay_grad',
+    ];
+    return $vars;
+}
+
+/**
+ * Valideert één kleurwaarde tegen het Impreza kleurbeleid.
+ * Geeft null terug als de waarde correct is.
+ * Geeft een array terug met 'rule', 'detail' en 'severity' als er een probleem is.
+ *
+ * Toegestaan:
+ * - Leeg, transparent, inherit, initial, unset
+ * - #fff, #ffffff, #000, #000000 (hardcoded wit/zwart)
+ * - _varnaam die overeenkomt met een Impreza CSS var (whitelist)
+ *
+ * Fout:
+ * - _bd795c — hex-code als var-naam (deprecated_hex_var)
+ * - _cc1 / _rood — onbekende custom var-naam (deprecated_custom_var)
+ * - #613912 — hardcoded hex anders dan wit/zwart (hardcoded_hex_color)
+ *
+ * Observatie:
+ * - rgba(0,0,0,0.1) — native CSS kleur, mogelijk vervangbaar (rgba_color)
+ *
+ * @param string $value      De te valideren kleurwaarde
+ * @param string $attr_name  Naam van het attribuut (voor rapportage)
+ * @param array  $whitelist  Geldige Impreza var-namen (uit aspera_get_color_scheme)
+ * @param array  $hex_map    Hex → var-namen mapping voor auto-suggesties
+ */
+function aspera_validate_color_value( string $value, string $attr_name, array $whitelist, array $hex_map = [] ): ?array {
+
+    if ( $value === '' ) return null;
+
+    // Toegestane CSS keywords
+    if ( in_array( $value, [ 'transparent', 'inherit', 'initial', 'unset' ], true ) ) return null;
+
+    // rgba / hsla: observatie — niet per se fout, maar rapporteren
+    if ( preg_match( '/^rgba?\s*\(/i', $value ) || preg_match( '/^hsla?\s*\(/i', $value ) ) {
+        return [
+            'rule'     => 'rgba_color',
+            'detail'   => $attr_name . '="' . $value . '" — rgba/hsla waarde; mogelijk vervangbaar door een Impreza CSS var',
+            'severity' => 'observation',
+        ];
+    }
+
+    // #fff en #000 (alle varianten) zijn toegestaan als hardcoded
+    if ( in_array( strtolower( $value ), [ '#fff', '#ffffff', '#000', '#000000' ], true ) ) return null;
+
+    // Overige hardcoded hex
+    if ( preg_match( '/^#[0-9a-fA-F]{3,8}$/', $value ) ) {
+        $hex_key     = strtolower( $value );
+        $suggestions = isset( $hex_map[ $hex_key ] ) ? array_map( fn( $n ) => '_' . $n, $hex_map[ $hex_key ] ) : [];
+        $result      = [
+            'rule'     => 'hardcoded_hex_color',
+            'detail'   => $attr_name . '="' . $value . '" — hardcoded hex kleur; gebruik een Impreza CSS var',
+            'severity' => 'error',
+        ];
+        if ( ! empty( $suggestions ) ) {
+            $result['suggestion'] = implode( ' / ', $suggestions );
+        }
+        return $result;
+    }
+
+    // _ prefix: var-verwijzing
+    if ( isset( $value[0] ) && $value[0] === '_' ) {
+        $var_name = substr( $value, 1 );
+
+        // Geldig Impreza var
+        if ( in_array( $var_name, $whitelist, true ) ) return null;
+
+        // Bekende Impreza var buiten kleurenschema (uitzondering)
+        if ( in_array( $var_name, aspera_impreza_extra_vars(), true ) ) return null;
+
+        // Hex-code als var-naam: _bd795c, _fff, _000, etc.
+        if ( preg_match( '/^[0-9a-fA-F]{3,8}$/', $var_name ) ) {
+            $hex_key     = '#' . strtolower( $var_name );
+            $suggestions = isset( $hex_map[ $hex_key ] ) ? array_map( fn( $n ) => '_' . $n, $hex_map[ $hex_key ] ) : [];
+            $result      = [
+                'rule'     => 'deprecated_hex_var',
+                'detail'   => $attr_name . '="' . $value . '" — hex-code als CSS var; vervang door bijpassende Impreza CSS var',
+                'severity' => 'error',
+            ];
+            if ( ! empty( $suggestions ) ) {
+                $result['suggestion'] = implode( ' / ', $suggestions );
+            }
+            return $result;
+        }
+
+        // Onbekende custom var: _cc1, _rood, _primair, etc.
+        return [
+            'rule'     => 'deprecated_custom_var',
+            'detail'   => $attr_name . '="' . $value . '" — onbekende custom CSS var; vervang door een Impreza CSS var',
+            'severity' => 'error',
+        ];
+    }
+
+    return null;
+}
+
+/**
+ * Doorzoekt recursief een JSON-array op kleurkeys en verzamelt violations.
+ * Wordt gebruikt voor us_header en us_grid_layout post_content.
+ *
+ * @param array    $data        Te doorzoeken data
+ * @param WP_Post  $post        De post waaruit de data afkomstig is
+ * @param array    $violations   Bijgewerkte violations array (by reference)
+ * @param array    $observations Bijgewerkte observations array (by reference)
+ * @param array    $whitelist    Geldige Impreza var-namen (uit aspera_get_color_scheme)
+ * @param array    $hex_map      Hex → var-namen mapping voor auto-suggesties
+ * @param string   $path         Huidige JSON-path voor rapportage
+ */
+function aspera_find_color_violations_in_json( array $data, WP_Post $post, array &$violations, array &$observations, array $whitelist, array $hex_map = [], string $path = '' ): void {
+    foreach ( $data as $key => $value ) {
+        $current_path = $path !== '' ? $path . '.' . $key : (string) $key;
+
+        if ( is_array( $value ) ) {
+            aspera_find_color_violations_in_json( $value, $post, $violations, $observations, $whitelist, $hex_map, $current_path );
+            continue;
+        }
+
+        if ( ! is_string( $value ) || $value === '' ) continue;
+
+        // Alleen keys die 'color' bevatten
+        if ( strpos( (string) $key, 'color' ) === false ) continue;
+
+        $issue = aspera_validate_color_value( $value, (string) $key, $whitelist, $hex_map );
+        if ( $issue === null ) continue;
+
+        $entry = [
+            'post_id'    => (int) $post->ID,
+            'post_type'  => $post->post_type,
+            'post_title' => $post->post_title,
+            'source'     => 'json',
+            'path'       => $current_path,
+            'attribute'  => (string) $key,
+            'value'      => $value,
+            'rule'       => $issue['rule'],
+            'detail'     => $issue['detail'],
+            'severity'   => $issue['severity'],
+        ];
+
+        if ( isset( $issue['suggestion'] ) ) {
+            $entry['suggestion'] = $issue['suggestion'];
+        }
+
+        if ( $issue['severity'] === 'observation' ) {
+            $observations[] = $entry;
+        } else {
+            $violations[] = $entry;
+        }
+    }
+}
+
+/**
+ * Scant aanvullende kleurlocaties in us_grid_layout en us_header JSON die niet
+ * door aspera_find_color_violations_in_json worden opgepikt:
+ *
+ * 1. Element-level `css` objecten — opgeslagen als URL-encoded JSON string per element,
+ *    waardoor de recursieve scanner ze als string overslaat. Bevat CSS-properties als
+ *    `background-color`, `color`, `border-color` etc.
+ *
+ * 2. Tegel-level `default.options.color_*` instellingen — direct in de tegel-config,
+ *    bijv. `color_bg`, `color_text`, `color_border`.
+ */
+function aspera_scan_grid_extended_colors( array $data, WP_Post $post, array &$violations, array &$observations, array $whitelist, array $hex_map ): void {
+
+    // ── 1. Element-level css objecten ────────────────────────────────────────
+    if ( ! empty( $data['data'] ) && is_array( $data['data'] ) ) {
+        foreach ( $data['data'] as $element_key => $element ) {
+            if ( ! is_array( $element ) ) continue;
+
+            $css_raw = $element['css'] ?? null;
+            if ( $css_raw === null || $css_raw === '' ) continue;
+
+            // css kan een geparsde array zijn of een URL-encoded JSON string
+            $css_data = is_array( $css_raw )
+                ? $css_raw
+                : ( is_string( $css_raw ) ? json_decode( urldecode( $css_raw ), true ) : null );
+
+            if ( ! is_array( $css_data ) ) continue;
+
+            aspera_scan_css_object_for_colors(
+                $css_data, (string) $element_key, 'css',
+                $post, $violations, $observations, $whitelist, $hex_map
+            );
+        }
+    }
+
+    // ── 2. Tegel-level default.options.color_* ───────────────────────────────
+    $options = $data['default']['options'] ?? null;
+    if ( ! is_array( $options ) ) return;
+
+    foreach ( $options as $key => $value ) {
+        if ( strpos( (string) $key, 'color' ) === false ) continue;
+        if ( ! is_string( $value ) || $value === '' ) continue;
+
+        $issue = aspera_validate_color_value( $value, (string) $key, $whitelist, $hex_map );
+        if ( $issue === null ) continue;
+
+        $entry = [
+            'post_id'    => (int) $post->ID,
+            'post_type'  => $post->post_type,
+            'post_title' => $post->post_title,
+            'source'     => 'json',
+            'path'       => 'default.options.' . $key,
+            'attribute'  => (string) $key,
+            'value'      => $value,
+            'rule'       => $issue['rule'],
+            'detail'     => $issue['detail'],
+            'severity'   => $issue['severity'],
+        ];
+        if ( isset( $issue['suggestion'] ) ) $entry['suggestion'] = $issue['suggestion'];
+        if ( $issue['severity'] === 'observation' ) $observations[] = $entry; else $violations[] = $entry;
+    }
+}
+
+/**
+ * Doorzoekt recursief een gedecodeerd CSS-object (breakpoint → property → waarde)
+ * op hardcoded of deprecated kleurwaarden.
+ *
+ * @param array   $data         Het gedecodeerde CSS-object
+ * @param string  $element_key  Elementsleutel uit data[] (bijv. "vwrapper:2")
+ * @param string  $path_prefix  Huidig pad voor rapportage (bijv. "css.default")
+ */
+function aspera_scan_css_object_for_colors( array $data, string $element_key, string $path_prefix, WP_Post $post, array &$violations, array &$observations, array $whitelist, array $hex_map ): void {
+    foreach ( $data as $key => $value ) {
+        $current_path = $path_prefix . '.' . $key;
+
+        if ( is_array( $value ) ) {
+            aspera_scan_css_object_for_colors(
+                $value, $element_key, $current_path,
+                $post, $violations, $observations, $whitelist, $hex_map
+            );
+            continue;
+        }
+
+        if ( ! is_string( $value ) || $value === '' ) continue;
+
+        // Alleen CSS-properties met 'color' in de naam (color, background-color, border-color etc.)
+        if ( strpos( (string) $key, 'color' ) === false ) continue;
+
+        $issue = aspera_validate_color_value( $value, (string) $key, $whitelist, $hex_map );
+        if ( $issue === null ) continue;
+
+        $entry = [
+            'post_id'    => (int) $post->ID,
+            'post_type'  => $post->post_type,
+            'post_title' => $post->post_title,
+            'source'     => 'json',
+            'path'       => 'data.' . $element_key . '.' . $current_path,
+            'attribute'  => (string) $key,
+            'value'      => $value,
+            'rule'       => $issue['rule'],
+            'detail'     => $issue['detail'],
+            'severity'   => $issue['severity'],
+        ];
+        if ( isset( $issue['suggestion'] ) ) $entry['suggestion'] = $issue['suggestion'];
+        if ( $issue['severity'] === 'observation' ) $observations[] = $entry; else $violations[] = $entry;
+    }
+}
+
+/**
+ * Verifieert de geheime sleutel op elk REST-verzoek.
+ * Sleutel wordt meegegeven als query-parameter: ?aspera_key=...
+ * Opgeslagen in wp_options onder 'aspera_secret_key' (autoload: no).
+ */
+function aspera_check_key( WP_REST_Request $req ): true|WP_Error {
+    $stored = get_option( 'aspera_secret_key', '' );
+    if ( empty( $stored ) ) {
+        return new WP_Error( 'no_key', 'Aspera secret key niet geconfigureerd.', [ 'status' => 500 ] );
+    }
+    $provided = (string) ( $req->get_param( 'aspera_key' ) ?? '' );
+    if ( ! hash_equals( $stored, $provided ) ) {
+        return new WP_Error( 'unauthorized', 'Ongeldige of ontbrekende aspera_key.', [ 'status' => 401 ] );
+    }
+    return true;
+}
+
+/**
+ * Genereert het site-paspoort: een snapshot van templates, page blocks,
+ * field groups, custom post types en option pages.
+ */
+function aspera_generate_passport(): array {
+    global $wpdb;
+
+    $templates = get_posts( [
+        'post_type'      => 'us_content_template',
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        'orderby'        => 'title',
+        'order'          => 'ASC',
+    ] );
+
+    $page_blocks = get_posts( [
+        'post_type'      => 'us_page_block',
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        'orderby'        => 'title',
+        'order'          => 'ASC',
+    ] );
+
+    $field_groups = [];
+    if ( function_exists( 'acf_get_field_groups' ) ) {
+        foreach ( acf_get_field_groups() as $group ) {
+            $fields         = acf_get_fields( $group['key'] );
+            $field_groups[] = [
+                'id'          => $group['ID'],
+                'title'       => $group['title'],
+                'field_count' => $fields ? count( $fields ) : 0,
+            ];
+        }
+    }
+
+    $exclude = [ 'us_content_template', 'us_page_block', 'us_header', 'us_grid_layout',
+                 'acf-field-group', 'acf-field', 'acf-ui-options-page', 'attachment' ];
+    $cpts    = array_values( array_diff(
+        array_keys( get_post_types( [ '_builtin' => false, 'public' => true ] ) ),
+        $exclude
+    ) );
+
+    $option_pages = [];
+    if ( function_exists( 'acf_get_options_pages' ) ) {
+        foreach ( (array) acf_get_options_pages() as $slug => $page ) {
+            $option_pages[] = [ 'slug' => $slug, 'title' => $page['page_title'] ?? $slug ];
+        }
+    }
+
+    return [
+        'format_version'     => 1,
+        'generated_at'       => current_time( 'Y-m-d H:i:s' ),
+        'site_url'           => get_option( 'siteurl' ),
+        'table_prefix'       => $wpdb->prefix,
+        'templates'          => array_map( fn( $p ) => [ 'id' => $p->ID, 'title' => $p->post_title ], $templates ),
+        'page_blocks'        => array_map( fn( $p ) => [ 'id' => $p->ID, 'title' => $p->post_title ], $page_blocks ),
+        'field_groups'       => $field_groups,
+        'custom_post_types'  => $cpts,
+        'option_pages'       => $option_pages,
+    ];
+}
+
+// Stale-vlag zetten bij relevante wijzigingen — autoload: no om geen paginabelasting te veroorzaken
+add_action( 'save_post', function ( int $post_id, WP_Post $post ) {
+    if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) return;
+    static $watch = [ 'us_content_template', 'us_page_block', 'acf-field-group', 'acf-ui-options-page' ];
+    if ( in_array( $post->post_type, $watch, true ) ) {
+        update_option( 'aspera_passport_stale', '1', false );
+    }
+}, 10, 2 );
+
+add_action( 'before_delete_post', function ( int $post_id ) {
+    static $watch = [ 'us_content_template', 'us_page_block', 'acf-field-group', 'acf-ui-options-page' ];
+    $type = get_post_type( $post_id );
+    if ( $type && in_array( $type, $watch, true ) ) {
+        update_option( 'aspera_passport_stale', '1', false );
+    }
+} );
+
+// ── Site Health integratie ─────────────────────────────────────────────────
+// Toont de Aspera audit score in WP Admin → Hulpmiddelen → Site Health.
+// Leest de snapshot uit wp_options (gezet door /site/audit) — geen extra REST call.
+add_filter( 'site_status_tests', function ( array $tests ): array {
+    $tests['direct']['aspera_audit'] = [
+        'label' => 'Aspera Site Audit',
+        'test'  => 'aspera_site_health_test',
+    ];
+    return $tests;
+} );
+
+function aspera_site_health_test(): array {
+    $score   = get_option( 'aspera_audit_score' );
+    $date    = get_option( 'aspera_audit_date' );
+    $summary = get_option( 'aspera_audit_summary' );
+
+    // Nog geen audit gedraaid
+    if ( $score === false || $date === false ) {
+        return [
+            'label'       => 'Aspera Audit: nog niet uitgevoerd',
+            'status'      => 'recommended',
+            'badge'       => [ 'label' => 'Aspera', 'color' => 'orange' ],
+            'description' => '<p>Er is nog geen Aspera site-audit uitgevoerd. Roep <code>/wp-json/aspera/v1/site/audit</code> aan om de eerste audit te starten.</p>',
+            'test'        => 'aspera_audit',
+        ];
+    }
+
+    $score   = (int) $score;
+    $data    = is_string( $summary ) ? json_decode( $summary, true ) : [];
+    $counts  = $data['severity_counts'] ?? [];
+    $cat_scores = $data['category_scores'] ?? [];
+
+    // Status en kleur op basis van stoplicht
+    if ( $score >= 80 ) {
+        $status = 'good';
+        $color  = 'green';
+        $emoji  = '';
+    } elseif ( $score >= 50 ) {
+        $status = 'recommended';
+        $color  = 'orange';
+        $emoji  = '';
+    } else {
+        $status = 'critical';
+        $color  = 'red';
+        $emoji  = '';
+    }
+
+    // Categorie-overzicht opbouwen
+    $cat_labels = [
+        'wpb'       => 'WPBakery Templates',
+        'grid'      => 'Grid Layouts & Headers',
+        'colors'    => 'Kleuren',
+        'acf_slugs' => 'ACF Slugs',
+        'forms'     => 'Formulieren',
+        'plugins'   => 'Plugins',
+        'cpt'       => 'Custom Post Types',
+        'db_tables' => 'Database Tabellen',
+    ];
+
+    $rows = '';
+    foreach ( $cat_scores as $key => $cs ) {
+        $label      = $cat_labels[ $key ] ?? $key;
+        $v_count    = $cs['violation_count'] ?? 0;
+        $deductions = $cs['deductions'] ?? 0;
+        $cap        = $cs['cap'] ?? 0;
+        $row_status = $v_count === 0 ? 'ok' : $deductions . '/' . $cap . ' aftrek';
+        $rows      .= '<tr><td>' . esc_html( $label ) . '</td><td>' . $v_count . '</td><td>' . esc_html( $row_status ) . '</td></tr>';
+    }
+
+    $critical = $counts['critical'] ?? 0;
+    $error    = $counts['error'] ?? 0;
+    $warning  = $counts['warning'] ?? 0;
+    $total    = $data['total_violations'] ?? 0;
+
+    $severity_line = '';
+    if ( $total > 0 ) {
+        $parts = [];
+        if ( $critical > 0 ) $parts[] = $critical . ' critical';
+        if ( $error > 0 )    $parts[] = $error . ' error';
+        if ( $warning > 0 )  $parts[] = $warning . ' warning';
+        $severity_line = '<p><strong>Verdeling:</strong> ' . implode( ', ', $parts ) . '</p>';
+    }
+
+    $description = '<p><strong>Health score: ' . $score . '/100</strong> — '
+        . $total . ' violation' . ( $total !== 1 ? 's' : '' ) . ' gevonden.</p>'
+        . $severity_line
+        . '<table class="widefat striped"><thead><tr><th>Categorie</th><th>Violations</th><th>Status</th></tr></thead><tbody>'
+        . $rows
+        . '</tbody></table>'
+        . '<p><small>Laatste audit: ' . esc_html( $date ) . '</small></p>';
+
+    return [
+        'label'       => 'Aspera Audit: ' . $score . '/100',
+        'status'      => $status,
+        'badge'       => [ 'label' => 'Aspera', 'color' => $color ],
+        'description' => $description,
+        'test'        => 'aspera_audit',
+    ];
+}
+
+add_action( 'rest_api_init', function () {
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/{id}
+     * Parseert WPBakery post_content en geeft alleen elementen terug
+     * met condities of ACF-veldverwijzingen. Ondersteunt uitbreiding
+     * via de filter 'aspera_field_patterns'.
+     */
+    register_rest_route( 'aspera/v1', '/wpb/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $id      = (int) $req['id'];
+            $content = get_post_field( 'post_content', $id, 'raw' );
+
+            if ( ! $content ) {
+                return new WP_Error( 'not_found', 'Post niet gevonden of leeg.', [ 'status' => 404 ] );
+            }
+
+            // Standaard patronen voor ACF-veldverwijzingen; uitbreidbaar per site
+            $field_patterns = apply_filters( 'aspera_field_patterns', [
+                '/\{\{([\w_]+)\}\}/',   // {{veldnaam}} — UpSolution/US
+                '/\bkey="([\w_]+)"/',   // key="veldnaam" — us_post_custom_field
+            ] );
+
+            // Structurele containers: altijd tonen met relevante attributen
+            $structural = [
+                'vc_row'          => [ 'el_id', 'el_class', 'scroll_effect', 'css', 'us_bg_image_source', 'us_bg_image', 'us_bg_show', 'us_bg_video', 'us_bg_video_disable_width' ],
+                'vc_column'       => [ 'width', 'el_class', 'css' ],
+                'vc_row_inner'    => [ 'el_class' ],
+                'vc_column_inner' => [ 'width', 'el_class' ],
+            ];
+
+            // Helper: haal een specifiek attribuut op
+            $get_attr = function ( string $name, string $attrs ): ?string {
+                return preg_match( '/\b' . preg_quote( $name, '/' ) . '="([^"]*)"/', $attrs, $v ) ? $v[1] : null;
+            };
+
+            // Alle shortcode-tags + attributen ophalen
+            preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $matches, PREG_SET_ORDER );
+
+            $elements = [];
+
+            foreach ( $matches as $m ) {
+                $tag   = $m[1];
+                $attrs = $m[2];
+
+                // Condities decoderen (WPBakery standaard: URL-encoded JSON)
+                $conditions = [];
+                if ( preg_match( '/conditions="([^"]+)"/', $attrs, $cond ) ) {
+                    $decoded = json_decode( urldecode( $cond[1] ), true );
+                    if ( is_array( $decoded ) ) {
+                        $conditions = array_map( function ( $c ) {
+                            return array_filter( [
+                                'field'    => $c['cf_name_predefined'] ?? $c['cf_name'] ?? null,
+                                'mode'     => $c['cf_mode'] ?? null,
+                                'value'    => $c['cf_value'] ?? null,
+                                'param'    => $c['param'] ?? null,
+                            ] );
+                        }, $decoded );
+                    }
+                }
+
+                // ACF-veldverwijzingen ophalen via configureerbare patronen
+                $field_refs = [];
+                foreach ( $field_patterns as $pattern ) {
+                    if ( preg_match_all( $pattern, $attrs, $f ) ) {
+                        $field_refs = array_merge( $field_refs, array_filter( $f[1] ) );
+                    }
+                }
+                $field_refs = array_values( array_unique( $field_refs ) );
+
+                // us_btn: link= URL-encoded JSON met custom_field verwijzing
+                if ( $tag === 'us_btn' && preg_match( '/\blink="([^"]+)"/', $attrs, $link_match ) ) {
+                    $link_data = json_decode( urldecode( $link_match[1] ), true );
+                    if ( isset( $link_data['type'], $link_data['custom_field'] )
+                         && $link_data['type'] === 'custom_field'
+                         && ! empty( $link_data['custom_field'] ) ) {
+                        $field_refs[] = $link_data['custom_field'];
+                        $field_refs   = array_values( array_unique( $field_refs ) );
+                    }
+                }
+
+                // Structurele containers: altijd opnemen, alleen niet-lege attributen tonen
+                if ( isset( $structural[ $tag ] ) ) {
+                    $struct_attrs = [];
+                    foreach ( $structural[ $tag ] as $attr_name ) {
+                        $val = $get_attr( $attr_name, $attrs );
+                        if ( $val !== null && $val !== '' ) {
+                            $struct_attrs[ $attr_name ] = $val;
+                        }
+                    }
+                    $entry = [ 'tag' => $tag ];
+                    if ( $conditions )   $entry['conditions'] = $conditions;
+                    if ( $field_refs )   $entry['fields']     = $field_refs;
+                    if ( $struct_attrs ) $entry['attrs']      = $struct_attrs;
+                    $elements[] = $entry;
+
+                // Overige elementen: alleen opnemen bij condities of veldverwijzingen
+                } elseif ( $conditions || $field_refs ) {
+                    $entry = [
+                        'tag'        => $tag,
+                        'conditions' => $conditions,
+                        'fields'     => $field_refs,
+                    ];
+                    $el_class = $get_attr( 'el_class', $attrs );
+                    if ( $el_class !== null && $el_class !== '' ) {
+                        $entry['attrs'] = [ 'el_class' => $el_class ];
+                    }
+                    $elements[] = $entry;
+                }
+            }
+
+            return $elements;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/acf/group/{id}
+     * Geeft ACF field group terug als schone JSON:
+     * naam, key, type, choices en conditional_logic per veld.
+     */
+    register_rest_route( 'aspera/v1', '/acf/group/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_fields' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $fields = acf_get_fields( (int) $req['id'] );
+
+            if ( ! $fields ) {
+                return new WP_Error( 'not_found', 'Field group niet gevonden of leeg.', [ 'status' => 404 ] );
+            }
+
+            return array_map( function ( $f ) {
+                return array_filter( [
+                    'name'              => $f['name'] ?? null,
+                    'key'               => $f['key'] ?? null,
+                    'type'              => $f['type'] ?? null,
+                    'choices'           => ! empty( $f['choices'] ) ? $f['choices'] : null,
+                    'conditional_logic' => ! empty( $f['conditional_logic'] ) ? $f['conditional_logic'] : false,
+                ] );
+            }, $fields );
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/acf/validate/{id}
+     * Valideert een ACF field group op veelvoorkomende structuuurfouten:
+     * - Gebroken conditional logic references (verwijzing naar niet-bestaande field key)
+     * - Gemengde choice key types (int én string in dezelfde choices-array)
+     * - Ontbrekende veldnamen (exclusief tab-velden)
+     */
+    register_rest_route( 'aspera/v1', '/acf/validate/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_fields' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $group_id = (int) $req['id'];
+            $fields   = acf_get_fields( $group_id );
+
+            if ( ! $fields ) {
+                return new WP_Error( 'not_found', 'Field group niet gevonden of leeg.', [ 'status' => 404 ] );
+            }
+
+            // Verzamel alle field keys voor conditional reference validatie
+            $all_keys = [];
+            foreach ( $fields as $f ) {
+                if ( ! empty( $f['key'] ) ) {
+                    $all_keys[] = $f['key'];
+                }
+            }
+
+            $issues = [];
+
+            foreach ( $fields as $f ) {
+                $name = $f['name'] ?? '';
+                $key  = $f['key'] ?? '';
+                $type = $f['type'] ?? '';
+
+                // Ontbrekende naam (niet voor tab-velden)
+                if ( $type !== 'tab' && empty( $name ) ) {
+                    $issues[] = [
+                        'type'  => 'missing_name',
+                        'key'   => $key,
+                        'label' => $f['label'] ?? '',
+                    ];
+                }
+
+                // Gebroken conditional logic references
+                if ( ! empty( $f['conditional_logic'] ) && is_array( $f['conditional_logic'] ) ) {
+                    foreach ( $f['conditional_logic'] as $group ) {
+                        foreach ( $group as $rule ) {
+                            if ( ! empty( $rule['field'] ) && ! in_array( $rule['field'], $all_keys, true ) ) {
+                                $issues[] = [
+                                    'type'        => 'broken_conditional_reference',
+                                    'field_name'  => $name,
+                                    'field_key'   => $key,
+                                    'missing_ref' => $rule['field'],
+                                ];
+                            }
+                        }
+                    }
+                }
+
+                // Gemengde choice key types (int én string)
+                if ( ! empty( $f['choices'] ) && is_array( $f['choices'] ) ) {
+                    $has_int    = false;
+                    $has_string = false;
+                    foreach ( array_keys( $f['choices'] ) as $choice_key ) {
+                        if ( is_int( $choice_key ) ) {
+                            $has_int = true;
+                        } else {
+                            $has_string = true;
+                        }
+                    }
+                    if ( $has_int && $has_string ) {
+                        $issues[] = [
+                            'type'    => 'mixed_choice_key_types',
+                            'field'   => $name,
+                            'choices' => array_keys( $f['choices'] ),
+                        ];
+                    }
+                }
+            }
+
+            if ( empty( $issues ) ) {
+                return [ 'status' => 'ok', 'field_count' => count( $fields ) ];
+            }
+
+            return [
+                'status'      => 'issues_found',
+                'field_count' => count( $fields ),
+                'issues'      => $issues,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/acf/post/{id}
+     * Geeft alle ACF-veldwaarden van een post terug.
+     * Compact alternatief voor wp_get_post_snapshot.
+     */
+    register_rest_route( 'aspera/v1', '/acf/post/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'get_fields' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $fields = get_fields( (int) $req['id'] );
+
+            if ( $fields === false || $fields === null ) {
+                return new WP_Error( 'not_found', 'Post niet gevonden of geen ACF-velden.', [ 'status' => 404 ] );
+            }
+
+            return $fields ?: new WP_REST_Response( [], 200 );
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/header/{id}
+     * Geeft us_header JSON terug: elementen per breakpoint
+     * (default / laptops / tablets / mobiles), lege waarden gestript.
+     */
+    register_rest_route( 'aspera/v1', '/header/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $id   = (int) $req['id'];
+            $post = get_post( $id );
+
+            if ( ! $post || $post->post_type !== 'us_header' ) {
+                return new WP_Error( 'not_found', 'us_header post niet gevonden.', [ 'status' => 404 ] );
+            }
+
+            $data = json_decode( $post->post_content, true );
+
+            if ( ! is_array( $data ) ) {
+                return new WP_Error( 'parse_error', 'Kon post_content niet als JSON parsen.', [ 'status' => 500 ] );
+            }
+
+            $breakpoints = [ 'default', 'laptops', 'tablets', 'mobiles' ];
+            $result      = [];
+
+            foreach ( $breakpoints as $bp ) {
+                if ( ! isset( $data[ $bp ] ) ) continue;
+
+                $bp_data  = $data[ $bp ];
+                $layout   = $bp_data['layout'] ?? null;
+                $options  = isset( $bp_data['options'] ) ? aspera_strip_empty( $bp_data['options'] ) : [];
+                $elements = [];
+
+                if ( isset( $bp_data['elements'] ) && is_array( $bp_data['elements'] ) ) {
+                    foreach ( $bp_data['elements'] as $el_id => $el ) {
+                        $elements[ $el_id ] = aspera_strip_empty( $el );
+                    }
+                }
+
+                $result[ $bp ] = array_filter( [
+                    'layout'   => $layout,
+                    'options'  => $options ?: null,
+                    'elements' => $elements ?: null,
+                ] );
+            }
+
+            return $result;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/header/migrate/{id}
+     * Normaliseert een us_header door deprecated breakpoint-waarden te uniformeren
+     * en hoogte-anomalieën te rapporteren. Schrijft het resultaat terug naar de post.
+     *
+     * Auto-fix (kopieer default → alle breakpoints):
+     *   - Kleuren (alle *_bg_color, *_text_color, *_hover_color, *_transparent_*)
+     *   - Fullwidth (top_fullwidth, middle_fullwidth, bottom_fullwidth)
+     *   - Shadow
+     *   - scroll_breakpoint
+     *   - Lege layout posities verwijderen
+     *
+     * Observaties (rapporteren, niet auto-fixen):
+     *   - Centering-verschillen tussen breakpoints
+     *   - Hoogte-anomalieën per zone (top/middle/bottom, regular + sticky)
+     *   - Element hoogte-anomalieën (height_default > height_laptops > etc.)
+     *   - Orientation: tablets/mobiles moeten altijd horizontal zijn
+     *   - Width-inconsistentie tussen vertical breakpoints
+     */
+    register_rest_route( 'aspera/v1', '/header/migrate/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $id   = (int) $req['id'];
+            $post = get_post( $id );
+
+            if ( ! $post || $post->post_type !== 'us_header' ) {
+                return new WP_Error( 'not_found', 'us_header post niet gevonden.', [ 'status' => 404 ] );
+            }
+
+            $raw  = json_decode( $post->post_content, true );
+            if ( ! is_array( $raw ) ) {
+                return new WP_Error( 'parse_error', 'Kon post_content niet als JSON parsen.', [ 'status' => 500 ] );
+            }
+
+            $breakpoints     = [ 'laptops', 'tablets', 'mobiles' ];
+            $zones           = [ 'top', 'middle', 'bottom' ];
+            $changes         = [];
+            $observations    = [];
+            $default_options = $raw['default']['options'] ?? [];
+
+            // --- 1. Auto-fix: kopieer deprecated opties van default naar breakpoints ---
+
+            // Kleur-opties per zone
+            $color_suffixes = [
+                '_bg_color', '_text_color', '_text_hover_color',
+                '_transparent_bg_color', '_transparent_text_color', '_transparent_text_hover_color',
+            ];
+            $color_keys = [];
+            foreach ( $zones as $zone ) {
+                foreach ( $color_suffixes as $suffix ) {
+                    $color_keys[] = $zone . $suffix;
+                }
+            }
+
+            // Fullwidth per zone
+            $fullwidth_keys = [];
+            foreach ( $zones as $zone ) {
+                $fullwidth_keys[] = $zone . '_fullwidth';
+            }
+
+            // Globale opties
+            $global_keys = [ 'shadow', 'scroll_breakpoint' ];
+
+            $all_fix_keys = array_merge( $color_keys, $fullwidth_keys, $global_keys );
+
+            foreach ( $breakpoints as $bp ) {
+                if ( ! isset( $raw[ $bp ]['options'] ) ) continue;
+
+                foreach ( $all_fix_keys as $key ) {
+                    if ( ! array_key_exists( $key, $default_options ) ) continue;
+
+                    $default_val = $default_options[ $key ];
+                    $bp_val      = $raw[ $bp ]['options'][ $key ] ?? null;
+
+                    if ( $bp_val !== null && $bp_val !== $default_val ) {
+                        $changes[] = [
+                            'breakpoint' => $bp,
+                            'key'        => $key,
+                            'old'        => $bp_val,
+                            'new'        => $default_val,
+                        ];
+                    }
+
+                    $raw[ $bp ]['options'][ $key ] = $default_val;
+                }
+            }
+
+            // --- 2. Auto-fix: lege layout posities verwijderen ---
+
+            $all_bps = array_merge( [ 'default' ], $breakpoints );
+            foreach ( $all_bps as $bp ) {
+                if ( ! isset( $raw[ $bp ]['layout'] ) ) continue;
+                $layout = $raw[ $bp ]['layout'];
+                foreach ( $layout as $pos => $items ) {
+                    if ( $pos === 'hidden' ) continue;
+                    if ( is_array( $items ) && empty( $items ) ) {
+                        unset( $raw[ $bp ]['layout'][ $pos ] );
+                        $changes[] = [
+                            'breakpoint' => $bp,
+                            'key'        => "layout.{$pos}",
+                            'old'        => '[]',
+                            'new'        => '(removed)',
+                        ];
+                    }
+                }
+            }
+
+            // --- 3. Observatie: centering-verschillen ---
+
+            $centering_keys = [];
+            foreach ( $zones as $zone ) {
+                $centering_keys[] = $zone . '_centering';
+            }
+
+            foreach ( $centering_keys as $key ) {
+                $default_val = $default_options[ $key ] ?? null;
+                if ( $default_val === null ) continue;
+
+                foreach ( $breakpoints as $bp ) {
+                    $bp_val = $raw[ $bp ]['options'][ $key ] ?? null;
+                    if ( $bp_val !== null && $bp_val !== $default_val ) {
+                        $observations[] = [
+                            'type'       => 'centering_difference',
+                            'key'        => $key,
+                            'breakpoint' => $bp,
+                            'default'    => $default_val,
+                            'value'      => $bp_val,
+                        ];
+                    }
+                }
+            }
+
+            // --- 4. Observatie: hoogte-anomalieën per zone ---
+
+            $height_suffixes = [ '_height', '_sticky_height' ];
+            $bp_order        = [ 'default', 'laptops', 'tablets', 'mobiles' ];
+            $sticky_enabled  = (int) ( $default_options['sticky'] ?? 0 );
+
+            foreach ( $zones as $zone ) {
+                // Skip zone als deze uitgeschakeld is (top_show/bottom_show = 0)
+                // Middle zone heeft geen show-toggle, is altijd zichtbaar
+                if ( $zone !== 'middle' ) {
+                    $zone_show = (int) ( $default_options[ $zone . '_show' ] ?? 1 );
+                    if ( $zone_show === 0 ) continue;
+                }
+
+                foreach ( $height_suffixes as $suffix ) {
+                    // Skip sticky checks als sticky uitgeschakeld is
+                    if ( $suffix === '_sticky_height' && ! $sticky_enabled ) continue;
+
+                    $key    = $zone . $suffix;
+                    $values = [];
+
+                    foreach ( $bp_order as $bp ) {
+                        $val = $raw[ $bp ]['options'][ $key ] ?? null;
+                        if ( $val !== null ) {
+                            $values[ $bp ] = $val;
+                        }
+                    }
+
+                    if ( count( $values ) < 2 ) continue;
+
+                    // Vergelijk: kleiner breakpoint mag niet groter zijn dan groter breakpoint
+                    $prev_bp  = null;
+                    $prev_num = null;
+                    foreach ( $bp_order as $bp ) {
+                        if ( ! isset( $values[ $bp ] ) ) continue;
+                        $num = (int) $values[ $bp ];
+                        if ( $prev_bp !== null && $num > $prev_num ) {
+                            $observations[] = [
+                                'type'       => 'height_anomaly',
+                                'zone'       => $zone,
+                                'key'        => $key,
+                                'breakpoint' => $bp,
+                                'value'      => $values[ $bp ],
+                                'larger_than' => $prev_bp,
+                                'reference'  => $values[ $prev_bp ],
+                                'detail'     => "{$bp} ({$values[$bp]}) > {$prev_bp} ({$values[$prev_bp]})",
+                            ];
+                        }
+                        $prev_bp  = $bp;
+                        $prev_num = $num;
+                    }
+                }
+            }
+
+            // --- 5. Observatie: orientation per breakpoint ---
+            // Beleid: tablets en mobiles zijn altijd horizontal.
+            // Default en laptops mogen vertical zijn.
+            // Width moet gelijk zijn over alle vertical breakpoints.
+
+            $ver_widths = [];
+            foreach ( $all_bps as $bp ) {
+                $bp_opts     = $raw[ $bp ]['options'] ?? [];
+                $orientation = $bp_opts['orientation'] ?? 'hor';
+                $width       = $bp_opts['width'] ?? '';
+
+                if ( in_array( $bp, [ 'tablets', 'mobiles' ], true ) && $orientation === 'ver' ) {
+                    $observations[] = [
+                        'type'       => 'orientation_vertical_forbidden',
+                        'breakpoint' => $bp,
+                        'value'      => $orientation,
+                        'detail'     => "{$bp} heeft vertical orientation — moet altijd horizontal zijn",
+                    ];
+                }
+
+                if ( $orientation === 'ver' && $width !== '' ) {
+                    $ver_widths[ $bp ] = $width;
+                }
+            }
+
+            // Width-consistentie over vertical breakpoints
+            if ( count( $ver_widths ) > 1 ) {
+                $unique_widths = array_unique( array_values( $ver_widths ) );
+                if ( count( $unique_widths ) > 1 ) {
+                    $parts = [];
+                    foreach ( $ver_widths as $bp => $w ) {
+                        $parts[] = "{$bp}: {$w}";
+                    }
+                    $observations[] = [
+                        'type'       => 'orientation_inconsistent_width',
+                        'widths'     => $ver_widths,
+                        'detail'     => 'Vertical breakpoints hebben verschillende width: ' . implode( ', ', $parts ),
+                    ];
+                }
+            }
+
+            // --- 5b. Observatie: custom breakpoints ---
+            // Beleid: custom breakpoints zijn meestal onnodig (thema regelt dit).
+            // Als ze aan staan: kleiner device mag nooit een hogere breakpoint-waarde hebben.
+
+            $bp_device_order = [ 'laptops', 'tablets', 'mobiles' ];
+            $custom_bp_values = [];
+
+            foreach ( $bp_device_order as $bp ) {
+                $bp_opts   = $raw[ $bp ]['options'] ?? [];
+                $is_custom = ( $bp_opts['custom_breakpoint'] ?? 0 ) == 1;
+
+                if ( $is_custom ) {
+                    $bp_val = (int) $bp_opts['breakpoint'];
+                    $custom_bp_values[ $bp ] = $bp_val;
+
+                    $observations[] = [
+                        'type'       => 'custom_breakpoint_active',
+                        'breakpoint' => $bp,
+                        'value'      => $bp_opts['breakpoint'],
+                        'detail'     => "{$bp} heeft custom breakpoint ({$bp_opts['breakpoint']}) — meestal onnodig, thema reguleert dit",
+                    ];
+                }
+            }
+
+            // Controleer afschaling: kleiner device mag niet hoger zijn dan groter device
+            $prev_bp  = null;
+            $prev_val = null;
+            foreach ( $bp_device_order as $bp ) {
+                if ( ! isset( $custom_bp_values[ $bp ] ) ) continue;
+                if ( $prev_bp !== null && $custom_bp_values[ $bp ] >= $prev_val ) {
+                    $observations[] = [
+                        'type'         => 'custom_breakpoint_invalid_order',
+                        'breakpoint'   => $bp,
+                        'value'        => $custom_bp_values[ $bp ] . 'px',
+                        'larger_than'  => $prev_bp,
+                        'reference'    => $prev_val . 'px',
+                        'detail'       => "{$bp} ({$custom_bp_values[$bp]}px) >= {$prev_bp} ({$prev_val}px) — kleiner device mag geen hogere of gelijke breakpoint hebben",
+                    ];
+                }
+                $prev_bp  = $bp;
+                $prev_val = $custom_bp_values[ $bp ];
+            }
+
+            // --- 5c. Custom breakpoints vs site_content_width ---
+
+            $theme_opts_raw = get_option( 'usof_options_Impreza', '' );
+            $theme_opts     = is_serialized( $theme_opts_raw ) ? unserialize( $theme_opts_raw ) : $theme_opts_raw;
+            $content_width  = is_array( $theme_opts ) && isset( $theme_opts['site_content_width'] )
+                ? (int) $theme_opts['site_content_width']
+                : null;
+
+            if ( $content_width !== null ) {
+                foreach ( $custom_bp_values as $bp => $bp_val ) {
+                    if ( $bp_val > $content_width ) {
+                        $observations[] = [
+                            'type'       => 'custom_breakpoint_exceeds_content_width',
+                            'breakpoint' => $bp,
+                            'value'      => $bp_val . 'px',
+                            'reference'  => $content_width . 'px',
+                            'detail'     => "{$bp} custom breakpoint ({$bp_val}px) > site_content_width ({$content_width}px)",
+                        ];
+                    }
+                }
+            }
+
+            // --- 5d. Menu mobile_width checks ---
+
+            if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
+                // Bepaal hoogste actieve header breakpoint
+                $all_bps_ordered = [ 'default', 'laptops', 'tablets', 'mobiles' ];
+                $highest_bp = 0;
+                foreach ( $all_bps_ordered as $bp ) {
+                    if ( $bp === 'default' ) continue;
+                    $bp_opts_check = $raw[ $bp ]['options'] ?? [];
+                    $bp_val_check  = (int) ( $bp_opts_check['breakpoint'] ?? 0 );
+                    if ( $bp_val_check > $highest_bp ) {
+                        $highest_bp = $bp_val_check;
+                    }
+                }
+
+                foreach ( $raw['data'] as $el_id => $el ) {
+                    if ( strpos( $el_id, 'menu:' ) !== 0 ) continue;
+                    $mw = isset( $el['mobile_width'] ) ? (int) $el['mobile_width'] : null;
+                    if ( $mw === null ) continue;
+
+                    if ( $mw > 10000 ) {
+                        $observations[] = [
+                            'type'    => 'menu_mobile_always',
+                            'element' => $el_id,
+                            'value'   => $el['mobile_width'],
+                            'detail'  => "{$el_id}: mobile_width ({$el['mobile_width']}) > 10000px — always-hamburger patroon",
+                        ];
+                    } elseif ( $content_width !== null && $mw > $content_width ) {
+                        $observations[] = [
+                            'type'      => 'menu_mobile_exceeds_content_width',
+                            'element'   => $el_id,
+                            'value'     => $el['mobile_width'],
+                            'reference' => $content_width . 'px',
+                            'detail'    => "{$el_id}: mobile_width ({$el['mobile_width']}) > site_content_width ({$content_width}px) — ongebruikelijk",
+                        ];
+                    } elseif ( $highest_bp > 0 && $mw > $highest_bp ) {
+                        $observations[] = [
+                            'type'      => 'menu_mobile_exceeds_breakpoints',
+                            'element'   => $el_id,
+                            'value'     => $el['mobile_width'],
+                            'reference' => $highest_bp . 'px',
+                            'detail'    => "{$el_id}: mobile_width ({$el['mobile_width']}) > hoogste header breakpoint ({$highest_bp}px) — menu gaat eerder mobiel dan de header",
+                        ];
+                    }
+                }
+            }
+
+            // --- 5e. Observatie: element hoogte-anomalieën ---
+
+            $el_bp_map = [
+                'height_default' => 'default',
+                'height_laptops' => 'laptops',
+                'height_tablets' => 'tablets',
+                'height_mobiles' => 'mobiles',
+            ];
+            $el_sticky_map = [
+                'height_sticky'         => 'default',
+                'height_sticky_laptops' => 'laptops',
+                'height_sticky_tablets' => 'tablets',
+                'height_sticky_mobiles' => 'mobiles',
+            ];
+
+            if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
+                foreach ( $raw['data'] as $el_id => $el ) {
+                    // Reguliere hoogtes (+ sticky als sticky ingeschakeld)
+                    $el_maps = [ $el_bp_map ];
+                    if ( $sticky_enabled ) {
+                        $el_maps[] = $el_sticky_map;
+                    }
+                    foreach ( $el_maps as $map ) {
+                        $values = [];
+                        foreach ( $map as $el_key => $bp ) {
+                            if ( isset( $el[ $el_key ] ) && $el[ $el_key ] !== '' ) {
+                                $values[ $bp ] = $el[ $el_key ];
+                            }
+                        }
+
+                        if ( count( $values ) < 2 ) continue;
+
+                        $prev_bp  = null;
+                        $prev_num = null;
+                        foreach ( $bp_order as $bp ) {
+                            if ( ! isset( $values[ $bp ] ) ) continue;
+                            $num = (int) $values[ $bp ];
+                            if ( $prev_bp !== null && $num > $prev_num ) {
+                                $label = ( $map === $el_sticky_map ) ? 'sticky' : 'regular';
+                                $observations[] = [
+                                    'type'        => 'element_height_anomaly',
+                                    'element'     => $el_id,
+                                    'height_type' => $label,
+                                    'breakpoint'  => $bp,
+                                    'value'       => $values[ $bp ],
+                                    'larger_than' => $prev_bp,
+                                    'reference'   => $values[ $prev_bp ],
+                                    'detail'      => "{$el_id} {$label}: {$bp} ({$values[$bp]}) > {$prev_bp} ({$values[$prev_bp]})",
+                                ];
+                            }
+                            $prev_bp  = $bp;
+                            $prev_num = $num;
+                        }
+                    }
+                }
+            }
+
+            // --- 6. Schrijf gecleande JSON terug ---
+
+            $new_json = wp_json_encode( $raw, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+
+            wp_update_post( [
+                'ID'           => $id,
+                'post_content' => $new_json,
+            ] );
+
+            return [
+                'header_id'    => $id,
+                'title'        => $post->post_title,
+                'status'       => 'migrated',
+                'changes'      => count( $changes ),
+                'change_log'   => $changes,
+                'observations' => $observations,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/grid/{id}
+     * Geeft us_grid_layout JSON terug: elementen, layout en options,
+     * lege waarden gestript.
+     */
+    register_rest_route( 'aspera/v1', '/grid/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $id   = (int) $req['id'];
+            $post = get_post( $id );
+
+            if ( ! $post || $post->post_type !== 'us_grid_layout' ) {
+                return new WP_Error( 'not_found', 'us_grid_layout post niet gevonden.', [ 'status' => 404 ] );
+            }
+
+            $data = json_decode( $post->post_content, true );
+
+            if ( ! is_array( $data ) ) {
+                return new WP_Error( 'parse_error', 'Kon post_content niet als JSON parsen.', [ 'status' => 500 ] );
+            }
+
+            $elements = [];
+            if ( isset( $data['elements'] ) && is_array( $data['elements'] ) ) {
+                foreach ( $data['elements'] as $el_id => $el ) {
+                    $elements[ $el_id ] = aspera_strip_empty( $el );
+                }
+            }
+
+            return array_filter( [
+                'elements' => $elements ?: null,
+                'layout'   => $data['layout'] ?? null,
+                'options'  => isset( $data['options'] ) ? aspera_strip_empty( $data['options'] ) : null,
+            ] );
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/validate/all
+     * Valideert us_content_template en us_page_block posts op beleidsschendingen.
+     *
+     * Optionele query parameters:
+     * - post_types  kommagescheiden post types (default: us_content_template,us_page_block)
+     * - page        paginanummer (default: 1)
+     * - per_page    posts per pagina, max 100 (default: 20)
+     */
+    register_rest_route( 'aspera/v1', '/wpb/validate/all', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $raw_types  = $req->get_param( 'post_types' );
+            $post_types = $raw_types
+                ? array_map( 'trim', explode( ',', $raw_types ) )
+                : [ 'us_content_template', 'us_page_block' ];
+
+            $page     = max( 1, (int) ( $req->get_param( 'page' ) ?? 1 ) );
+            $per_page = min( 100, max( 1, (int) ( $req->get_param( 'per_page' ) ?? 20 ) ) );
+
+            $query = new WP_Query( [
+                'post_type'      => $post_types,
+                'post_status'    => 'publish',
+                'posts_per_page' => $per_page,
+                'paged'          => $page,
+                'orderby'        => 'post_type',
+                'order'          => 'ASC',
+                'no_found_rows'  => false,
+            ] );
+
+            if ( ! $query->have_posts() ) {
+                return new WP_Error( 'not_found', 'Geen posts gevonden voor de opgegeven post types.', [ 'status' => 404 ] );
+            }
+
+            $posts              = $query->posts;
+            $all_violations     = [];
+            $total_shortcodes   = 0;
+            $posts_with_issues  = 0;
+
+            foreach ( $posts as $post ) {
+                if ( ! $post->post_content ) continue;
+
+                $result           = aspera_wpb_validate_post( $post );
+                $total_shortcodes += $result['shortcode_count'];
+
+                if ( ! empty( $result['violations'] ) ) {
+                    $posts_with_issues++;
+                    foreach ( $result['violations'] as $v ) {
+                        $all_violations[] = array_merge(
+                            [
+                                'post_id'    => $post->ID,
+                                'post_type'  => $post->post_type,
+                                'post_title' => $post->post_title,
+                            ],
+                            $v
+                        );
+                    }
+                }
+            }
+
+            $response = [
+                'status'             => empty( $all_violations ) ? 'ok' : 'violations_found',
+                'page'               => $page,
+                'per_page'           => $per_page,
+                'total_posts'        => (int) $query->found_posts,
+                'total_pages'        => (int) $query->max_num_pages,
+                'posts_scanned'      => count( $posts ),
+                'shortcodes_scanned' => $total_shortcodes,
+                'posts_with_issues'  => $posts_with_issues,
+                'violation_count'    => count( $all_violations ),
+            ];
+
+            if ( ! empty( $all_violations ) ) {
+                $response['violations'] = $all_violations;
+            }
+
+            return $response;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/similar
+     * Detecteert structureel vergelijkbare templates als fuseer-kandidaten.
+     *
+     * Optionele query parameters:
+     * - post_types  kommagescheiden post types (default: us_content_template)
+     * - threshold   minimale gelijkenis 0.0–1.0 (default: 0.80)
+     * - max_posts   maximaal aantal posts voor LCS-vergelijking, max 100 (default: 50)
+     *               Bij overschrijding wordt de operatie afgebroken (status: limit_exceeded).
+     *
+     * Vergelijking op basis van genormaliseerde shortcode tag-reeks (LCS).
+     * Attribuutwaarden, ACF-slugs en condities worden genegeerd.
+     * Output gesorteerd op similarity aflopend.
+     *
+     * Let op: de rekenbelasting schaalt kwadratisch met het aantal posts
+     * (n posts = n*(n-1)/2 LCS-vergelijkingen). De max_posts limiet voorkomt
+     * dat grote sets de server overbelasten.
+     */
+    register_rest_route( 'aspera/v1', '/wpb/similar', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $raw_types  = $req->get_param( 'post_types' );
+            $post_types = $raw_types
+                ? array_map( 'trim', explode( ',', $raw_types ) )
+                : [ 'us_content_template' ];
+
+            $threshold = (float) ( $req->get_param( 'threshold' ) ?? 0.80 );
+            $threshold = max( 0.0, min( 1.0, $threshold ) );
+
+            $max_posts = min( 100, max( 2, (int) ( $req->get_param( 'max_posts' ) ?? 50 ) ) );
+
+            $query = new WP_Query( [
+                'post_type'      => $post_types,
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+                'orderby'        => 'ID',
+                'order'          => 'ASC',
+                'no_found_rows'  => true,
+            ] );
+
+            $posts = $query->posts;
+            $count = count( $posts );
+
+            // Circuit breaker: breek af vóór de kwadratische LCS-loops beginnen
+            if ( $count > $max_posts ) {
+                return new WP_Error( 'limit_exceeded',
+                    sprintf(
+                        'Te veel posts (%d) voor veilige vergelijking — limiet is %d. Gebruik ?max_posts=N (max 100) of beperk post_types.',
+                        $count,
+                        $max_posts
+                    ),
+                    [ 'status' => 422, 'posts_found' => $count, 'max_posts' => $max_posts ]
+                );
+            }
+
+            if ( $count < 2 ) {
+                return [
+                    'status'  => 'ok',
+                    'message' => 'Minder dan 2 posts gevonden — geen vergelijking mogelijk.',
+                    'pairs'   => [],
+                ];
+            }
+
+            // Bouw per post een tag-reeks
+            $sequences = [];
+            foreach ( $posts as $post ) {
+                $content = get_post_field( 'post_content', $post->ID, 'raw' );
+                $sequences[ $post->ID ] = [
+                    'title' => $post->post_title,
+                    'type'  => $post->post_type,
+                    'tags'  => aspera_tag_sequence( $content ),
+                ];
+            }
+
+            // Vergelijk alle paren — O(n²) LCS-berekeningen
+            $pairs = [];
+            $ids   = array_keys( $sequences );
+
+            for ( $i = 0; $i < $count - 1; $i++ ) {
+                for ( $j = $i + 1; $j < $count; $j++ ) {
+                    $id_a = $ids[$i];
+                    $id_b = $ids[$j];
+                    $sim  = aspera_sequence_similarity(
+                        $sequences[$id_a]['tags'],
+                        $sequences[$id_b]['tags']
+                    );
+
+                    if ( $sim >= $threshold ) {
+                        $pairs[] = [
+                            'similarity'  => round( $sim * 100 ),
+                            'post_a'      => [ 'id' => $id_a, 'title' => $sequences[$id_a]['title'], 'tag_count' => count( $sequences[$id_a]['tags'] ) ],
+                            'post_b'      => [ 'id' => $id_b, 'title' => $sequences[$id_b]['title'], 'tag_count' => count( $sequences[$id_b]['tags'] ) ],
+                        ];
+                    }
+                }
+            }
+
+            // Sorteer op similarity aflopend
+            usort( $pairs, fn( $a, $b ) => $b['similarity'] <=> $a['similarity'] );
+
+            return [
+                'status'          => empty( $pairs ) ? 'ok' : 'candidates_found',
+                'posts_compared'  => $count,
+                'threshold_pct'   => round( $threshold * 100 ),
+                'candidate_count' => count( $pairs ),
+                'pairs'           => $pairs,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/validate/{id}
+     * Controleert WPBakery shortcodes van één post op beleidsschendingen.
+     * Zie aspera_wpb_validate_post() voor de volledige regelset.
+     */
+    register_rest_route( 'aspera/v1', '/wpb/validate/(?P<id>\d+)', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $id   = (int) $req['id'];
+            $post = get_post( $id );
+
+            if ( ! $post || ! $post->post_content ) {
+                return new WP_Error( 'not_found', 'Post niet gevonden of leeg.', [ 'status' => 404 ] );
+            }
+
+            $result = aspera_wpb_validate_post( $post );
+
+            if ( empty( $result['violations'] ) ) {
+                return [
+                    'status'             => 'ok',
+                    'post_type'          => $result['post_type'],
+                    'shortcodes_scanned' => $result['shortcode_count'],
+                ];
+            }
+
+            return [
+                'status'             => 'violations_found',
+                'post_type'          => $result['post_type'],
+                'shortcodes_scanned' => $result['shortcode_count'],
+                'violation_count'    => count( $result['violations'] ),
+                'violations'         => $result['violations'],
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/acf/validate/slugs
+     * Valideert ACF veldsluggen site-wide op naamgevingsconventies.
+     *
+     * Context wordt bepaald uit de locatieregels van de field group:
+     * - options_page regel aanwezig        → option_page context → opt_{naam}_{n} verwacht
+     * - post_type niet page/post/attachment → cpt context       → _cpt_{naam}_{n} verwacht
+     * - overig                             → page context       → _p_{fieldgroup}_{n} verwacht
+     *
+     * Gecontroleerde regels:
+     * - missing_number    : slug eindigt niet op _\d+
+     * - wrong_opt_format  : option page veld zonder opt_ prefix
+     * - wrong_cpt_format  : CPT veld zonder _cpt_ infix
+     * - wrong_page_format : paginaveld zonder _p_ infix
+     *
+     * Tab-velden worden altijd overgeslagen.
+     */
+    register_rest_route( 'aspera/v1', '/acf/validate/slugs', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_field_groups' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $groups         = acf_get_field_groups();
+            $issues         = [];
+            $fields_scanned = 0;
+            $groups_scanned = 0;
+
+            // Post types die geen CPT zijn — worden als page-context behandeld
+            $builtin_types = [ 'page', 'post', 'attachment', 'us_content_template',
+                               'us_page_block', 'us_header', 'us_grid_layout' ];
+
+            foreach ( $groups as $group ) {
+                $fields = acf_get_fields( $group['key'] );
+                if ( ! $fields ) continue;
+
+                $groups_scanned++;
+
+                // Detecteer context uit locatieregels
+                $context      = 'page'; // default
+                $context_name = '';
+
+                foreach ( (array) ( $group['location'] ?? [] ) as $or_group ) {
+                    foreach ( (array) $or_group as $rule ) {
+                        $param = $rule['param'] ?? '';
+                        $value = $rule['value'] ?? '';
+
+                        if ( $param === 'options_page' ) {
+                            $context      = 'option_page';
+                            $context_name = $value;
+                            break 2;
+                        }
+
+                        if ( $param === 'post_type'
+                             && ! in_array( $value, $builtin_types, true ) ) {
+                            $context      = 'cpt';
+                            // Verwijder _cpt suffix voor de context_name
+                            $context_name = preg_replace( '/_cpt$/', '', $value );
+                            break 2;
+                        }
+                    }
+                }
+
+                foreach ( $fields as $field ) {
+                    // Tab-velden volgen geen slug-conventie
+                    if ( ( $field['type'] ?? '' ) === 'tab' ) continue;
+
+                    $slug = $field['name'] ?? '';
+                    if ( $slug === '' ) continue;
+
+                    $fields_scanned++;
+
+                    $base = [
+                        'field_group_id'    => $group['ID'],
+                        'field_group_title' => $group['title'],
+                        'group_context'     => $context,
+                        'context_name'      => $context_name,
+                        'field_slug'        => $slug,
+                        'field_type'        => $field['type'] ?? '',
+                    ];
+
+                    // Regel 1: slug moet eindigen op _\d+
+                    if ( ! preg_match( '/_\d+$/', $slug ) ) {
+                        $issues[] = $base + [
+                            'rule'   => 'missing_number',
+                            'detail' => 'Slug eindigt niet op een volgnummer (_1, _2, …)',
+                        ];
+                        continue; // Context-check zinloos zonder volgnummer
+                    }
+
+                    // Regel 2: context-specifieke infix
+                    if ( $context === 'option_page' && ! preg_match( '/(^opt_|_opt_)/', $slug ) ) {
+                        $issues[] = $base + [
+                            'rule'   => 'wrong_opt_format',
+                            'detail' => 'Option page veld verwacht opt_ prefix of _opt_ infix — bijv. opt_socials_1 of recipient_opt_forms_1',
+                        ];
+                    } elseif ( $context === 'cpt' && ! preg_match( '/_cpt_[a-z0-9_]+_\d+$/', $slug ) ) {
+                        $issues[] = $base + [
+                            'rule'   => 'wrong_cpt_format',
+                            'detail' => 'CPT veld verwacht {naam}_cpt_{cpt}_{n} — ontbreekt _cpt_ infix',
+                        ];
+                    } elseif ( $context === 'page' && ! preg_match( '/_p_[a-z0-9_]+_\d+$/', $slug ) ) {
+                        $issues[] = $base + [
+                            'rule'   => 'wrong_page_format',
+                            'detail' => 'Paginaveld verwacht {naam}_p_{fieldgroup}_{n} — ontbreekt _p_ infix',
+                        ];
+                    }
+                }
+            }
+
+            $response = [
+                'status'         => empty( $issues ) ? 'ok' : 'issues_found',
+                'groups_scanned' => $groups_scanned,
+                'fields_scanned' => $fields_scanned,
+                'issue_count'    => count( $issues ),
+            ];
+
+            if ( ! empty( $issues ) ) {
+                $response['issues'] = $issues;
+            }
+
+            return $response;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/site/passport
+     * Geeft het site-paspoort terug. Genereert opnieuw als de stale-vlag gezet is.
+     * Slaat het resultaat op in wp_options (autoload: no).
+     */
+    register_rest_route( 'aspera/v1', '/site/passport', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            $stale = get_option( 'aspera_passport_stale', '1' );
+            if ( $stale === '1' ) {
+                $passport = aspera_generate_passport();
+                update_option( 'aspera_passport', wp_json_encode( $passport ), false );
+                update_option( 'aspera_passport_stale', '0', false );
+                return $passport;
+            }
+            $cached = get_option( 'aspera_passport', '' );
+            if ( $cached ) {
+                $decoded = json_decode( $cached, true );
+                if ( is_array( $decoded ) ) return $decoded;
+            }
+            // Fallback: cache ontbreekt ondanks stale=0 — alsnog genereren
+            $passport = aspera_generate_passport();
+            update_option( 'aspera_passport', wp_json_encode( $passport ), false );
+            return $passport;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/site/passport/refresh
+     * Forceert een volledige regeneratie van het paspoort, ongeacht de stale-vlag.
+     */
+    register_rest_route( 'aspera/v1', '/site/passport/refresh', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            $passport = aspera_generate_passport();
+            update_option( 'aspera_passport', wp_json_encode( $passport ), false );
+            update_option( 'aspera_passport_stale', '0', false );
+            return $passport;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/plugins/validate
+     * Controleert of alle essentiële plugins aanwezig en actief zijn.
+     * Rapporteert ontbrekende/inactieve essentiële plugins, extra plugins
+     * en WooCommerce-specifieke vereisten.
+     */
+    register_rest_route( 'aspera/v1', '/plugins/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'get_plugins' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+
+            $all_plugins    = get_plugins();
+            $active_plugins = (array) get_option( 'active_plugins', [] );
+
+            // Slug uit plugin-bestandspad extraheren
+            $installed = [];
+            foreach ( $all_plugins as $file => $data ) {
+                $slug              = strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
+                $installed[ $slug ] = [
+                    'name'    => $data['Name'],
+                    'version' => $data['Version'],
+                    'active'  => in_array( $file, $active_plugins, true ),
+                    'file'    => $file,
+                ];
+            }
+
+            // ─── Essentiële plugins ────────────────────────────────────────
+            $essential = [
+                'admin-menu-editor-pro'                  => 'Admin Menu Editor Pro',
+                'advanced-custom-fields-pro'             => 'Advanced Custom Fields PRO',
+                'ai-engine-pro'                          => 'AI Engine (Pro)',
+                'mwai-content-parser'                    => 'Content Parser (AI Engine)',
+                'all-in-one-wp-security-and-firewall'    => 'All-In-One Security (AIOS)',
+                'aspera-analysis-api'                    => 'Aspera Analysis API',
+                'burst-pro'                              => 'Burst Pro',
+                'webp-converter-for-media'               => 'Converter for Media',
+                'disable-comments'                       => 'Disable Comments',
+                'us-core'                                => 'UpSolution Core',
+                'user-switching'                         => 'User Switching',
+                'wp-fastest-cache'                       => 'WP Fastest Cache',
+                'wp-mail-smtp'                           => 'WP Mail SMTP',
+                'wp-optimize'                            => 'WP-Optimize - Clean, Compress, Cache',
+                'js_composer'                            => 'WPBakery Page Builder',
+                'redirection'                            => 'Redirection',
+                'wpconsent-cookies-banner-privacy-suite' => 'WPConsent',
+                'wordpress-seo'                          => 'Yoast SEO',
+            ];
+
+            // Whitelist: besproken plugins worden nooit geflagged (actief, inactief of afwezig)
+            // Burst: gratis variant is ook acceptabel
+            $whitelist_slugs   = array_keys( $essential );
+            $whitelist_slugs[] = 'burst-statistics';
+
+            $known_status = [];
+            foreach ( $essential as $slug => $name ) {
+                if ( $slug === 'burst-pro' ) {
+                    $actual_slug = isset( $installed['burst-pro'] ) ? 'burst-pro'
+                        : ( isset( $installed['burst-statistics'] ) ? 'burst-statistics' : null );
+                    if ( $actual_slug ) {
+                        $actual         = $installed[ $actual_slug ];
+                        $known_status[] = [
+                            'name'    => $actual['name'],
+                            'slug'    => $actual_slug,
+                            'version' => $actual['version'],
+                            'status'  => $actual['active'] ? 'active' : 'inactive',
+                        ];
+                    } else {
+                        $known_status[] = [ 'name' => $name, 'slug' => $slug, 'status' => 'not_installed' ];
+                    }
+                    continue;
+                }
+
+                if ( ! isset( $installed[ $slug ] ) ) {
+                    $known_status[] = [ 'name' => $name, 'slug' => $slug, 'status' => 'not_installed' ];
+                } else {
+                    $p              = $installed[ $slug ];
+                    $known_status[] = [
+                        'name'    => $p['name'],
+                        'slug'    => $slug,
+                        'version' => $p['version'],
+                        'status'  => $p['active'] ? 'active' : 'inactive',
+                    ];
+                }
+            }
+
+            // ─── Extra plugins (niet op de whitelist) ─────────────────────────
+            $woo_slugs  = [ 'woocommerce', 'mollie-payments-for-woocommerce', 'woocommerce-pdf-invoices-packing-slips' ];
+            $skip_slugs = array_merge( $whitelist_slugs, $woo_slugs );
+
+            $extra = [];
+            foreach ( $installed as $slug => $p ) {
+                if ( in_array( $slug, $skip_slugs, true ) ) continue;
+                $extra[] = [
+                    'name'    => $p['name'],
+                    'slug'    => $slug,
+                    'version' => $p['version'],
+                    'active'  => $p['active'],
+                ];
+            }
+
+            // ─── WooCommerce ───────────────────────────────────────────────
+            $woocommerce = null;
+            if ( isset( $installed['woocommerce'] ) ) {
+                $woo_required = [
+                    'mollie-payments-for-woocommerce'          => 'Mollie Payments for WooCommerce',
+                    'woocommerce-pdf-invoices-packing-slips'   => 'PDF Invoices & Packing Slips for WooCommerce',
+                ];
+                $woo_status = [];
+                foreach ( $woo_required as $slug => $name ) {
+                    if ( ! isset( $installed[ $slug ] ) ) {
+                        $woo_status[] = [ 'name' => $name, 'slug' => $slug, 'status' => 'missing' ];
+                    } else {
+                        $p            = $installed[ $slug ];
+                        $woo_status[] = [
+                            'name'    => $p['name'],
+                            'slug'    => $slug,
+                            'version' => $p['version'],
+                            'status'  => $p['active'] ? 'active' : 'inactive',
+                        ];
+                    }
+                }
+                $woocommerce = [
+                    'version'          => $installed['woocommerce']['version'],
+                    'active'           => $installed['woocommerce']['active'],
+                    'required_plugins' => $woo_status,
+                ];
+            }
+
+            $response = [
+                'status'          => empty( $extra ) ? 'ok' : 'extra_plugins_found',
+                'known_plugins'   => $known_status,
+                'extra_plugins'   => $extra,
+            ];
+
+            if ( $woocommerce !== null ) {
+                $response['woocommerce'] = $woocommerce;
+            }
+
+            return $response;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/meta/validate
+     * Detecteert verweesde ACF meta_key rijen in wp_postmeta.
+     *
+     * Scope: alleen meta_keys waarvan de bijbehorende _-referentie het patroon
+     * 'field_*' volgt — dit garandeert ACF-herkomst. Meta van WPBakery, Impreza,
+     * WooCommerce en andere plugins valt volledig buiten scope.
+     *
+     * Output per orphaned key:
+     * - meta_key     : de veldslug
+     * - field_key    : de ACF field key (field_xxx) die niet meer actief is
+     * - rows         : aantal rijen in wp_postmeta
+     * - in_templates : aanwezig in post_content/post_excerpt van template post types
+     * - advies       : 'verwijderen na akkoord' of 'onderzoek vereist'
+     */
+    register_rest_route( 'aspera/v1', '/meta/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            global $wpdb;
+
+            // 1. Actieve ACF field keys ophalen uit post_name van acf-field posts
+            //    (post_name = field key zoals field_62c1766c295ed;
+            //     post_excerpt = veldslug zoals bu_cpt_links_1)
+            $active_field_keys = $wpdb->get_col(
+                "SELECT post_name
+                 FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-field'
+                   AND post_status = 'publish'
+                   AND post_name LIKE 'field_%'"
+            );
+            $active_field_keys = array_values( array_filter( $active_field_keys ) );
+
+            // 2. Alle meta_keys met ACF-herkomst ophalen:
+            //    - niet _ prefixed
+            //    - hebben een corresponderende _meta_key met waarde 'field_*'
+            $rows = $wpdb->get_results(
+                "SELECT DISTINCT pm1.meta_key, pm2.meta_value AS field_key
+                 FROM {$wpdb->postmeta} pm1
+                 INNER JOIN {$wpdb->postmeta} pm2
+                     ON pm2.post_id    = pm1.post_id
+                     AND pm2.meta_key  = CONCAT('_', pm1.meta_key)
+                 WHERE pm1.meta_key NOT LIKE '\_%'
+                   AND pm2.meta_value  LIKE 'field_%'
+                 ORDER BY pm1.meta_key",
+                ARRAY_A
+            );
+
+            // 3. Per key bepalen: actief ACF-veld of orphaned
+            $orphaned       = [];
+            $valid_count    = 0;
+            $template_types = [
+                'us_content_template', 'us_page_block',
+                'us_grid_layout',      'us_header',
+            ];
+
+            foreach ( $rows as $row ) {
+                $key       = $row['meta_key'];
+                $field_key = $row['field_key'];
+
+                // Actief ACF-veld → overslaan
+                if ( in_array( $field_key, $active_field_keys, true ) ) {
+                    $valid_count++;
+                    continue;
+                }
+
+                // Orphaned: field_key bestaat niet meer in actieve ACF velden
+                $row_count = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s",
+                    $key
+                ) );
+
+                // Check aanwezigheid in template post_content / post_excerpt
+                $in_templates = false;
+                foreach ( $template_types as $type ) {
+                    $like  = '%' . $wpdb->esc_like( $key ) . '%';
+                    $found = (int) $wpdb->get_var( $wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$wpdb->posts}
+                         WHERE post_type   = %s
+                           AND post_status = 'publish'
+                           AND ( post_content LIKE %s OR post_excerpt LIKE %s )",
+                        $type, $like, $like
+                    ) );
+                    if ( $found > 0 ) {
+                        $in_templates = true;
+                        break;
+                    }
+                }
+
+                $orphaned[] = [
+                    'meta_key'     => $key,
+                    'field_key'    => $field_key,
+                    'rows'         => $row_count,
+                    'in_templates' => $in_templates,
+                    'advies'       => $in_templates
+                        ? 'onderzoek vereist — key gevonden in templates'
+                        : 'verwijderen na akkoord',
+                ];
+            }
+
+            return [
+                'status'   => empty( $orphaned ) ? 'ok' : 'issues_found',
+                'orphaned' => $orphaned,
+                'summary'  => [
+                    'orphaned_keys'    => count( $orphaned ),
+                    'valid_keys'       => $valid_count,
+                    'total_acf_fields' => count( $active_field_keys ),
+                ],
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/db/tables/validate
+     * Detecteert databasetabellen van plugins die niet meer actief zijn.
+     *
+     * Bekende plugin-patronen:
+     * - wpforms_*        → WPForms
+     * - revslider_*      → Revolution Slider
+     * - cf7dbplugin_*    → CF7 Database Plugin
+     *
+     * Onbekende tabellen (niet WordPress core, niet actieve plugin) worden
+     * apart gerapporteerd voor analyse door de gebruiker.
+     */
+    register_rest_route( 'aspera/v1', '/db/tables/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+
+            // Bekende plugin-tabelpatronen (orphaned — plugin niet in standaardinstallatie)
+            $known_patterns = [
+                'wpforms'     => [ 'plugin' => 'WPForms',            'slug' => 'wpforms-lite' ],
+                'revslider'   => [ 'plugin' => 'Revolution Slider',   'slug' => 'revslider' ],
+                'cf7dbplugin' => [ 'plugin' => 'CF7 Database Plugin', 'slug' => 'contact-form-7-to-database-extension' ],
+                'cky'         => [ 'plugin' => 'CookieYes',           'slug' => 'cookieyes-cookie-consent' ],
+                'cli'         => [ 'plugin' => 'Cookie Law Info',     'slug' => 'cookie-law-info' ],
+                'tribe'       => [ 'plugin' => 'The Events Calendar',              'slug' => 'the-events-calendar' ],
+                'mollie'      => [ 'plugin' => 'Mollie Payments for WooCommerce',  'slug' => 'mollie-payments-for-woocommerce' ],
+                'wcpdf'       => [ 'plugin' => 'PDF Invoices & Packing Slips',     'slug' => 'woocommerce-pdf-invoices-packing-slips' ],
+                'spu'         => [ 'plugin' => 'Popup by Supsystic',               'slug' => 'popup-by-supsystic' ],
+                'wppopups'    => [ 'plugin' => 'WP Popups',                        'slug' => 'wp-popups-lite' ],
+            ];
+
+            // Tabelpatronen van bekende essentiële of veelgebruikte plugins — niet flaggen
+            $essentials_patterns = [
+                'aiowps_', 'burst_', 'wpmailsmtp_', 'wpo_',
+                'yoast_', 'redirection_', 'mwai_', 'tm_',
+                'actionscheduler_', 'us_filter_',
+                'wc_', // WooCommerce HPOS + analytics tabellen
+            ];
+
+            // WordPress core tabellen (zonder prefix)
+            $core_tables = [
+                'commentmeta', 'comments', 'links', 'options', 'postmeta',
+                'posts', 'term_relationships', 'term_taxonomy', 'termmeta', 'terms',
+                'usermeta', 'users', 'blogs', 'blog_versions', 'registration_log',
+                'signups', 'site', 'sitemeta', 'acf_meta',
+                // WooCommerce core
+                'woocommerce_sessions', 'woocommerce_api_keys', 'woocommerce_attribute_taxonomies',
+                'woocommerce_downloadable_product_permissions', 'woocommerce_order_items',
+                'woocommerce_order_itemmeta', 'woocommerce_tax_rates', 'woocommerce_tax_rate_locations',
+                'woocommerce_shipping_zones', 'woocommerce_shipping_zone_locations',
+                'woocommerce_shipping_zone_methods', 'woocommerce_payment_tokens',
+                'woocommerce_payment_tokenmeta', 'woocommerce_log',
+            ];
+
+            // Actieve plugin slugs ophalen
+            if ( ! function_exists( 'get_plugins' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+            $active_plugins = (array) get_option( 'active_plugins', [] );
+            $active_slugs   = array_map( function( $file ) {
+                return strpos( $file, '/' ) !== false ? explode( '/', $file )[0] : str_replace( '.php', '', $file );
+            }, $active_plugins );
+
+            $prefix   = $wpdb->prefix;
+            $tables   = $wpdb->get_col( 'SHOW TABLES' );
+            $orphaned = [];
+            $unknown  = [];
+
+            foreach ( $tables as $table ) {
+                if ( strpos( $table, $prefix ) !== 0 ) continue;
+
+                $bare = substr( $table, strlen( $prefix ) );
+
+                if ( in_array( $bare, $core_tables, true ) ) continue;
+
+                // Essentiële plugin-tabel? Overslaan.
+                $is_essential = false;
+                foreach ( $essentials_patterns as $ep ) {
+                    if ( strpos( $bare, $ep ) === 0 ) { $is_essential = true; break; }
+                }
+                if ( $is_essential ) continue;
+
+                $matched = false;
+                foreach ( $known_patterns as $pattern => $info ) {
+                    if ( strpos( $bare, $pattern ) === 0 ) {
+                        $matched = true;
+                        if ( ! in_array( $info['slug'], $active_slugs, true ) ) {
+                            $orphaned[] = [
+                                'table'         => $table,
+                                'pattern'       => $pattern . '_*',
+                                'plugin'        => $info['plugin'],
+                                'plugin_active' => false,
+                                'advies'        => 'verwijderen na akkoord',
+                            ];
+                        }
+                        break;
+                    }
+                }
+
+                if ( ! $matched ) {
+                    $unknown[] = [
+                        'table'  => $table,
+                        'advies' => 'analyseer herkomst en vraag wat te doen',
+                    ];
+                }
+            }
+
+            // ── Bekende plugin post types — orphaned wanneer plugin inactief ──
+            $known_post_types = [
+                'wppopups'          => [ 'plugin' => 'WP Popups',              'slug' => 'wp-popups-lite' ],
+                'popup'             => [ 'plugin' => 'Popup Maker',             'slug' => 'popup-maker' ],
+                'spu'               => [ 'plugin' => 'Popup by Supsystic',      'slug' => 'popup-by-supsystic' ],
+                'cookielawinfo'     => [ 'plugin' => 'Cookie Law Info',         'slug' => 'cookie-law-info' ],
+                'shortcoder'        => [ 'plugin' => 'Shortcoder',              'slug' => 'shortcoder' ],
+                'wpcode'            => [ 'plugin' => 'WPCode',                  'slug' => 'insert-headers-and-footers' ],
+                'wpforms'           => [ 'plugin' => 'WPForms',                 'slug' => 'wpforms-lite' ],
+                'tribe_events'      => [ 'plugin' => 'The Events Calendar',     'slug' => 'the-events-calendar' ],
+                'elementor_library' => [ 'plugin' => 'Elementor',               'slug' => 'elementor' ],
+            ];
+
+            // Post types die altijd veilig zijn — nooit flaggen
+            $safe_post_types = [
+                'shop_order_placehold', // WooCommerce HPOS legacy placeholders
+                'wpconsent_cookie',     // WPConsent cookie-definities
+            ];
+
+            $orphaned_post_types = [];
+            foreach ( $known_post_types as $post_type => $info ) {
+                if ( in_array( $post_type, $safe_post_types, true ) ) continue;
+                if ( in_array( $info['slug'], $active_slugs, true ) ) continue;
+                $count = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type = %s",
+                    $post_type
+                ) );
+                if ( $count > 0 ) {
+                    $orphaned_post_types[] = [
+                        'post_type'     => $post_type,
+                        'plugin'        => $info['plugin'],
+                        'plugin_active' => false,
+                        'count'         => $count,
+                        'advies'        => 'verwijderen na akkoord',
+                    ];
+                }
+            }
+
+            // ── Bekende plugin option-prefixen — orphaned wanneer plugin inactief ──
+            $known_option_prefixes = [
+                'wppopups'      => [ 'plugin' => 'WP Popups',           'slug' => 'wp-popups-lite' ],
+                'spu_'          => [ 'plugin' => 'Popup by Supsystic',  'slug' => 'popup-by-supsystic' ],
+                'cookielawinfo_'=> [ 'plugin' => 'Cookie Law Info',      'slug' => 'cookie-law-info' ],
+                'shortcoder_'   => [ 'plugin' => 'Shortcoder',           'slug' => 'shortcoder' ],
+                'wpcode_'       => [ 'plugin' => 'WPCode',               'slug' => 'insert-headers-and-footers' ],
+                'wpforms_'      => [ 'plugin' => 'WPForms',              'slug' => 'wpforms-lite' ],
+                'tribe_'        => [ 'plugin' => 'The Events Calendar',  'slug' => 'the-events-calendar' ],
+                'popup_maker_'  => [ 'plugin' => 'Popup Maker',          'slug' => 'popup-maker' ],
+            ];
+
+            $orphaned_options = [];
+            foreach ( $known_option_prefixes as $prefix => $info ) {
+                if ( in_array( $info['slug'], $active_slugs, true ) ) continue;
+                $like  = $wpdb->esc_like( $prefix ) . '%';
+                $count = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name LIKE %s", $like
+                ) );
+                if ( $count > 0 ) {
+                    $examples = $wpdb->get_col( $wpdb->prepare(
+                        "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT 5", $like
+                    ) );
+                    $orphaned_options[] = [
+                        'prefix'        => $prefix,
+                        'plugin'        => $info['plugin'],
+                        'plugin_active' => false,
+                        'count'         => $count,
+                        'examples'      => $examples,
+                        'advies'        => 'verwijderen na akkoord',
+                    ];
+                }
+            }
+
+            return [
+                'status'              => empty( $orphaned ) && empty( $unknown ) && empty( $orphaned_post_types ) && empty( $orphaned_options ) ? 'ok' : 'issues_found',
+                'orphaned_tables'     => $orphaned,
+                'unknown_tables'      => $unknown,
+                'orphaned_post_types' => $orphaned_post_types,
+                'orphaned_options'    => $orphaned_options,
+                'summary'             => [
+                    'orphaned_tables'     => count( $orphaned ),
+                    'unknown_tables'      => count( $unknown ),
+                    'orphaned_post_types' => count( $orphaned_post_types ),
+                    'orphaned_options'    => count( $orphaned_options ),
+                ],
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/forms/validate
+     * Valideert alle us_cform shortcodes op beleidsschendingen.
+     * Zoekt in alle gepubliceerde post types (geen revisies).
+     *
+     * Gecontroleerde regels:
+     * - cform_inbound_disabled (site-wide: theme option uit terwijl formulieren actief)
+     * - missing_receiver_email / hardcoded_receiver_email
+     * - missing_button_text / hardcoded_button_text / empty_button_style
+     * - missing_success_message / hardcoded_success_message
+     * - missing_email_subject
+     * - missing_email_message / missing_field_list
+     * - missing_recaptcha
+     * - missing_email_field / wrong_email_field_type
+     * - missing_move_label
+     *
+     * Observaties (geen schending, altijd gerapporteerd):
+     * - hide_form_after_sending (aan/uit)
+     * - fields (label, type, required per veld)
+     * - missing_recommended_fields (naam, email, onderwerp, bericht)
+     */
+    register_rest_route( 'aspera/v1', '/forms/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+
+            $posts = $wpdb->get_results(
+                "SELECT ID, post_type, post_title, post_content
+                 FROM {$wpdb->posts}
+                 WHERE post_status = 'publish'
+                 AND post_type != 'revision'
+                 AND post_content LIKE '%[us_cform%'"
+            );
+
+            // ─── Site-wide: us_cform_inbound actief? ──────────────────────
+            $cform_inbound_active = post_type_exists( 'us_cform_inbound' );
+            $theme_opts           = get_option( 'usof_options_Impreza', [] );
+            $cform_inbound_option = ! empty( $theme_opts['cform_inbound_messages'] );
+
+            if ( empty( $posts ) ) {
+                return [
+                    'cform_inbound_active' => $cform_inbound_active,
+                    'forms_found'          => 0,
+                    'forms_with_issues'    => 0,
+                    'forms'                => [],
+                ];
+            }
+
+            $results = [];
+
+            foreach ( $posts as $post ) {
+
+                if ( ! preg_match( '/\[us_cform((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $post->post_content, $m ) ) {
+                    continue;
+                }
+
+                // ─── Attribuut parsing ──────────────────────────────────────
+                $attrs = [];
+                preg_match_all( '/(\w+)="([^"]*)"/', $m[1], $attr_matches, PREG_SET_ORDER );
+                foreach ( $attr_matches as $a ) {
+                    $attrs[ $a[1] ] = $a[2];
+                }
+
+                $violations   = [];
+                $observations = [];
+
+                // ─── Items decoderen (URL-encoded JSON) ────────────────────
+                $fields = [];
+                if ( ! empty( $attrs['items'] ) ) {
+                    $decoded = json_decode( urldecode( $attrs['items'] ), true );
+                    if ( is_array( $decoded ) ) {
+                        $fields = $decoded;
+                    }
+                }
+
+                // ─── success_message decoderen (base64 → urldecode) ────────
+                $success_decoded = '';
+                if ( ! empty( $attrs['success_message'] ) ) {
+                    $success_decoded = urldecode( base64_decode( $attrs['success_message'] ) );
+                }
+
+                // ─── email_message decoderen (base64 → urldecode) ──────────
+                $email_message_decoded = '';
+                if ( ! empty( $attrs['email_message'] ) ) {
+                    $email_message_decoded = urldecode( base64_decode( $attrs['email_message'] ) );
+                }
+
+                // ─── receiver_email ────────────────────────────────────────
+                $receiver = $attrs['receiver_email'] ?? '';
+                if ( $receiver === '' ) {
+                    $violations[] = [ 'rule' => 'missing_receiver_email', 'detail' => 'receiver_email ontbreekt' ];
+                } elseif ( ! preg_match( '/^\{\{option\/recipient_opt_/', $receiver ) ) {
+                    $violations[] = [ 'rule' => 'hardcoded_receiver_email', 'detail' => 'receiver_email is niet via option page: "' . $receiver . '"' ];
+                }
+
+                // ─── button_text ───────────────────────────────────────────
+                $button_text = $attrs['button_text'] ?? '';
+                if ( $button_text === '' ) {
+                    $violations[] = [ 'rule' => 'missing_button_text', 'detail' => 'button_text ontbreekt' ];
+                } elseif ( ! preg_match( '/^\{\{option\/bl_opt_/', $button_text ) ) {
+                    $violations[] = [ 'rule' => 'hardcoded_button_text', 'detail' => 'button_text is niet via option page: "' . $button_text . '"' ];
+                }
+
+                // ─── empty_button_style: button_style="" aanwezig ──────────
+                if ( isset( $attrs['button_style'] ) && $attrs['button_style'] === '' ) {
+                    $violations[] = [ 'rule' => 'empty_button_style', 'detail' => 'button_style="" — submit-button stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza' ];
+                }
+
+                // ─── success_message ───────────────────────────────────────
+                if ( empty( $attrs['success_message'] ) ) {
+                    $violations[] = [ 'rule' => 'missing_success_message', 'detail' => 'success_message ontbreekt' ];
+                } elseif ( ! preg_match( '/\{\{option\/submittext_opt_/', $success_decoded ) ) {
+                    $violations[] = [ 'rule' => 'hardcoded_success_message', 'detail' => 'success_message verwijst niet naar option page veld (gedecodeerd: "' . $success_decoded . '")' ];
+                }
+
+                // ─── email_subject ─────────────────────────────────────────
+                if ( empty( $attrs['email_subject'] ) ) {
+                    $violations[] = [ 'rule' => 'missing_email_subject', 'detail' => 'email_subject ontbreekt' ];
+                }
+
+                // ─── email_message / field_list ────────────────────────────
+                if ( empty( $attrs['email_message'] ) ) {
+                    $violations[] = [ 'rule' => 'missing_email_message', 'detail' => 'email_message ontbreekt' ];
+                } elseif ( strpos( $email_message_decoded, '[field_list]' ) === false ) {
+                    $violations[] = [ 'rule' => 'missing_field_list', 'detail' => 'email_message bevat geen [field_list] (gedecodeerd: "' . $email_message_decoded . '")' ];
+                }
+
+                // ─── Veld-level checks ─────────────────────────────────────
+                $has_recaptcha  = false;
+                $has_email_type = false;
+                $field_list     = [];
+
+                foreach ( $fields as $field ) {
+                    $type        = $field['type'] ?? '';
+                    $label       = $field['label'] ?? '';
+                    $required    = isset( $field['required'] ) && $field['required'] === '1';
+                    $placeholder = $field['placeholder'] ?? '';
+                    $move_label  = $field['move_label'] ?? '0';
+
+                    if ( $type === 'reCAPTCHA' ) {
+                        $has_recaptcha = true;
+                        $field_list[]  = [ 'label' => 'reCAPTCHA', 'type' => 'reCAPTCHA', 'required' => false ];
+                        continue;
+                    }
+
+                    if ( $type === 'email' ) {
+                        $has_email_type = true;
+                    }
+
+                    // E-mailveld met verkeerd type
+                    if ( $label !== '' && stripos( $label, 'email' ) !== false && $type !== 'email' ) {
+                        $violations[] = [ 'rule' => 'wrong_email_field_type', 'detail' => 'Veld "' . $label . '" lijkt een e-mailveld maar heeft type "' . $type . '" in plaats van "email"' ];
+                    }
+
+                    // Placeholder zonder move_label
+                    if ( $placeholder !== '' && $move_label !== '1' ) {
+                        $violations[] = [ 'rule' => 'missing_move_label', 'detail' => 'Veld "' . $label . '" heeft een placeholder maar move_label is niet ingeschakeld' ];
+                    }
+
+                    $field_list[] = [
+                        'label'    => $label ?: $type,
+                        'type'     => $type,
+                        'required' => $required,
+                    ];
+                }
+
+                if ( ! $has_recaptcha ) {
+                    $violations[] = [ 'rule' => 'missing_recaptcha', 'detail' => 'Geen reCAPTCHA veld aanwezig' ];
+                }
+
+                if ( ! $has_email_type ) {
+                    $violations[] = [ 'rule' => 'missing_email_field', 'detail' => 'Geen veld met type "email" aanwezig' ];
+                }
+
+                // ─── Option page veldwaarden ophalen en controleren ────────
+                $option_values = [];
+                foreach ( [
+                    'receiver_email' => $attrs['receiver_email'] ?? '',
+                    'button_text'    => $attrs['button_text'] ?? '',
+                    'success_message'=> $success_decoded,
+                ] as $attr_key => $ref ) {
+                    // Extraheer slug uit {{option/slug}}
+                    if ( preg_match( '/^\{\{option\/(.+?)\}\}$/', $ref, $slug_match ) ) {
+                        $slug  = $slug_match[1];
+                        $value = get_option( 'options_' . $slug, null );
+                        $option_values[ $slug ] = $value;
+                        if ( $value === null || $value === '' ) {
+                            $violations[] = [
+                                'rule'   => 'empty_option_field',
+                                'detail' => 'Option page veld "' . $slug . '" is leeg — formulier functioneert niet correct',
+                            ];
+                        }
+                    }
+                }
+
+                // ─── Observaties ───────────────────────────────────────────
+                $observations['hide_form_after_sending'] = isset( $attrs['hide_form_after_sending'] ) && $attrs['hide_form_after_sending'] === '1';
+                $observations['option_values']           = $option_values;
+                $observations['fields']                  = $field_list;
+
+                // Aanbevolen velden (contactformulier minimum)
+                $labels_lower        = array_map( 'strtolower', array_column( $field_list, 'label' ) );
+                $recommended         = [
+                    'naam'      => [ 'naam', 'voornaam', 'name' ],
+                    'email'     => [ 'email', 'emailadres' ],
+                    'onderwerp' => [ 'onderwerp', 'subject' ],
+                    'bericht'   => [ 'bericht', 'message', 'tekst' ],
+                ];
+                $missing_recommended = [];
+                foreach ( $recommended as $key => $patterns ) {
+                    $found = false;
+                    foreach ( $patterns as $p ) {
+                        foreach ( $labels_lower as $l ) {
+                            if ( strpos( $l, $p ) !== false ) {
+                                $found = true;
+                                break 2;
+                            }
+                        }
+                    }
+                    if ( ! $found ) {
+                        $missing_recommended[] = $key;
+                    }
+                }
+                if ( ! empty( $missing_recommended ) ) {
+                    $observations['missing_recommended_fields'] = $missing_recommended;
+                }
+
+                $results[] = [
+                    'post_id'      => (int) $post->ID,
+                    'post_type'    => $post->post_type,
+                    'post_title'   => $post->post_title,
+                    'status'       => empty( $violations ) ? 'ok' : 'violations_found',
+                    'violations'   => $violations,
+                    'observations' => $observations,
+                ];
+            }
+
+            // ─── WPForms detectie (site-wide, alle post types) ─────────────
+            $wpforms_posts = $wpdb->get_results(
+                "SELECT ID, post_type, post_title
+                 FROM {$wpdb->posts}
+                 WHERE post_status = 'publish'
+                 AND post_type != 'revision'
+                 AND post_content LIKE '%[wpforms%'"
+            );
+
+            $wpforms_detected = [];
+            foreach ( $wpforms_posts as $wp ) {
+                $wpforms_detected[] = [
+                    'post_id'    => (int) $wp->ID,
+                    'post_type'  => $wp->post_type,
+                    'post_title' => $wp->post_title,
+                    'notice'     => 'deprecated: vervang [wpforms] door us_cform (Impreza formuliersysteem)',
+                ];
+            }
+
+            // WPForms in custom fields (postmeta)
+            $wpforms_meta = $wpdb->get_results(
+                "SELECT DISTINCT p.ID, p.post_type, p.post_title
+                 FROM {$wpdb->postmeta} pm
+                 JOIN {$wpdb->posts} p ON p.ID = pm.post_id
+                 WHERE pm.meta_value LIKE '%[wpforms%'
+                 AND p.post_status = 'publish'
+                 AND p.post_type != 'revision'"
+            );
+            foreach ( $wpforms_meta as $wp ) {
+                $already = array_filter( $wpforms_detected, fn( $r ) => $r['post_id'] === (int) $wp->ID );
+                if ( empty( $already ) ) {
+                    $wpforms_detected[] = [
+                        'post_id'    => (int) $wp->ID,
+                        'post_type'  => $wp->post_type,
+                        'post_title' => $wp->post_title,
+                        'notice'     => 'deprecated (custom field): vervang [wpforms] door us_cform (Impreza formuliersysteem)',
+                    ];
+                }
+            }
+
+            // ─── Site-wide violation: inbound messages uitgeschakeld ──────
+            $site_violations = [];
+            if ( count( $results ) > 0 && ! $cform_inbound_option ) {
+                $site_violations[] = [
+                    'rule'   => 'cform_inbound_disabled',
+                    'detail' => 'cform_inbound_messages staat op 0 in usof_options_Impreza terwijl er ' . count( $results ) . ' actieve formulieren zijn — inzendingen worden niet opgeslagen in de database',
+                ];
+            }
+
+            return [
+                'cform_inbound_active' => $cform_inbound_active,
+                'cform_inbound_option' => $cform_inbound_option,
+                'site_violations'      => $site_violations,
+                'forms_found'          => count( $results ),
+                'forms_with_issues'    => count( array_filter( $results, fn( $r ) => $r['status'] !== 'ok' ) ),
+                'forms'                => $results,
+                'wpforms_detected'     => $wpforms_detected,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/grid/validate
+     * Valideert alle us_grid_layout en us_header posts op configuratiefouten.
+     *
+     * Gecontroleerde regels:
+     * - empty_style_attr         — style="" of *_style="" op elementen (stijlobject verwijderd)
+     * - hardcoded_label          — label bevat hardcoded tekst zonder ACF-veldverwijzing
+     * - hardcoded_image          — img= bevat hardcoded numeriek media-ID
+     * - hardcoded_link           — link= bevat hardcoded URL (btn:*)
+     * - missing_hide_empty       — post_custom_field:* waarbij hide_empty niet 1 is
+     * - missing_color_link       — post_custom_field:* waarbij color_link niet 0 is
+     * - missing_hide_with_empty_link — btn:* of text:* met link waarbij hide_with_empty_link niet 1 is
+     * - css_forbidden            — css property aanwezig op een element (custom inline CSS)
+     * - wrong_option_syntax      — {{option: in plaats van {{option/ in een elementwaarde
+     * - missing_acf_link         — btn:* label verwijst naar {{bl_...}} maar link is geen custom_field
+     * - wrong_link_field_prefix  — btn:* link verwijst naar opt_ veld zonder option/ prefix
+     * - image_lazy_loading_enabled    — image:* (us_header) disable_lazy_loading != 1
+     * - image_missing_homepage_link   — image:* (us_header) link is niet {"type":"homepage"}
+     * - image_has_ratio               — image:* (us_header) has_ratio = 1
+     * - image_has_style               — image:* (us_header) style is niet leeg
+     * - image_wrong_size              — image:* (us_header) size is niet "full"
+     */
+    register_rest_route( 'aspera/v1', '/grid/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+            $post_ids = $wpdb->get_col(
+                "SELECT ID FROM {$wpdb->posts}
+                 WHERE post_type IN ('us_grid_layout','us_header')
+                 AND post_status = 'publish'"
+            );
+
+            $results = [];
+
+            foreach ( $post_ids as $post_id ) {
+                $post    = get_post( (int) $post_id );
+                $data    = json_decode( $post->post_content, true );
+
+                if ( ! is_array( $data ) || empty( $data['data'] ) ) continue;
+
+                $violations = [];
+
+                foreach ( $data['data'] as $element_key => $element ) {
+                    if ( ! is_array( $element ) ) continue;
+
+                    $element_type = (string) strstr( $element_key, ':', true );
+
+                    // ─── empty_style_attr ─────────────────────────────────────
+                    // Uitzondering: image:* en img:* — style="" is toegestaan
+                    if ( ! in_array( $element_type, [ 'image', 'img' ], true ) ) {
+                        foreach ( $element as $attr_key => $attr_val ) {
+                            if ( ( $attr_key === 'style' || substr( $attr_key, -6 ) === '_style' )
+                                 && $attr_val === '' ) {
+                                $violations[] = [
+                                    'element' => $element_key,
+                                    'rule'    => 'empty_style_attr',
+                                    'detail'  => $attr_key . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza',
+                                ];
+                            }
+                        }
+                    }
+
+                    // ─── css_forbidden ───────────────────────────────────────
+                    if ( isset( $element['css'] ) && $element['css'] !== '' ) {
+                        $violations[] = [
+                            'element' => $element_key,
+                            'rule'    => 'css_forbidden',
+                            'detail'  => 'css property aanwezig — custom inline CSS buiten Impreza stijlsysteem',
+                        ];
+                    }
+
+                    // ─── wrong_option_syntax ─────────────────────────────────
+                    foreach ( $element as $attr_key => $attr_val ) {
+                        if ( is_string( $attr_val ) && strpos( $attr_val, '{{option:' ) !== false ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'wrong_option_syntax',
+                                'detail'  => $attr_key . ' bevat {{option:...}} — gebruik {{option/...}}',
+                            ];
+                        }
+                    }
+
+                    // ─── hardcoded_label ──────────────────────────────────────
+                    $label = $element['label'] ?? null;
+                    if ( $label !== null && $label !== ''
+                         && preg_match( '/[a-zA-Z]/', $label )
+                         && strpos( $label, '{{' ) === false ) {
+                        $violations[] = [
+                            'element' => $element_key,
+                            'rule'    => 'hardcoded_label',
+                            'detail'  => 'label="' . $label . '" — hardcoded tekst; gebruik een ACF-veldverwijzing',
+                        ];
+                    }
+
+                    // ─── hardcoded_image ──────────────────────────────────────
+                    if ( in_array( $element_type, [ 'image', 'img' ], true ) ) {
+                        $img = $element['img'] ?? null;
+                        if ( $img !== null && $img !== '' && ctype_digit( (string) $img ) ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'hardcoded_image',
+                                'detail'  => 'img=' . $img . ' — hardcoded media-ID; gebruik een ACF-veldverwijzing',
+                            ];
+                        }
+                    }
+
+                    // ─── image:* header-logo validatie (us_header only) ──────
+                    if ( $element_type === 'image' && $post->post_type === 'us_header' ) {
+
+                        // image_lazy_loading_enabled — disable_lazy_loading moet 1 zijn
+                        if ( ( $element['disable_lazy_loading'] ?? 0 ) != 1 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_lazy_loading_enabled',
+                                'detail'  => 'disable_lazy_loading is niet ingesteld — logo staat boven de fold en moet direct laden',
+                            ];
+                        }
+
+                        // image_missing_homepage_link — link moet {"type":"homepage"} zijn
+                        $img_link_raw  = $element['link'] ?? null;
+                        $img_link_data = is_string( $img_link_raw ) ? json_decode( urldecode( $img_link_raw ), true ) : null;
+                        if ( ! is_array( $img_link_data ) || ( $img_link_data['type'] ?? '' ) !== 'homepage' ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_missing_homepage_link',
+                                'detail'  => 'link is niet ingesteld op homepage — logo moet altijd naar de homepage linken',
+                            ];
+                        }
+
+                        // image_has_ratio — has_ratio moet 0 zijn
+                        if ( ( $element['has_ratio'] ?? 0 ) == 1 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_has_ratio',
+                                'detail'  => 'has_ratio=1 — aspect ratio is verboden op een header-logo',
+                            ];
+                        }
+
+                        // image_has_style — style moet leeg of afwezig zijn
+                        if ( isset( $element['style'] ) && $element['style'] !== '' ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_has_style',
+                                'detail'  => 'style="' . $element['style'] . '" — image style is verboden op een header-logo',
+                            ];
+                        }
+
+                        // image_wrong_size — size moet "full" zijn
+                        if ( ( $element['size'] ?? '' ) !== 'full' ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_wrong_size',
+                                'detail'  => 'size="' . ( $element['size'] ?? '' ) . '" — enige toegestane waarde is "full"',
+                            ];
+                        }
+                    }
+
+                    // ─── btn checks ──────────────────────────────────────────
+                    if ( $element_type === 'btn' ) {
+                        $link_raw  = $element['link'] ?? null;
+                        $link_data = ( $link_raw !== null )
+                            ? json_decode( urldecode( (string) $link_raw ), true )
+                            : null;
+
+                        // ─── hardcoded_link ───────────────────────────────────
+                        if ( is_array( $link_data )
+                             && ( ! isset( $link_data['type'] ) || $link_data['type'] !== 'custom_field' )
+                             && ! empty( $link_data['url'] ) ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'hardcoded_link',
+                                'detail'  => 'link bevat hardcoded URL "' . $link_data['url'] . '" — gebruik een ACF custom_field verwijzing',
+                            ];
+                        }
+
+                        // ─── missing_acf_link ────────────────────────────────
+                        $btn_label = $element['label'] ?? '';
+                        if ( preg_match( '/\{\{bl_[\w_]+\}\}/', $btn_label ) ) {
+                            if ( ! is_array( $link_data ) || ! isset( $link_data['type'] ) || $link_data['type'] !== 'custom_field' || empty( $link_data['custom_field'] ) ) {
+                                $violations[] = [
+                                    'element' => $element_key,
+                                    'rule'    => 'missing_acf_link',
+                                    'detail'  => 'label verwijst naar ACF bl_-veld maar link heeft geen custom_field verwijzing',
+                                ];
+                            }
+                        }
+
+                        // ─── wrong_link_field_prefix ─────────────────────────
+                        if ( is_array( $link_data )
+                             && isset( $link_data['type'] ) && $link_data['type'] === 'custom_field'
+                             && ! empty( $link_data['custom_field'] )
+                             && preg_match( '/^opt_/', $link_data['custom_field'] ) ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'wrong_link_field_prefix',
+                                'detail'  => 'link verwijst naar "' . $link_data['custom_field'] . '" zonder option/ prefix — gebruik "option/' . $link_data['custom_field'] . '"',
+                            ];
+                        }
+
+                        // ─── missing_hide_with_empty_link (btn) ──────────────
+                        $has_link = is_array( $link_data ) && (
+                            ( ! empty( $link_data['type'] ) && $link_data['type'] !== 'url' ) ||
+                            ! empty( $link_data['url'] )
+                        );
+                        if ( $has_link && ( $element['hide_with_empty_link'] ?? 0 ) != 1 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'missing_hide_with_empty_link',
+                                'detail'  => 'hide_with_empty_link is niet ingeschakeld — element blijft zichtbaar wanneer de link leeg is',
+                            ];
+                        }
+                    }
+
+                    // ─── missing_hide_empty / missing_color_link (post_custom_field) ──
+                    if ( $element_type === 'post_custom_field' ) {
+                        if ( ( $element['hide_empty'] ?? 1 ) != 1 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'missing_hide_empty',
+                                'detail'  => 'hide_empty is niet ingeschakeld — lege veldwaarden worden zichtbaar weergegeven',
+                            ];
+                        }
+                        if ( ( $element['color_link'] ?? 0 ) != 0 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'missing_color_link',
+                                'detail'  => 'color_link staat aan — veldinhoud erft linkkleuren onnodig',
+                            ];
+                        }
+                    }
+
+                    // ─── missing_hide_with_empty_link (text) ─────────────────────────
+                    if ( $element_type === 'text' ) {
+                        $text_link_raw  = $element['link'] ?? null;
+                        $text_link_data = is_string( $text_link_raw ) ? json_decode( urldecode( $text_link_raw ), true ) : null;
+                        $has_link       = is_array( $text_link_data ) && (
+                            ( ! empty( $text_link_data['type'] ) && $text_link_data['type'] !== 'url' ) ||
+                            ! empty( $text_link_data['url'] )
+                        );
+                        if ( $has_link && ( $element['hide_with_empty_link'] ?? 0 ) != 1 ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'missing_hide_with_empty_link',
+                                'detail'  => 'hide_with_empty_link is niet ingeschakeld — element blijft zichtbaar wanneer de link leeg is',
+                            ];
+                        }
+                    }
+
+                    // ─── animate_detected: appear animatie (universeel) ──────────
+                    $el_animate = $element['animate'] ?? null;
+                    if ( $el_animate !== null && $el_animate !== '' ) {
+                        $violations[] = [
+                            'element' => $element_key,
+                            'rule'    => 'animate_detected',
+                            'detail'  => 'animate="' . $el_animate . '" — appear animatie aanwezig',
+                        ];
+                    }
+
+                    // ─── responsive_hide_detected: verborgen op breakpoint (universeel) ──
+                    $el_hide_bps = [];
+                    foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+                        if ( isset( $element['hide_on_' . $bp] ) && $element['hide_on_' . $bp] == 1 ) {
+                            $el_hide_bps[] = $bp;
+                        }
+                    }
+                    if ( ! empty( $el_hide_bps ) ) {
+                        $violations[] = [
+                            'element' => $element_key,
+                            'rule'    => 'responsive_hide_detected',
+                            'detail'  => 'verborgen op: ' . implode( ', ', $el_hide_bps ),
+                        ];
+                    }
+                }
+
+                $results[] = [
+                    'post_id'    => (int) $post_id,
+                    'post_type'  => $post->post_type,
+                    'post_title' => $post->post_title,
+                    'status'     => empty( $violations ) ? 'ok' : 'issues',
+                    'violations' => $violations,
+                ];
+            }
+
+            return [
+                'grids_found'       => count( $post_ids ),
+                'grids_with_issues' => count( array_filter( $results, fn( $r ) => $r['status'] !== 'ok' ) ),
+                'grids'             => $results,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/colors/validate
+     * Scant alle Impreza post types en het actieve child theme op deprecated kleurwaarden.
+     *
+     * Scope:
+     * - us_content_template, us_page_block : WPBakery shortcode kleurattributen
+     * - us_header, us_grid_layout          : JSON keys die 'color' bevatten +
+     *                                        element css-objecten (background-color etc.) +
+     *                                        default.options.color_* tegel-instellingen
+     * - Actief child theme custom.css + style.css : var(--color-*) referenties
+     *
+     * Regels (severity: error):
+     * - deprecated_hex_var    : _bd795c — hex-code als CSS var-naam
+     * - deprecated_custom_var : _cc1 / _rood — onbekende custom var
+     * - hardcoded_hex_color   : #613912 — hardcoded hex (niet #fff/#000)
+     * - deprecated_theme_var  : var(--color-ffffff) in custom.css
+     * - unknown_theme_var     : var(--color-mijnkleur) — niet-Impreza var in CSS
+     *
+     * Regels (severity: observation):
+     * - rgba_color : rgba(0,0,0,0.1) — native CSS kleur, mogelijk vervangbaar
+     */
+    register_rest_route( 'aspera/v1', '/colors/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+
+            $all_violations = [];
+            $observations   = [];
+            $scheme         = aspera_get_color_scheme();
+            $whitelist      = $scheme['whitelist'];
+            $hex_map        = $scheme['hex_map'];
+
+            // ─── 1. WPBakery shortcodes: us_content_template + us_page_block ──
+            $shortcode_posts = $wpdb->get_results(
+                "SELECT ID, post_title, post_type, post_content
+                 FROM {$wpdb->posts}
+                 WHERE post_type IN ('us_content_template','us_page_block')
+                 AND post_status = 'publish'"
+            );
+
+            foreach ( $shortcode_posts as $post ) {
+                // Kleurattributen: naam is 'color' of eindigt op '_color'
+                // color_scheme, color_link etc. vallen hier buiten door de regex
+                preg_match_all( '/\b(\w+_color|color)="([^"]*)"/', $post->post_content, $matches, PREG_SET_ORDER );
+
+                foreach ( $matches as $m ) {
+                    $attr_name = $m[1];
+                    $value     = $m[2];
+                    $issue     = aspera_validate_color_value( $value, $attr_name, $whitelist, $hex_map );
+                    if ( $issue === null ) continue;
+
+                    $entry = [
+                        'post_id'    => (int) $post->ID,
+                        'post_type'  => $post->post_type,
+                        'post_title' => $post->post_title,
+                        'source'     => 'shortcode',
+                        'attribute'  => $attr_name,
+                        'value'      => $value,
+                        'rule'       => $issue['rule'],
+                        'detail'     => $issue['detail'],
+                        'severity'   => $issue['severity'],
+                    ];
+                    if ( isset( $issue['suggestion'] ) ) {
+                        $entry['suggestion'] = $issue['suggestion'];
+                    }
+
+                    if ( $issue['severity'] === 'observation' ) {
+                        $observations[] = $entry;
+                    } else {
+                        $all_violations[] = $entry;
+                    }
+                }
+            }
+
+            // ─── 2. JSON post types: us_header + us_grid_layout ──────────────
+            // Twee scanners per post:
+            // a) aspera_find_color_violations_in_json  — recursief, alle keys met 'color' in naam
+            // b) aspera_scan_grid_extended_colors      — element css-objecten (URL-encoded) + default.options.color_*
+            $json_post_ids = $wpdb->get_col(
+                "SELECT ID FROM {$wpdb->posts}
+                 WHERE post_type IN ('us_header','us_grid_layout')
+                 AND post_status = 'publish'"
+            );
+
+            foreach ( $json_post_ids as $post_id ) {
+                $post = get_post( (int) $post_id );
+                $data = json_decode( $post->post_content, true );
+                if ( ! is_array( $data ) ) continue;
+                aspera_find_color_violations_in_json( $data, $post, $all_violations, $observations, $whitelist, $hex_map );
+                aspera_scan_grid_extended_colors( $data, $post, $all_violations, $observations, $whitelist, $hex_map );
+            }
+
+            // ─── 3. Child theme CSS: custom.css + style.css ──────────────────
+            $theme_dir        = get_stylesheet_directory();
+            $theme_violations = [];
+
+            foreach ( [ 'custom.css', 'style.css' ] as $css_file ) {
+                $css_path = $theme_dir . '/' . $css_file;
+                if ( ! file_exists( $css_path ) ) continue;
+
+                $lines = explode( "\n", file_get_contents( $css_path ) );
+
+                foreach ( $lines as $line_idx => $line ) {
+                    // ── var(--color-*) referenties ────────────────────────────
+                    preg_match_all( '/var\(--color-([a-zA-Z0-9_-]+)\)/', $line, $css_m );
+
+                    foreach ( $css_m[1] as $var_raw ) {
+                        // Hyphens → underscores voor whitelist-vergelijking
+                        $var_name = str_replace( '-', '_', $var_raw );
+                        if ( in_array( $var_name, $whitelist, true ) ) continue;
+                        if ( in_array( $var_name, aspera_impreza_extra_vars(), true ) ) continue;
+
+                        // Hex als var-naam vs. onbekende custom var
+                        $rule = preg_match( '/^[0-9a-fA-F]{3,8}$/', $var_raw )
+                            ? 'deprecated_theme_var'
+                            : 'unknown_theme_var';
+
+                        $theme_violations[] = [
+                            'source'   => $css_file,
+                            'line'     => $line_idx + 1,
+                            'var'      => 'var(--color-' . $var_raw . ')',
+                            'rule'     => $rule,
+                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': var(--color-' . $var_raw . ') is geen geldige Impreza CSS var',
+                            'severity' => 'error',
+                        ];
+                    }
+
+                    // ── Hardcoded hex in CSS-properties ──────────────────────
+                    preg_match_all( '/:\s*(#[0-9a-fA-F]{3,8})\b/', $line, $hex_m );
+
+                    foreach ( $hex_m[1] as $hex_raw ) {
+                        if ( in_array( strtolower( $hex_raw ), [ '#fff', '#ffffff', '#000', '#000000' ], true ) ) continue;
+
+                        $hex_key     = strtolower( $hex_raw );
+                        $suggestions = isset( $hex_map[ $hex_key ] ) ? array_map( fn( $n ) => '_' . $n, $hex_map[ $hex_key ] ) : [];
+
+                        $entry = [
+                            'source'   => $css_file,
+                            'line'     => $line_idx + 1,
+                            'var'      => $hex_raw,
+                            'rule'     => 'hardcoded_hex_color',
+                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': hardcoded hex ' . $hex_raw . '; gebruik een Impreza CSS var',
+                            'severity' => 'error',
+                        ];
+                        if ( ! empty( $suggestions ) ) {
+                            $entry['suggestion'] = implode( ' / ', $suggestions );
+                        }
+                        $theme_violations[] = $entry;
+                    }
+                }
+            }
+
+            $error_count = count( $all_violations )
+                + count( array_filter( $theme_violations, fn( $t ) => $t['severity'] === 'error' ) );
+
+            return [
+                'status'            => $error_count === 0 ? 'ok' : 'violations_found',
+                'violation_count'   => $error_count,
+                'observation_count' => count( $observations ),
+                'post_violations'   => $all_violations,
+                'theme_violations'  => $theme_violations,
+                'observations'      => $observations,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/cpt/validate
+     * Valideert ACF-geregistreerde custom post types:
+     * - supports vs. publicly_queryable consistentie
+     * - CPTUI leftover data in wp_options
+     */
+    register_rest_route( 'aspera/v1', '/cpt/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $violations   = [];
+            $observations = [];
+            $cpt_overview = [];
+
+            // ── 1. CPTUI leftover check ───────────────────────────────────
+            $cptui_data     = get_option( 'cptui_post_types', null );
+            $cptui_leftover = ! empty( $cptui_data );
+
+            // ── 2. ACF-geregistreerde CPTs ophalen ────────────────────────
+            $acf_posts = get_posts( [
+                'post_type'      => 'acf-post-type',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
+
+            $acf_slugs    = [];
+            $icon_tracker = [];
+
+            foreach ( $acf_posts as $acf_post ) {
+                $config = maybe_unserialize( $acf_post->post_content );
+
+                if ( ! is_array( $config ) ) continue;
+
+                $slug                = $config['post_type'] ?? $acf_post->post_excerpt;
+                $publicly_queryable  = ! empty( $config['publicly_queryable'] );
+                $supports            = $config['supports'] ?? [];
+                $menu_icon_raw       = $config['menu_icon'] ?? [];
+                $menu_icon           = is_array( $menu_icon_raw ) ? ( $menu_icon_raw['value'] ?? '' ) : (string) $menu_icon_raw;
+                $show_in_rest        = ! empty( $config['show_in_rest'] );
+                $show_in_nav_menus   = ! empty( $config['show_in_nav_menus'] );
+                $rename_capabilities = ! empty( $config['rename_capabilities'] );
+
+                $acf_slugs[]     = $slug;
+                $icon_tracker[]  = [ 'slug' => $slug, 'icon' => $menu_icon ];
+                $post_violations  = [];
+                $post_observations = [];
+
+                // Regel: geen frontend → alleen 'title' in supports
+                if ( ! $publicly_queryable ) {
+                    $extra = array_diff( $supports, [ 'title' ] );
+                    if ( ! empty( $extra ) ) {
+                        $post_violations[] = [
+                            'rule'   => 'unexpected_supports',
+                            'detail' => 'publicly_queryable is false maar supports bevat: ' . implode( ', ', array_values( $extra ) ),
+                        ];
+                    }
+                }
+
+                // Regel: wél frontend → title altijd verplicht
+                if ( $publicly_queryable && ! in_array( 'title', $supports, true ) ) {
+                    $post_violations[] = [
+                        'rule'   => 'missing_title_support',
+                        'detail' => 'publicly_queryable is true maar title ontbreekt in supports',
+                    ];
+                }
+
+                // Regel: standaard of leeg icoon is niet toegestaan
+                if ( empty( $menu_icon ) || $menu_icon === 'dashicons-admin-post' ) {
+                    $post_violations[] = [
+                        'rule'   => 'default_icon',
+                        'detail' => 'CPT gebruikt het standaard icoon (dashicons-admin-post) of heeft geen icoon — geef elk CPT een uniek herkenbaar icoon',
+                    ];
+                }
+
+                // Regel: show_in_rest altijd verplicht
+                if ( ! $show_in_rest ) {
+                    $post_violations[] = [
+                        'rule'   => 'missing_rest',
+                        'detail' => 'show_in_rest is uitgeschakeld — REST API toegang is altijd vereist voor MCP en Claude',
+                    ];
+                }
+
+                // Regel: show_in_nav_menus inconsistent met frontend
+                if ( ! $publicly_queryable && $show_in_nav_menus ) {
+                    $post_violations[] = [
+                        'rule'   => 'nav_menus_no_frontend',
+                        'detail' => 'show_in_nav_menus is aan maar publicly_queryable is false — CPT zonder frontend hoort niet in het nav menu',
+                    ];
+                }
+
+                // Observatie: frontend aan maar nav_menus uit
+                if ( $publicly_queryable && ! $show_in_nav_menus ) {
+                    $post_observations[] = [
+                        'rule'   => 'nav_menus_missing_frontend',
+                        'detail' => 'show_in_nav_menus is uit terwijl publicly_queryable aan staat — controleer of dit bewust is',
+                    ];
+                }
+
+                // Observatie: custom permissions ingeschakeld
+                if ( $rename_capabilities ) {
+                    $post_observations[] = [
+                        'rule'   => 'custom_permissions',
+                        'detail' => 'rename_capabilities is ingeschakeld — in 99% van de gevallen moet dit uit staan; controleer of dit bewust is',
+                    ];
+                }
+
+                // ── Labels validatie ──────────────────────────────────────
+                $labels   = $config['labels'] ?? [];
+                $plural   = trim( $labels['name'] ?? '' );
+                $singular = trim( $labels['singular_name'] ?? '' );
+
+                // Regel: verplichte labels mogen niet leeg zijn
+                $required_labels = [ 'name', 'singular_name', 'all_items', 'edit_item', 'view_item', 'add_new_item', 'search_items', 'not_found' ];
+                $empty_labels    = [];
+                foreach ( $required_labels as $lkey ) {
+                    if ( empty( trim( $labels[ $lkey ] ?? '' ) ) ) {
+                        $empty_labels[] = $lkey;
+                    }
+                }
+                if ( ! empty( $empty_labels ) ) {
+                    $post_violations[] = [
+                        'rule'   => 'empty_labels',
+                        'detail' => 'Verplichte labels zijn leeg: ' . implode( ', ', $empty_labels ) . ' — gebruik de ACF genereerknop',
+                    ];
+                }
+
+                // Observatie: plural en singular zijn identiek
+                if ( $plural !== '' && $singular !== '' && strtolower( $plural ) === strtolower( $singular ) ) {
+                    $post_observations[] = [
+                        'rule'   => 'plural_singular_identical',
+                        'detail' => 'Plural ("' . $plural . '") en singular ("' . $singular . '") zijn identiek — controleer of dit grammaticaal gerechtvaardigd is',
+                    ];
+                }
+
+                $cpt_entry = [
+                    'slug'               => $slug,
+                    'label'              => $config['labels']['name'] ?? $acf_post->post_title,
+                    'publicly_queryable' => $publicly_queryable,
+                    'supports'           => $supports,
+                    'menu_icon'          => $menu_icon,
+                    'show_in_rest'       => $show_in_rest,
+                    'show_in_nav_menus'  => $show_in_nav_menus,
+                ];
+
+                if ( ! empty( $post_violations ) ) {
+                    $cpt_entry['violations'] = $post_violations;
+                    foreach ( $post_violations as $v ) {
+                        $violations[] = array_merge( [ 'cpt' => $slug ], $v );
+                    }
+                }
+
+                if ( ! empty( $post_observations ) ) {
+                    $cpt_entry['observations'] = $post_observations;
+                    foreach ( $post_observations as $o ) {
+                        $observations[] = array_merge( [ 'cpt' => $slug ], $o );
+                    }
+                }
+
+                $cpt_overview[] = $cpt_entry;
+            }
+
+            // ── 3. CPTUI-slugs die niet in ACF staan (echte leftover) ─────
+            $cptui_orphans = [];
+            if ( $cptui_leftover && is_array( $cptui_data ) ) {
+                foreach ( array_keys( $cptui_data ) as $cptui_slug ) {
+                    if ( ! in_array( $cptui_slug, $acf_slugs, true ) ) {
+                        $cptui_orphans[] = $cptui_slug;
+                    }
+                }
+            }
+
+            // ── 4. Duplicate icoon check ──────────────────────────────────
+            $icon_map = [];
+            foreach ( $icon_tracker as $item ) {
+                if ( empty( $item['icon'] ) ) continue;
+                $icon_map[ $item['icon'] ][] = $item['slug'];
+            }
+            foreach ( $icon_map as $icon => $slugs ) {
+                if ( count( $slugs ) < 2 ) continue;
+                foreach ( $cpt_overview as &$entry ) {
+                    if ( ! in_array( $entry['slug'], $slugs, true ) ) continue;
+                    $others = implode( ', ', array_diff( $slugs, [ $entry['slug'] ] ) );
+                    $dup    = [
+                        'rule'   => 'duplicate_icon',
+                        'detail' => 'Icoon ' . $icon . ' wordt ook gebruikt door: ' . $others,
+                    ];
+                    $entry['violations'][] = $dup;
+                    $violations[]          = array_merge( [ 'cpt' => $entry['slug'] ], $dup );
+                }
+                unset( $entry );
+            }
+
+            $error_count = count( $violations ) + ( $cptui_leftover ? 1 : 0 );
+
+            return [
+                'status'            => $error_count === 0 ? 'ok' : 'violations_found',
+                'violation_count'   => $error_count,
+                'observation_count' => count( $observations ),
+                'cptui_leftover'    => $cptui_leftover,
+                'cptui_orphans'     => $cptui_orphans,
+                'cpt_count'         => count( $cpt_overview ),
+                'cpts'              => $cpt_overview,
+                'violations'        => $violations,
+                'observations'      => $observations,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/site/audit
+     * Geconsolideerde site-audit: aggregeert alle validatie-endpoints, berekent health score.
+     *
+     * Gebruikt rest_do_request() voor interne REST-aanroepen (geen HTTP overhead).
+     * Categorieën: wpb, grid, colors, acf_slugs, forms, plugins, cpt, db_tables.
+     *
+     * Health score: max(0, 100 - sum_of_deductions)
+     * Severity tiers: critical (3pt), error (2pt), warning (1pt), observation (0pt)
+     * Per-categorie cap voorkomt dat één probleemgebied de gehele score domineert.
+     *
+     * Slaat resultaat op in wp_options voor toekomstige delta-rapportage:
+     * - aspera_audit_score  (int)
+     * - aspera_audit_date   (ISO 8601)
+     * - aspera_audit_summary (json)
+     */
+
+    // ── /css/unused ──────────────────────────────────────────────────────
+    // Detecteert ongebruikte custom CSS classes in het actieve child theme.
+    // Vergelijkt classes uit style.css met post_content van de 5 relevante
+    // post types. Impreza framework selectors worden overgeslagen.
+    register_rest_route( 'aspera/v1', '/css/unused', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+
+            // ── 1. Lees style.css van het actieve child theme ────────────
+            $theme_dir = get_stylesheet_directory();
+            $css_path  = $theme_dir . '/style.css';
+
+            if ( ! file_exists( $css_path ) ) {
+                return new WP_Error( 'no_css', 'Geen style.css gevonden in het actieve theme.', [ 'status' => 404 ] );
+            }
+
+            $css_content = file_get_contents( $css_path );
+
+            // Strip de theme header comment (alles vóór eerste */)
+            $header_end = strpos( $css_content, '*/' );
+            if ( $header_end !== false ) {
+                $css_body = substr( $css_content, $header_end + 2 );
+            } else {
+                $css_body = $css_content;
+            }
+
+            // ── 2. Parse CSS: extraheer class-namen per regel ────────────
+            // Bekende Impreza/WordPress framework prefixen — overslaan
+            $framework_prefixes = [
+                'l-',           // layout: l-section, l-footer, l-header, l-canvas, l-main
+                'w-',           // componenten: w-nav, w-btn, w-grid, w-form, w-image
+                'ush_',         // Impreza internals
+                'us-',          // Impreza utility classes
+                'type_',        // modifier
+                'color_',       // modifier
+                'pos_',         // modifier
+                'level_',       // modifier
+                'height_',      // modifier
+                'hover_',       // modifier
+                'no-touch',     // feature detection
+                'menu-item',    // WordPress nav
+                'full_height',  // Impreza modifier
+                'g-cols',       // Impreza grid columns
+                'align_',       // Impreza alignment
+                'valign_',      // Impreza vertical alignment
+                'state_',       // Impreza state
+                'with_',        // Impreza modifier
+                'at_',          // Impreza breakpoint
+                'hidden',       // Impreza visibility
+                'style_',       // Impreza style modifier
+                'size_',        // Impreza size modifier
+            ];
+
+            // Alle classes extraheren uit de CSS (zonder theme header)
+            preg_match_all( '/\.([a-zA-Z_][a-zA-Z0-9_-]*)/', $css_body, $class_matches );
+            $all_classes = array_unique( $class_matches[1] );
+
+            // Classificeer: custom vs framework
+            $custom_classes    = [];
+            $framework_classes = [];
+
+            foreach ( $all_classes as $class ) {
+                $is_framework = false;
+                foreach ( $framework_prefixes as $prefix ) {
+                    if ( strpos( $class, $prefix ) === 0 || $class === rtrim( $prefix, '-_' ) ) {
+                        $is_framework = true;
+                        break;
+                    }
+                }
+                if ( $is_framework ) {
+                    $framework_classes[] = $class;
+                } else {
+                    $custom_classes[] = $class;
+                }
+            }
+
+            if ( empty( $custom_classes ) ) {
+                return [
+                    'status'              => 'ok',
+                    'unused'              => [],
+                    'used'                => [],
+                    'framework_overrides' => count( $framework_classes ),
+                    'total_custom'        => 0,
+                ];
+            }
+
+            // ── 3. Zoek custom classes in post_content ───────────────────
+            // Doorzoek de 5 relevante post types
+            $post_types = [ 'us_header', 'us_content_template', 'us_page_block', 'us_grid_layout', 'page' ];
+            $placeholders = implode( ',', array_fill( 0, count( $post_types ), '%s' ) );
+
+            $all_content = $wpdb->get_col(
+                $wpdb->prepare(
+                    "SELECT post_content FROM {$wpdb->posts}
+                     WHERE post_type IN ({$placeholders})
+                     AND post_status = 'publish'",
+                    ...$post_types
+                )
+            );
+
+            // Combineer alle post_content + post_excerpt (voor us_grid_layout)
+            $all_excerpts = $wpdb->get_col(
+                $wpdb->prepare(
+                    "SELECT post_excerpt FROM {$wpdb->posts}
+                     WHERE post_type IN ({$placeholders})
+                     AND post_status = 'publish'
+                     AND post_excerpt != ''",
+                    ...$post_types
+                )
+            );
+
+            $search_blob = implode( "\n", array_merge( $all_content, $all_excerpts ) );
+
+            // ── 4. Per custom class: zoek in de gecombineerde content ────
+            $unused = [];
+            $used   = [];
+
+            // Bouw per-class een regelnummer-referentie
+            $css_lines = explode( "\n", $css_content );
+
+            foreach ( $custom_classes as $class ) {
+                // Zoek of de class voorkomt in post_content/post_excerpt
+                if ( strpos( $search_blob, $class ) !== false ) {
+                    $used[] = $class;
+                } else {
+                    // Vind het regelnummer in style.css
+                    $line_num = null;
+                    foreach ( $css_lines as $idx => $line ) {
+                        if ( strpos( $line, '.' . $class ) !== false ) {
+                            $line_num = $idx + 1;
+                            break;
+                        }
+                    }
+
+                    // Vind de volledige selector
+                    $selector = null;
+                    preg_match( '/([^{}]*\.' . preg_quote( $class, '/' ) . '[^{]*)\{/', $css_content, $sel_match );
+                    if ( ! empty( $sel_match[1] ) ) {
+                        $selector = trim( $sel_match[1] );
+                    }
+
+                    $unused[] = [
+                        'class'    => $class,
+                        'selector' => $selector,
+                        'line'     => $line_num,
+                    ];
+                }
+            }
+
+            return [
+                'status'              => empty( $unused ) ? 'ok' : 'unused_found',
+                'unused'              => $unused,
+                'used'                => $used,
+                'framework_overrides' => count( $framework_classes ),
+                'total_custom'        => count( $custom_classes ),
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/nav/validate
+     * Detecteert ongebruikte navigatiemenu's. Een menu is "in gebruik" als:
+     *   1. De slug voorkomt in post_content van de 5 Impreza post types, OF
+     *   2. Het menu is toegewezen aan een theme location (nav_menu_locations), OF
+     *   3. Het menu is toegewezen aan een nav_menu widget, OF
+     *   4. Het menu is het WPBakery-default (eerste alfabetisch) en er bestaan
+     *      [us_additional_menu] shortcodes zonder source= attribuut.
+     *      WPBakery slaat de default-keuze niet op als attribuut.
+     */
+    register_rest_route( 'aspera/v1', '/nav/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            global $wpdb;
+
+            $menus = wp_get_nav_menus();
+            if ( empty( $menus ) ) {
+                return [ 'status' => 'ok', 'menus' => [], 'unused' => [] ];
+            }
+
+            // 1. Theme locations
+            $locations     = get_nav_menu_locations();
+            $located_ids   = is_array( $locations ) ? array_values( array_filter( $locations ) ) : [];
+
+            // 2. Widget toewijzingen
+            $widget_data   = get_option( 'widget_nav_menu', [] );
+            $widget_ids    = [];
+            if ( is_array( $widget_data ) ) {
+                foreach ( $widget_data as $w ) {
+                    if ( is_array( $w ) && ! empty( $w['nav_menu'] ) ) {
+                        $widget_ids[] = (int) $w['nav_menu'];
+                    }
+                }
+            }
+
+            // 3. Post content search — zoek slug in de 5 relevante post types
+            $post_types = [ 'us_header', 'us_content_template', 'us_page_block', 'us_grid_layout', 'page' ];
+            $pt_in      = implode( ',', array_map( fn( $t ) => $wpdb->prepare( '%s', $t ), $post_types ) );
+
+            // 4. WPBakery default-menu detectie: wp_get_nav_menus() retourneert
+            //    alfabetisch gesorteerd — het eerste menu is de WPBakery default.
+            //    Zoek of er [us_additional_menu ...] shortcodes bestaan ZONDER source= attribuut.
+            $default_menu_slug = $menus[0]->slug;
+            $has_sourceless    = false;
+
+            $sourceless_posts = $wpdb->get_results(
+                "SELECT ID, post_title, post_type, post_content
+                 FROM {$wpdb->posts}
+                 WHERE post_status = 'publish'
+                   AND post_type IN ({$pt_in})
+                   AND post_content LIKE '%us_additional_menu%'"
+            );
+
+            $menu_slugs      = array_map( fn( $m ) => $m->slug, $menus );
+            $default_used_in = [];
+            $broken_refs     = [];
+
+            foreach ( $sourceless_posts as $p ) {
+                // Match [us_additional_menu ...] — met of zonder source= attribuut
+                if ( preg_match_all( '/\[us_additional_menu([^\]]*)\]/', $p->post_content, $m ) ) {
+                    foreach ( $m[1] as $attrs ) {
+                        if ( strpos( $attrs, 'source=' ) === false ) {
+                            // Geen source= → implicit default (eerste menu alfabetisch)
+                            $has_sourceless = true;
+                            $default_used_in[] = $p->post_type . ':' . $p->ID . ' (' . $p->post_title . ') [implicit default]';
+                        } elseif ( preg_match( '/source="([^"]*)"/', $attrs, $src ) ) {
+                            // source= aanwezig → controleer of het menu bestaat
+                            $ref_slug = $src[1];
+                            if ( ! in_array( $ref_slug, $menu_slugs, true ) ) {
+                                $broken_refs[] = [
+                                    'rule'      => 'broken_menu_reference',
+                                    'slug'      => $ref_slug,
+                                    'post_id'   => (int) $p->ID,
+                                    'post_title'=> $p->post_title,
+                                    'post_type' => $p->post_type,
+                                    'detail'    => 'source="' . $ref_slug . '" verwijst naar niet-bestaand menu in ' . $p->post_type . ':' . $p->ID . ' (' . $p->post_title . ')',
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ook us_header JSON: "source":"slug" in menu:* elementen
+            $headers = $wpdb->get_results(
+                "SELECT ID, post_title, post_content
+                 FROM {$wpdb->posts}
+                 WHERE post_status = 'publish'
+                   AND post_type = 'us_header'"
+            );
+            foreach ( $headers as $h ) {
+                $hdata = json_decode( $h->post_content, true );
+                if ( ! is_array( $hdata ) || ! isset( $hdata['data'] ) ) continue;
+                foreach ( $hdata['data'] as $el_id => $el ) {
+                    if ( strpos( $el_id, 'menu:' ) !== 0 && strpos( $el_id, 'additional_menu:' ) !== 0 ) continue;
+                    $src_slug = $el['source'] ?? '';
+                    if ( $src_slug !== '' && ! in_array( $src_slug, $menu_slugs, true ) ) {
+                        $broken_refs[] = [
+                            'rule'      => 'broken_menu_reference',
+                            'slug'      => $src_slug,
+                            'post_id'   => (int) $h->ID,
+                            'post_title'=> $h->post_title,
+                            'post_type' => 'us_header',
+                            'element'   => $el_id,
+                            'detail'    => 'source:"' . $src_slug . '" verwijst naar niet-bestaand menu in us_header:' . $h->ID . ' (' . $h->post_title . '), element ' . $el_id,
+                        ];
+                    }
+                }
+            }
+
+            $result  = [];
+            $unused  = [];
+
+            foreach ( $menus as $menu ) {
+                $slug = $menu->slug;
+                $id   = (int) $menu->term_id;
+                $used_in = [];
+
+                // Theme location?
+                if ( in_array( $id, $located_ids, true ) ) {
+                    $loc_name = array_search( $id, $locations, true );
+                    $used_in[] = 'theme_location:' . $loc_name;
+                }
+
+                // Widget?
+                if ( in_array( $id, $widget_ids, true ) ) {
+                    $used_in[] = 'widget';
+                }
+
+                // Post content? (slug kan voorkomen als source="slug" of "source":"slug")
+                $found = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT ID, post_title, post_type
+                     FROM {$wpdb->posts}
+                     WHERE post_status = 'publish'
+                       AND post_type IN ({$pt_in})
+                       AND post_content LIKE %s",
+                    '%' . $wpdb->esc_like( $slug ) . '%'
+                ) );
+
+                foreach ( $found as $p ) {
+                    $used_in[] = $p->post_type . ':' . $p->ID . ' (' . $p->post_title . ')';
+                }
+
+                // WPBakery implicit default?
+                if ( $slug === $default_menu_slug && $has_sourceless ) {
+                    $used_in = array_merge( $used_in, $default_used_in );
+                }
+
+                $entry = [
+                    'term_id' => $id,
+                    'name'    => $menu->name,
+                    'slug'    => $slug,
+                    'count'   => (int) $menu->count,
+                    'used_in' => $used_in,
+                ];
+
+                $result[] = $entry;
+
+                if ( empty( $used_in ) ) {
+                    $unused[] = [
+                        'term_id' => $id,
+                        'name'    => $menu->name,
+                        'slug'    => $slug,
+                        'count'   => (int) $menu->count,
+                        'rule'    => 'unused_nav_menu',
+                        'detail'  => 'Menu "' . $menu->name . '" (slug: ' . $slug . ', ' . $menu->count . ' items) wordt nergens gebruikt',
+                    ];
+                }
+            }
+
+            // ── Naamgevingscontrole ──────────────────────────────────────
+            $naming_issues = [];
+
+            foreach ( $result as $entry ) {
+                $name    = $entry['name'];
+                $used_in = $entry['used_in'];
+
+                // 1. invalid_menu_name — geen "Plaatsing - Naam" patroon
+                if ( strpos( $name, ' - ' ) === false ) {
+                    $naming_issues[] = [
+                        'term_id' => $entry['term_id'],
+                        'name'    => $name,
+                        'slug'    => $entry['slug'],
+                        'rule'    => 'invalid_menu_name',
+                        'detail'  => 'Menu "' . $name . '" mist het patroon "Plaatsing - Naam" (bijv. "Header - Hoofdmenu", "Footer - Links")',
+                    ];
+                    continue; // Geen mismatch-check als naam al ongeldig is
+                }
+
+                // 2. mismatched_menu_placement — plaatsing in naam matcht niet met werkelijk gebruik
+                if ( empty( $used_in ) ) continue; // Ongebruikt menu, mismatch niet relevant
+
+                $placement = strtolower( trim( explode( ' - ', $name, 2 )[0] ) );
+
+                // Bepaal waar het menu daadwerkelijk gebruikt wordt
+                $in_header       = false;
+                $in_footer_post  = false;
+                foreach ( $used_in as $ref ) {
+                    if ( strpos( $ref, 'us_header:' ) === 0 ) {
+                        $in_header = true;
+                    }
+                    // Check of de post-titel "footer" bevat (case-insensitive)
+                    if ( preg_match( '/\(([^)]+)\)/', $ref, $ref_m ) ) {
+                        if ( stripos( $ref_m[1], 'footer' ) !== false ) {
+                            $in_footer_post = true;
+                        }
+                    }
+                }
+
+                $mismatch = '';
+                if ( $placement === 'header' && ! $in_header ) {
+                    $mismatch = 'Menu heet "' . $name . '" (plaatsing: header) maar wordt niet gebruikt in een us_header';
+                } elseif ( $placement === 'footer' && $in_header ) {
+                    $mismatch = 'Menu heet "' . $name . '" (plaatsing: footer) maar wordt gebruikt in een us_header';
+                } elseif ( $placement === 'sidebar' && ( $in_header || $in_footer_post ) ) {
+                    $mismatch = 'Menu heet "' . $name . '" (plaatsing: sidebar) maar wordt gebruikt in een ' . ( $in_header ? 'us_header' : 'footer page block' );
+                }
+
+                if ( $mismatch !== '' ) {
+                    $naming_issues[] = [
+                        'term_id' => $entry['term_id'],
+                        'name'    => $name,
+                        'slug'    => $entry['slug'],
+                        'rule'    => 'mismatched_menu_placement',
+                        'detail'  => $mismatch,
+                    ];
+                }
+            }
+
+            // ── Externe links zonder target _blank ────────────────────
+            $link_issues = [];
+            $site_host   = wp_parse_url( home_url(), PHP_URL_HOST );
+
+            foreach ( $menus as $menu ) {
+                $items = wp_get_nav_menu_items( $menu->term_id );
+                if ( ! is_array( $items ) ) continue;
+
+                foreach ( $items as $item ) {
+                    $url = $item->url ?? '';
+                    if ( $url === '' || $url === '#' ) continue;
+
+                    $link_host = wp_parse_url( $url, PHP_URL_HOST );
+                    if ( $link_host === null || $link_host === $site_host ) continue;
+
+                    // Extern domein — target moet _blank zijn
+                    if ( $item->target !== '_blank' ) {
+                        $link_issues[] = [
+                            'menu'    => $menu->name,
+                            'item_id' => (int) $item->ID,
+                            'title'   => $item->title,
+                            'url'     => $url,
+                            'rule'    => 'external_link_no_target_blank',
+                            'detail'  => 'Menu-item "' . $item->title . '" in "' . $menu->name . '" linkt naar extern domein (' . $link_host . ') maar opent niet in nieuw tabblad',
+                        ];
+                    }
+                }
+            }
+
+            // ── Pagina-controles ─────────────────────────────────────
+            $page_issues = [];
+
+            // Verzamel alle page IDs die in een menu voorkomen + custom labels
+            $menu_page_ids = [];
+            $label_checks  = [];
+
+            foreach ( $menus as $menu ) {
+                $items = wp_get_nav_menu_items( $menu->term_id );
+                if ( ! is_array( $items ) ) continue;
+
+                foreach ( $items as $item ) {
+                    if ( $item->object !== 'page' ) continue;
+                    $page_id = (int) $item->object_id;
+                    $menu_page_ids[ $page_id ] = true;
+
+                    // Custom label check: post_title op nav_menu_item is de aangepaste titel
+                    $custom_label = get_post_field( 'post_title', $item->ID, 'raw' );
+                    if ( $custom_label !== '' ) {
+                        $page_title = get_the_title( $page_id );
+                        if ( $custom_label !== $page_title ) {
+                            $label_checks[] = [
+                                'menu'        => $menu->name,
+                                'item_id'     => (int) $item->ID,
+                                'page_id'     => $page_id,
+                                'page_title'  => $page_title,
+                                'menu_label'  => $custom_label,
+                                'rule'        => 'custom_menu_label',
+                                'detail'      => 'Menu-item in "' . $menu->name . '" toont "' . $custom_label . '" voor pagina "' . $page_title . '" (ID ' . $page_id . ')',
+                            ];
+                        }
+                    }
+                }
+            }
+
+            // Pagina's die niet in een menu voorkomen
+            $all_pages = get_posts( [
+                'post_type'      => 'page',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+                'fields'         => 'ids',
+            ] );
+
+            $not_in_menu = [];
+            foreach ( $all_pages as $pid ) {
+                if ( ! isset( $menu_page_ids[ $pid ] ) ) {
+                    $not_in_menu[] = [
+                        'page_id'    => (int) $pid,
+                        'page_title' => get_the_title( $pid ),
+                        'rule'       => 'page_not_in_menu',
+                        'detail'     => 'Pagina "' . get_the_title( $pid ) . '" (ID ' . $pid . ') komt niet voor in een navigatiemenu',
+                    ];
+                }
+            }
+
+            $page_issues = array_merge( $not_in_menu, $label_checks );
+
+            $has_issues = ! empty( $unused ) || ! empty( $broken_refs ) || ! empty( $naming_issues ) || ! empty( $link_issues ) || ! empty( $page_issues );
+
+            return [
+                'status'           => $has_issues ? 'issues_found' : 'ok',
+                'total_menus'      => count( $menus ),
+                'unused'           => $unused,
+                'broken_references'=> $broken_refs,
+                'naming_issues'    => $naming_issues,
+                'link_issues'      => $link_issues,
+                'page_issues'      => $page_issues,
+                'menus'            => $result,
+            ];
+        },
+    ] );
+
+    // ── Widget validatie ────────────────────────────────────────
+    register_rest_route( 'aspera/v1', '/widgets/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            global $wpdb;
+
+            $violations = [];
+
+            // 1. Widgetised sidebar shortcodes in template post types
+            $template_types = [ 'us_content_template', 'us_page_block', 'us_header', 'us_grid_layout', 'us_testimonial' ];
+            $placeholders   = implode( ',', array_fill( 0, count( $template_types ), '%s' ) );
+            $query          = $wpdb->prepare(
+                "SELECT ID, post_title, post_type
+                 FROM {$wpdb->posts}
+                 WHERE post_type IN ({$placeholders})
+                   AND post_status = 'publish'
+                   AND post_content LIKE %s",
+                array_merge( $template_types, [ '%vc_widget_sidebar%' ] )
+            );
+            $sidebar_posts = $wpdb->get_results( $query );
+
+            foreach ( $sidebar_posts as $p ) {
+                $violations[] = [
+                    'rule'    => 'widgetised_sidebar_in_template',
+                    'post_id' => (int) $p->ID,
+                    'detail'  => "[vc_widget_sidebar] in {$p->post_type} \"{$p->post_title}\" (ID {$p->ID})",
+                ];
+            }
+
+            // 2. Extra widget areas (us_widget_areas option)
+            $widget_areas = get_option( 'us_widget_areas', [] );
+            if ( ! is_array( $widget_areas ) ) {
+                $widget_areas = [];
+            }
+            foreach ( $widget_areas as $area ) {
+                $area_name = is_array( $area ) ? ( $area['name'] ?? $area['id'] ?? 'onbekend' ) : (string) $area;
+                $violations[] = [
+                    'rule'   => 'extra_widget_area',
+                    'detail' => "Extra widget area: \"{$area_name}\" — moet verwijderd worden",
+                ];
+            }
+
+            // 3. Default sidebar moet leeg zijn + actieve widgets in alle sidebars detecteren
+            $sidebars = get_option( 'sidebars_widgets', [] );
+            $default  = $sidebars['default_sidebar'] ?? [];
+
+            if ( ! empty( $default ) ) {
+                $violations[] = [
+                    'rule'   => 'default_sidebar_not_empty',
+                    'detail' => 'default_sidebar bevat ' . count( $default ) . ' actieve widget(s)',
+                ];
+            }
+
+            // Helper: analyseer widgets in een sidebar
+            $analyse_widgets = function ( array $widget_ids, string $sidebar_id ) use ( &$violations ) {
+                $location = $sidebar_id === 'default_sidebar' ? '' : " in \"{$sidebar_id}\"";
+
+                foreach ( $widget_ids as $widget_id ) {
+                    if ( ! preg_match( '/^(.+)-(\d+)$/', $widget_id, $wm ) ) continue;
+                    $type = $wm[1];
+                    $num  = (int) $wm[2];
+
+                    $widget_data = get_option( "widget_{$type}", [] );
+                    $instance    = $widget_data[ $num ] ?? [];
+                    $title       = trim( $instance['title'] ?? '' );
+                    $title_info  = $title !== '' ? " Titel: \"{$title}\"." : '';
+
+                    if ( $type === 'text' ) {
+                        $preview  = mb_substr( strip_tags( $instance['text'] ?? '' ), 0, 100 );
+                        $has_body = trim( $instance['text'] ?? '' ) !== '';
+                        $violations[] = [
+                            'rule'   => 'active_widget_text',
+                            'detail' => "Text widget ({$widget_id}){$location}.{$title_info} Inhoud: \"{$preview}\". Vervanging: titel → text-field (H4) + [us_text], body → WYSIWYG + [us_post_custom_field]",
+                        ];
+                    } elseif ( $type === 'nav_menu' ) {
+                        $menu_id   = $instance['nav_menu'] ?? 0;
+                        $menu_obj  = wp_get_nav_menu_object( $menu_id );
+                        $menu_name = $menu_obj ? $menu_obj->name : "ID {$menu_id}";
+                        $violations[] = [
+                            'rule'   => 'active_widget_nav_menu',
+                            'detail' => "Navigation Menu widget ({$widget_id}){$location}.{$title_info} Menu: \"{$menu_name}\". Vervanging: titel → text-field + [us_text] (H4), menu → [us_additional_menu source=\"{$menu_name}\"]",
+                        ];
+                    } else {
+                        $violations[] = [
+                            'rule'   => 'active_widget_other',
+                            'detail' => "Widget ({$widget_id}) type \"{$type}\"{$location}.{$title_info} Deprecated, verwijderen",
+                        ];
+                    }
+                }
+            };
+
+            // Default sidebar widgets
+            if ( ! empty( $default ) ) {
+                $analyse_widgets( $default, 'default_sidebar' );
+            }
+
+            // 4. Actieve widgets in ANDERE sidebars
+            foreach ( $sidebars as $sidebar_id => $widgets ) {
+                if ( $sidebar_id === 'default_sidebar' || $sidebar_id === 'wp_inactive_widgets' || $sidebar_id === 'array_version' ) continue;
+                if ( ! is_array( $widgets ) || empty( $widgets ) ) continue;
+                $analyse_widgets( $widgets, $sidebar_id );
+            }
+
+            return [
+                'status'          => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations'      => $violations,
+                'violation_count' => count( $violations ),
+                'widget_areas'    => array_keys( array_filter( $sidebars, function ( $v, $k ) {
+                    return $k !== 'array_version' && $k !== 'wp_inactive_widgets' && is_array( $v );
+                }, ARRAY_FILTER_USE_BOTH ) ),
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/modules/validate
+     * Detecteert verboden WPBakery Custom CSS/JS op posts en actieve Module Manager modules.
+     * Custom CSS en JS via WPBakery zijn ten strengste verboden — alle styling hoort in
+     * het child theme, alle functionaliteit in plugins.
+     */
+    register_rest_route( 'aspera/v1', '/wpb/modules/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            global $wpdb;
+
+            $violations = [];
+
+            // 1. Per-post custom CSS (_wpb_post_custom_css)
+            $css_posts = $wpdb->get_results(
+                "SELECT p.ID, p.post_title, p.post_type, pm.meta_value
+                 FROM {$wpdb->postmeta} pm
+                 JOIN {$wpdb->posts} p ON pm.post_id = p.ID
+                 WHERE pm.meta_key = '_wpb_post_custom_css'
+                   AND pm.meta_value != ''
+                   AND p.post_status = 'publish'"
+            );
+            foreach ( $css_posts as $row ) {
+                $violations[] = [
+                    'rule'      => 'wpb_post_custom_css',
+                    'post_id'   => (int) $row->ID,
+                    'post_title'=> $row->post_title,
+                    'post_type' => $row->post_type,
+                    'preview'   => mb_substr( $row->meta_value, 0, 200 ),
+                    'detail'    => 'WPBakery Custom CSS op ' . $row->post_type . ':' . $row->ID . ' (' . $row->post_title . ')',
+                ];
+            }
+
+            // 2. Per-post custom JS header + footer
+            $js_posts = $wpdb->get_results(
+                "SELECT p.ID, p.post_title, p.post_type, pm.meta_key, pm.meta_value
+                 FROM {$wpdb->postmeta} pm
+                 JOIN {$wpdb->posts} p ON pm.post_id = p.ID
+                 WHERE pm.meta_key IN ('_wpb_post_custom_js_header', '_wpb_post_custom_js_footer')
+                   AND pm.meta_value != ''
+                   AND p.post_status = 'publish'"
+            );
+            foreach ( $js_posts as $row ) {
+                $location = str_contains( $row->meta_key, 'header' ) ? 'header' : 'footer';
+                $violations[] = [
+                    'rule'      => 'wpb_post_custom_js',
+                    'post_id'   => (int) $row->ID,
+                    'post_title'=> $row->post_title,
+                    'post_type' => $row->post_type,
+                    'location'  => $location,
+                    'preview'   => mb_substr( $row->meta_value, 0, 200 ),
+                    'detail'    => 'WPBakery Custom JS (' . $location . ') op ' . $row->post_type . ':' . $row->ID . ' (' . $row->post_title . ')',
+                ];
+            }
+
+            // 3. Module Manager — alle modules moeten uit staan
+            $modules_raw = get_option( 'wpb_js_modules', '' );
+            $modules     = is_string( $modules_raw ) ? json_decode( $modules_raw, true ) : [];
+            $active_modules = [];
+
+            if ( is_array( $modules ) ) {
+                foreach ( $modules as $module => $enabled ) {
+                    if ( $enabled === true ) {
+                        $active_modules[] = $module;
+                        $violations[] = [
+                            'rule'   => 'wpb_module_active',
+                            'module' => $module,
+                            'detail' => 'WPBakery Module Manager: "' . $module . '" is actief — alle modules moeten uitgeschakeld zijn',
+                        ];
+                    }
+                }
+            }
+
+            return [
+                'status'          => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations'      => $violations,
+                'active_modules'  => $active_modules,
+                'module_settings' => $modules,
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/wpb/templates/validate
+     * Detecteert opgeslagen WPBakery templates in wp_options (wpb_js_templates).
+     * Vrijwel altijd onnodig — signaleer voor verwijdering.
+     */
+    register_rest_route( 'aspera/v1', '/wpb/templates/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            $raw       = get_option( 'wpb_js_templates', '' );
+            $templates = is_string( $raw ) && ! empty( $raw ) ? maybe_unserialize( $raw ) : $raw;
+            $count     = is_array( $templates ) ? count( $templates ) : 0;
+
+            $violations = [];
+            if ( $count > 0 ) {
+                $violations[] = [
+                    'rule'   => 'wpb_saved_templates',
+                    'count'  => $count,
+                    'detail' => $count . ' opgeslagen WPBakery template(s) gevonden in wpb_js_templates — verwijder via WPBakery Templates venster',
+                ];
+            }
+
+            return [
+                'status'     => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations' => $violations,
+                'count'      => $count,
+            ];
+        },
+    ] );
+
+    // ── Theme breakpoint validatie ──────────────────────────────
+    register_rest_route( 'aspera/v1', '/theme/breakpoints', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            $raw = get_option( 'usof_options_Impreza', '' );
+            if ( empty( $raw ) ) {
+                return new WP_Error( 'no_theme_options', 'usof_options_Impreza niet gevonden', [ 'status' => 404 ] );
+            }
+            $opts = is_serialized( $raw ) ? unserialize( $raw ) : $raw;
+            if ( ! is_array( $opts ) ) {
+                return new WP_Error( 'invalid_data', 'usof_options_Impreza is geen geldige array', [ 'status' => 500 ] );
+            }
+
+            $keys = [
+                'site_content_width',
+                'laptops_breakpoint',
+                'tablets_breakpoint',
+                'mobiles_breakpoint',
+                'columns_stacking_width',
+                'disable_effects_width',
+            ];
+
+            $values = [];
+            foreach ( $keys as $k ) {
+                $values[ $k ] = isset( $opts[ $k ] ) ? (int) $opts[ $k ] : null;
+            }
+
+            $issues = [];
+
+            // Regel 1: mobile groep moet identiek zijn
+            $mobile_bp   = $values['mobiles_breakpoint'];
+            $col_stack   = $values['columns_stacking_width'];
+            $disable_fx  = $values['disable_effects_width'];
+
+            if ( $mobile_bp !== null ) {
+                if ( $col_stack !== null && $col_stack !== $mobile_bp ) {
+                    $issues[] = [
+                        'rule'   => 'breakpoint_mobile_group_mismatch',
+                        'detail' => "columns_stacking_width ({$col_stack}px) wijkt af van mobiles_breakpoint ({$mobile_bp}px)",
+                    ];
+                }
+                if ( $disable_fx !== null && $disable_fx !== $mobile_bp ) {
+                    $issues[] = [
+                        'rule'   => 'breakpoint_mobile_group_mismatch',
+                        'detail' => "disable_effects_width ({$disable_fx}px) wijkt af van mobiles_breakpoint ({$mobile_bp}px)",
+                    ];
+                }
+            }
+
+            // Regel 2: logische volgorde laptops > tablets > mobiles
+            $laptops = $values['laptops_breakpoint'];
+            $tablets = $values['tablets_breakpoint'];
+            $mobiles = $values['mobiles_breakpoint'];
+
+            if ( $laptops !== null && $tablets !== null && $laptops <= $tablets ) {
+                $issues[] = [
+                    'rule'   => 'breakpoint_order_invalid',
+                    'detail' => "laptops_breakpoint ({$laptops}px) <= tablets_breakpoint ({$tablets}px)",
+                ];
+            }
+            if ( $tablets !== null && $mobiles !== null && $tablets <= $mobiles ) {
+                $issues[] = [
+                    'rule'   => 'breakpoint_order_invalid',
+                    'detail' => "tablets_breakpoint ({$tablets}px) <= mobiles_breakpoint ({$mobiles}px)",
+                ];
+            }
+
+            // Regel 3: conventie-afwijking
+            if ( $tablets !== null && $tablets !== 1100 ) {
+                $issues[] = [
+                    'rule'   => 'breakpoint_convention_deviation',
+                    'detail' => "tablets_breakpoint is {$tablets}px (conventie: 1100px)",
+                ];
+            }
+            if ( $mobiles !== null && $mobiles !== 900 ) {
+                $issues[] = [
+                    'rule'   => 'breakpoint_convention_deviation',
+                    'detail' => "mobiles_breakpoint is {$mobiles}px (conventie: 900px)",
+                ];
+            }
+
+            // Regel 4: breakpoints mogen niet hoger zijn dan site_content_width
+            $content_w = $values['site_content_width'];
+            if ( $content_w !== null ) {
+                foreach ( [ 'laptops_breakpoint', 'tablets_breakpoint', 'mobiles_breakpoint' ] as $bp_key ) {
+                    if ( $values[ $bp_key ] !== null && $values[ $bp_key ] > $content_w ) {
+                        $issues[] = [
+                            'rule'   => 'breakpoint_exceeds_content_width',
+                            'detail' => "{$bp_key} ({$values[$bp_key]}px) > site_content_width ({$content_w}px)",
+                        ];
+                    }
+                }
+
+                // Regel 5: laptops_breakpoint moet gelijk zijn aan site_content_width
+                if ( $laptops !== null && $laptops !== $content_w ) {
+                    $issues[] = [
+                        'rule'   => 'laptops_breakpoint_mismatch',
+                        'detail' => "laptops_breakpoint ({$laptops}px) != site_content_width ({$content_w}px) — moet identiek zijn voor correct responsive gedrag",
+                    ];
+                }
+            }
+
+            return [
+                'status'      => empty( $issues ) ? 'ok' : 'issues_found',
+                'values'      => $values,
+                'issues'      => $issues,
+                'issue_count' => count( $issues ),
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/taxonomy/validate
+     * Detecteert verweesde taxonomieën: taxonomieën die in de database bestaan
+     * maar niet meer geregistreerd zijn door een actieve plugin, theme of ACF.
+     *
+     * Per taxonomy wordt gecontroleerd:
+     * 1. taxonomy_exists() — definitieve registratie-check via WordPress
+     * 2. post_content referenties (templates, pages, blocks, headers, grids)
+     * 3. post_excerpt referenties (us_grid_layout JSON)
+     * 4. ACF field group locatieregels
+     * 5. ACF taxonomy-type velden
+     * 6. Nav menu items (links naar term archives)
+     * 7. Theme bestanden (functions.php, style.css, custom.css)
+     * 8. Term relationships → bestaan de gekoppelde posts nog?
+     * 9. wp_termmeta (cleanup scope)
+     *
+     * Statussen:
+     * - orphaned_safe: niet geregistreerd, geen referenties, geen bestaande posts
+     * - orphaned_has_references: niet geregistreerd, maar ergens gerefereerd
+     * - orphaned_has_posts: niet geregistreerd, maar gekoppelde posts bestaan nog
+     */
+    register_rest_route( 'aspera/v1', '/taxonomy/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            global $wpdb;
+
+            // ── Core/interne taxonomieën — altijd overslaan ──────────────
+            $skip_taxonomies = [
+                'category', 'post_tag', 'post_format', 'nav_menu',
+                'wp_theme', 'wp_template_part_area', 'wp_pattern_category',
+                'link_category',
+            ];
+
+            // ── Bekende plugin-herkomst voor rapportage ──────────────────
+            $known_plugins = [
+                'cookielawinfo-category' => 'Cookie Law Info',
+                'tribe_events_cat'       => 'The Events Calendar',
+                'nt_wmc_folder'          => 'Media Folder Plugin',
+                'block_pos_tax'          => 'Onbekend (block positioning)',
+                'wpconsent_category'     => 'WPConsent',
+            ];
+
+            // ── ACF-interne post types — uitsluiten van referentie-checks ─
+            $acf_internal_types = [
+                'acf-taxonomy', 'acf-post-type', 'acf-field-group', 'acf-field',
+                'acf-ui-options-page',
+            ];
+
+            // ── 1. Alle taxonomieën uit de database ──────────────────────
+            $db_taxonomies = $wpdb->get_col(
+                "SELECT DISTINCT taxonomy FROM {$wpdb->term_taxonomy}"
+            );
+
+            $results    = [];
+            $violations = [];
+
+            foreach ( $db_taxonomies as $taxonomy ) {
+
+                // Core overslaan
+                if ( in_array( $taxonomy, $skip_taxonomies, true ) ) continue;
+
+                // Actief geregistreerd? → geen probleem
+                if ( taxonomy_exists( $taxonomy ) ) continue;
+
+                // ── Taxonomy is NIET geregistreerd — referenties checken ─
+
+                $references = [];
+                $esc_tax    = $wpdb->esc_like( $taxonomy );
+                $like       = '%' . $esc_tax . '%';
+
+                // Check 1: post_content referenties (alle relevante post types)
+                $content_refs = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT ID, post_type, post_title FROM {$wpdb->posts}
+                     WHERE post_status IN ('publish','draft','private')
+                     AND post_content LIKE %s",
+                    $like
+                ) );
+                foreach ( $content_refs as $ref ) {
+                    if ( in_array( $ref->post_type, $acf_internal_types, true ) ) continue;
+                    $references[] = [
+                        'location'   => 'post_content',
+                        'post_id'    => (int) $ref->ID,
+                        'post_type'  => $ref->post_type,
+                        'post_title' => $ref->post_title,
+                    ];
+                }
+
+                // Check 2: post_excerpt (us_grid_layout)
+                $excerpt_refs = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT ID, post_title FROM {$wpdb->posts}
+                     WHERE post_type = 'us_grid_layout'
+                     AND post_excerpt LIKE %s",
+                    $like
+                ) );
+                foreach ( $excerpt_refs as $ref ) {
+                    $references[] = [
+                        'location'   => 'post_excerpt (grid layout)',
+                        'post_id'    => (int) $ref->ID,
+                        'post_title' => $ref->post_title,
+                    ];
+                }
+
+                // Check 3: ACF field group locatieregels
+                $fg_refs = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT ID, post_title FROM {$wpdb->posts}
+                     WHERE post_type = 'acf-field-group'
+                     AND post_content LIKE %s",
+                    $like
+                ) );
+                foreach ( $fg_refs as $ref ) {
+                    $references[] = [
+                        'location'   => 'acf-field-group (location rule)',
+                        'post_id'    => (int) $ref->ID,
+                        'post_title' => $ref->post_title,
+                    ];
+                }
+
+                // Check 4: ACF taxonomy-type velden
+                $field_refs = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT ID, post_title, post_excerpt FROM {$wpdb->posts}
+                     WHERE post_type = 'acf-field'
+                     AND post_content LIKE %s
+                     AND post_content LIKE '%%\"taxonomy\"%%'",
+                    $like
+                ) );
+                foreach ( $field_refs as $ref ) {
+                    $references[] = [
+                        'location'   => 'acf-field (taxonomy field type)',
+                        'post_id'    => (int) $ref->ID,
+                        'field_slug' => $ref->post_excerpt,
+                        'post_title' => $ref->post_title,
+                    ];
+                }
+
+                // Check 5: Nav menu items
+                $nav_refs = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT p.ID, p.post_title FROM {$wpdb->posts} p
+                     JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+                     WHERE p.post_type = 'nav_menu_item'
+                     AND pm.meta_key = '_menu_item_object'
+                     AND pm.meta_value = %s",
+                    $taxonomy
+                ) );
+                foreach ( $nav_refs as $ref ) {
+                    $references[] = [
+                        'location'   => 'nav_menu_item',
+                        'post_id'    => (int) $ref->ID,
+                        'post_title' => $ref->post_title,
+                    ];
+                }
+
+                // Check 6: Theme bestanden
+                $theme_dir       = get_stylesheet_directory();
+                $theme_files_hit = [];
+                foreach ( [ 'style.css', 'functions.php', 'custom.css' ] as $file ) {
+                    $path = $theme_dir . '/' . $file;
+                    if ( file_exists( $path ) ) {
+                        $content = file_get_contents( $path );
+                        if ( strpos( $content, $taxonomy ) !== false ) {
+                            $theme_files_hit[] = $file;
+                        }
+                    }
+                }
+                if ( ! empty( $theme_files_hit ) ) {
+                    $references[] = [
+                        'location' => 'theme_files',
+                        'files'    => $theme_files_hit,
+                    ];
+                }
+
+                // ── Term info ophalen ────────────────────────────────────
+                $terms = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT t.term_id, t.name, t.slug, tt.count, tt.term_taxonomy_id
+                     FROM {$wpdb->term_taxonomy} tt
+                     JOIN {$wpdb->terms} t ON tt.term_id = t.term_id
+                     WHERE tt.taxonomy = %s",
+                    $taxonomy
+                ) );
+
+                $term_count  = count( $terms );
+                $unused      = 0;
+                $term_ids    = [];
+                $tt_ids      = [];
+                $term_list   = [];
+
+                foreach ( $terms as $term ) {
+                    if ( (int) $term->count === 0 ) $unused++;
+                    $term_ids[]  = (int) $term->term_id;
+                    $tt_ids[]    = (int) $term->term_taxonomy_id;
+                    $term_list[] = [
+                        'name'  => $term->name,
+                        'slug'  => $term->slug,
+                        'count' => (int) $term->count,
+                    ];
+                }
+
+                // ── Termmeta tellen ──────────────────────────────────────
+                $termmeta_count = 0;
+                if ( ! empty( $term_ids ) ) {
+                    $ph = implode( ',', array_fill( 0, count( $term_ids ), '%d' ) );
+                    $termmeta_count = (int) $wpdb->get_var(
+                        $wpdb->prepare(
+                            "SELECT COUNT(*) FROM {$wpdb->termmeta} WHERE term_id IN ($ph)",
+                            ...$term_ids
+                        )
+                    );
+                }
+
+                // ── Term relationships — orphaned + bestaande posts ──────
+                $orphaned_rels     = 0;
+                $total_rels        = 0;
+                $linked_posts      = [];
+
+                if ( ! empty( $tt_ids ) ) {
+                    $ph = implode( ',', array_fill( 0, count( $tt_ids ), '%d' ) );
+
+                    $total_rels = (int) $wpdb->get_var(
+                        $wpdb->prepare(
+                            "SELECT COUNT(*) FROM {$wpdb->term_relationships}
+                             WHERE term_taxonomy_id IN ($ph)",
+                            ...$tt_ids
+                        )
+                    );
+
+                    $orphaned_rels = (int) $wpdb->get_var(
+                        $wpdb->prepare(
+                            "SELECT COUNT(*) FROM {$wpdb->term_relationships} tr
+                             LEFT JOIN {$wpdb->posts} p ON tr.object_id = p.ID
+                             WHERE tr.term_taxonomy_id IN ($ph)
+                             AND p.ID IS NULL",
+                            ...$tt_ids
+                        )
+                    );
+
+                    $linked_posts = $wpdb->get_results(
+                        $wpdb->prepare(
+                            "SELECT DISTINCT p.ID, p.post_title, p.post_type, p.post_status
+                             FROM {$wpdb->term_relationships} tr
+                             JOIN {$wpdb->posts} p ON tr.object_id = p.ID
+                             WHERE tr.term_taxonomy_id IN ($ph)",
+                            ...$tt_ids
+                        )
+                    );
+                }
+
+                // ── Status bepalen ───────────────────────────────────────
+                $has_references  = ! empty( $references );
+                $has_linked      = ! empty( $linked_posts );
+
+                if ( $has_references ) {
+                    $status = 'orphaned_has_references';
+                } elseif ( $has_linked ) {
+                    $status = 'orphaned_has_posts';
+                } else {
+                    $status = 'orphaned_safe';
+                }
+
+                // ── Entry opbouwen ───────────────────────────────────────
+                $entry = [
+                    'taxonomy'       => $taxonomy,
+                    'registered'     => false,
+                    'status'         => $status,
+                    'probable_plugin'=> $known_plugins[ $taxonomy ] ?? null,
+                    'terms'          => [
+                        'count'  => $term_count,
+                        'unused' => $unused,
+                        'list'   => $term_list,
+                    ],
+                    'termmeta_rows'          => $termmeta_count,
+                    'orphaned_relationships' => $orphaned_rels,
+                    'cleanup_scope'          => [
+                        'wp_terms'              => $term_count,
+                        'wp_term_taxonomy'      => $term_count,
+                        'wp_termmeta'           => $termmeta_count,
+                        'wp_term_relationships' => $total_rels,
+                    ],
+                ];
+
+                if ( $has_references ) {
+                    $entry['references'] = $references;
+                }
+
+                if ( $has_linked ) {
+                    $entry['linked_posts'] = array_map( function ( $p ) {
+                        return [
+                            'post_id'     => (int) $p->ID,
+                            'post_type'   => $p->post_type,
+                            'post_title'  => $p->post_title,
+                            'post_status' => $p->post_status,
+                        ];
+                    }, $linked_posts );
+                }
+
+                $results[] = $entry;
+
+                // Violation voor /site/audit integratie
+                $violations[] = [
+                    'taxonomy' => $taxonomy,
+                    'rule'     => $status === 'orphaned_safe'
+                                    ? 'orphaned_taxonomy'
+                                    : 'orphaned_taxonomy_has_dependencies',
+                    'detail'   => $taxonomy . ': ' . $term_count . ' terms'
+                                  . ( $termmeta_count > 0 ? ', ' . $termmeta_count . ' termmeta' : '' )
+                                  . ( $has_linked ? ', posts bestaan nog' : '' )
+                                  . ( $has_references ? ', referenties gevonden' : '' ),
+                ];
+            }
+
+            return [
+                'status'               => empty( $results ) ? 'ok' : 'issues_found',
+                'orphaned_taxonomies'  => $results,
+                'violations'           => $violations,
+                'summary'              => [
+                    'total_orphaned'  => count( $results ),
+                    'safe_to_remove'  => count( array_filter( $results, function ( $r ) {
+                        return $r['status'] === 'orphaned_safe';
+                    } ) ),
+                    'needs_review'    => count( array_filter( $results, function ( $r ) {
+                        return $r['status'] !== 'orphaned_safe';
+                    } ) ),
+                ],
+            ];
+        },
+    ] );
+
+    register_rest_route( 'aspera/v1', '/site/audit', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            // ── Severity mapping per rule ─────────────────────────────────
+            $severity_map = [
+                // wpb/validate/all
+                'hardcoded_label'             => 'error',
+                'hardcoded_image'             => 'error',
+                'hardcoded_link'              => 'error',
+                'empty_style_attr'            => 'warning',
+                'missing_hide_empty'          => 'warning',
+                'missing_color_link'          => 'warning',
+                'missing_hide_with_empty_link'=> 'warning',
+                'css_forbidden'               => 'warning',
+                'wrong_option_syntax'         => 'critical',
+                'missing_acf_link'            => 'error',
+                'wrong_link_field_prefix'     => 'critical',
+                'missing_el_class'            => 'warning',
+                'missing_remove_rows'         => 'error',
+                'parent_row_with_siblings'    => 'error',
+                'hardcoded_bg_image'          => 'error',
+                'hardcoded_bg_video'          => 'error',
+                'hardcoded_text'              => 'error',
+                'empty_btn_style'             => 'warning',
+                'scroll_effect_forbidden'     => 'warning',
+                'vc_video_wrong_attribute'    => 'warning',
+                'animate_detected'            => 'observation',
+                'responsive_hide_detected'    => 'observation',
+
+                // grid/validate (overlap + eigen)
+                // (zelfde rule names, zelfde severity)
+
+                // colors/validate
+                'deprecated_hex_var'          => 'error',
+                'deprecated_custom_var'       => 'error',
+                'hardcoded_hex_color'         => 'error',
+                'deprecated_theme_var'        => 'error',
+                'unknown_theme_var'           => 'warning',
+                'rgba_color'                  => 'observation',
+
+                // acf/validate/slugs
+                'missing_number'              => 'error',
+                'wrong_opt_format'            => 'error',
+                'wrong_cpt_format'            => 'error',
+                'wrong_page_format'           => 'error',
+
+                // forms/validate
+                'cform_inbound_disabled'      => 'critical',
+                'missing_receiver_email'      => 'critical',
+                'hardcoded_receiver_email'    => 'error',
+                'missing_button_text'         => 'warning',
+                'hardcoded_button_text'       => 'error',
+                'empty_button_style'          => 'warning',
+                'missing_success_message'     => 'warning',
+                'hardcoded_success_message'   => 'error',
+                'missing_email_subject'       => 'warning',
+                'missing_email_message'       => 'warning',
+                'missing_field_list'          => 'warning',
+                'missing_recaptcha'           => 'critical',
+                'missing_email_field'         => 'error',
+                'wrong_email_field_type'      => 'error',
+                'missing_move_label'          => 'warning',
+                'empty_option_field'          => 'error',
+
+                // plugins/validate
+                'extra_plugin'                => 'observation',
+
+                // cpt/validate
+                'missing_rest'                => 'critical',
+                'default_icon'                => 'warning',
+                'duplicate_icon'              => 'warning',
+                'empty_labels'                => 'error',
+                'unexpected_supports'         => 'warning',
+                'missing_title_support'       => 'error',
+                'nav_menus_no_frontend'       => 'warning',
+                'cptui_leftover'              => 'warning',
+
+                // db/tables/validate
+                'orphaned_table'              => 'warning',
+                'unknown_table'               => 'observation',
+
+                // css/unused
+                'unused_css_class'            => 'warning',
+
+                // nav/validate
+                'unused_nav_menu'             => 'warning',
+                'broken_menu_reference'       => 'error',
+                'invalid_menu_name'           => 'warning',
+                'mismatched_menu_placement'   => 'warning',
+                'external_link_no_target_blank' => 'warning',
+                'page_not_in_menu'            => 'observation',
+                'custom_menu_label'           => 'observation',
+
+                // widgets/validate
+                'widgetised_sidebar_in_template' => 'error',
+                'extra_widget_area'              => 'error',
+                'default_sidebar_not_empty'      => 'error',
+                'active_widget_text'             => 'error',
+                'active_widget_nav_menu'         => 'error',
+                'active_widget_other'            => 'error',
+
+                // wpb/modules/validate
+                'wpb_post_custom_css'         => 'critical',
+                'wpb_post_custom_js'          => 'critical',
+
+                // wpb/templates/validate
+                'wpb_saved_templates'         => 'warning',
+                'wpb_module_active'           => 'critical',
+
+                // theme/breakpoints
+                'breakpoint_mobile_group_mismatch' => 'error',
+                'breakpoint_order_invalid'         => 'error',
+                'breakpoint_convention_deviation'   => 'observation',
+                'breakpoint_exceeds_content_width'  => 'error',
+                'laptops_breakpoint_mismatch'       => 'error',
+
+                // taxonomy/validate
+                'orphaned_taxonomy'                    => 'warning',
+                'orphaned_taxonomy_has_dependencies'    => 'warning',
+            ];
+
+            // ── Per-categorie caps ────────────────────────────────────────
+            $category_caps = [
+                'wpb'        => 15,
+                'grid'       => 15,
+                'colors'     => 10,
+                'acf_slugs'  => 10,
+                'forms'      => 10,
+                'plugins'    => 10,
+                'cpt'        => 10,
+                'db_tables'  =>  5,
+                'css'        =>  5,
+                'nav'        =>  5,
+                'wpb_modules'      =>  10,
+                'theme_breakpoints'=>   5,
+                'widgets'          =>  10,
+                'wpb_templates'    =>   5,
+                'taxonomy'         =>   5,
+            ];
+
+            $severity_points = [
+                'critical'    => 3,
+                'error'       => 2,
+                'warning'     => 1,
+                'observation' => 0,
+            ];
+
+            // ── Helper: interne REST call ─────────────────────────────────
+            $call = function ( string $route, array $params = [] ): array {
+                $request = new WP_REST_Request( 'GET', '/aspera/v1/' . $route );
+                foreach ( $params as $k => $v ) {
+                    $request->set_param( $k, $v );
+                }
+                // Bypass auth — we zijn al geauthenticeerd
+                $request->set_param( 'aspera_key', get_option( 'aspera_secret_key' ) );
+                $response = rest_do_request( $request );
+                if ( $response->is_error() ) {
+                    $error = $response->as_error();
+                    return [ '_error' => $error->get_error_message() ];
+                }
+                return $response->get_data();
+            };
+
+            // ── Endpoints aanroepen ───────────────────────────────────────
+            $categories = [];
+
+            // 1. WPB validate (alle pagina's, max 100 per keer)
+            $wpb = $call( 'wpb/validate/all', [ 'per_page' => 100 ] );
+            $wpb_violations = [];
+            if ( ! isset( $wpb['_error'] ) ) {
+                foreach ( $wpb['violations'] ?? [] as $v ) {
+                    $rule     = $v['rule'] ?? 'unknown';
+                    $sev      = $severity_map[ $rule ] ?? 'warning';
+                    $wpb_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['snippet'] ?? $v['detail'] ?? '',
+                    ];
+                }
+                // Paginering: als er meer pagina's zijn, ophalen
+                $total_pages = $wpb['total_pages'] ?? 1;
+                for ( $p = 2; $p <= $total_pages; $p++ ) {
+                    $extra = $call( 'wpb/validate/all', [ 'per_page' => 100, 'page' => $p ] );
+                    foreach ( $extra['violations'] ?? [] as $v ) {
+                        $rule     = $v['rule'] ?? 'unknown';
+                        $sev      = $severity_map[ $rule ] ?? 'warning';
+                        $wpb_violations[] = [
+                            'rule'     => $rule,
+                            'severity' => $sev,
+                            'post_id'  => $v['post_id'] ?? null,
+                            'detail'   => $v['snippet'] ?? $v['detail'] ?? '',
+                        ];
+                    }
+                }
+            }
+            $categories['wpb'] = [
+                'violation_count' => count( $wpb_violations ),
+                'violations'      => $wpb_violations,
+                'error'           => $wpb['_error'] ?? null,
+            ];
+
+            // 2. Grid validate
+            $grid = $call( 'grid/validate' );
+            $grid_violations = [];
+            if ( ! isset( $grid['_error'] ) ) {
+                foreach ( $grid['grids'] ?? [] as $g ) {
+                    foreach ( $g['violations'] ?? [] as $v ) {
+                        $rule = $v['rule'] ?? 'unknown';
+                        $sev  = $severity_map[ $rule ] ?? 'warning';
+                        $grid_violations[] = [
+                            'rule'     => $rule,
+                            'severity' => $sev,
+                            'post_id'  => $g['post_id'] ?? null,
+                            'detail'   => $v['detail'] ?? '',
+                        ];
+                    }
+                }
+            }
+            $categories['grid'] = [
+                'violation_count' => count( $grid_violations ),
+                'violations'      => $grid_violations,
+                'error'           => $grid['_error'] ?? null,
+            ];
+
+            // 3. Colors validate
+            $colors = $call( 'colors/validate' );
+            $color_violations = [];
+            if ( ! isset( $colors['_error'] ) ) {
+                foreach ( $colors['post_violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $color_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+                foreach ( $colors['theme_violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $color_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['colors'] = [
+                'violation_count' => count( $color_violations ),
+                'violations'      => $color_violations,
+                'error'           => $colors['_error'] ?? null,
+            ];
+
+            // 4. ACF slug validate
+            $acf = $call( 'acf/validate/slugs' );
+            $acf_violations = [];
+            if ( ! isset( $acf['_error'] ) ) {
+                foreach ( $acf['issues'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $acf_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['acf_slugs'] = [
+                'violation_count' => count( $acf_violations ),
+                'violations'      => $acf_violations,
+                'error'           => $acf['_error'] ?? null,
+            ];
+
+            // 5. Forms validate
+            $forms = $call( 'forms/validate' );
+            $form_violations = [];
+            if ( ! isset( $forms['_error'] ) ) {
+                // Site-wide violations (cform_inbound_disabled)
+                foreach ( $forms['site_violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $form_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+                foreach ( $forms['forms'] ?? [] as $f ) {
+                    foreach ( $f['violations'] ?? [] as $v ) {
+                        $rule = $v['rule'] ?? 'unknown';
+                        $sev  = $severity_map[ $rule ] ?? 'warning';
+                        $form_violations[] = [
+                            'rule'     => $rule,
+                            'severity' => $sev,
+                            'post_id'  => $f['post_id'] ?? null,
+                            'detail'   => $v['detail'] ?? '',
+                        ];
+                    }
+                }
+            }
+            $categories['forms'] = [
+                'violation_count' => count( $form_violations ),
+                'violations'      => $form_violations,
+                'error'           => $forms['_error'] ?? null,
+            ];
+
+            // 6. Plugins validate (whitelist: alleen extra plugins flaggen)
+            $plugins = $call( 'plugins/validate' );
+            $plugin_violations = [];
+            if ( ! isset( $plugins['_error'] ) ) {
+                foreach ( $plugins['extra_plugins'] ?? [] as $p ) {
+                    $plugin_violations[] = [
+                        'rule'     => 'extra_plugin',
+                        'severity' => 'observation',
+                        'detail'   => $p['name'] ?? $p['slug'] ?? '',
+                    ];
+                }
+            }
+            $categories['plugins'] = [
+                'violation_count' => count( $plugin_violations ),
+                'violations'      => $plugin_violations,
+                'error'           => $plugins['_error'] ?? null,
+            ];
+
+            // 7. CPT validate
+            $cpt = $call( 'cpt/validate' );
+            $cpt_violations = [];
+            if ( ! isset( $cpt['_error'] ) ) {
+                foreach ( $cpt['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $cpt_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+                if ( ! empty( $cpt['cptui_leftover'] ) ) {
+                    $cpt_violations[] = [
+                        'rule'     => 'cptui_leftover',
+                        'severity' => 'warning',
+                        'detail'   => 'CPTUI data aanwezig in wp_options terwijl ACF leidend is',
+                    ];
+                }
+            }
+            $categories['cpt'] = [
+                'violation_count' => count( $cpt_violations ),
+                'violations'      => $cpt_violations,
+                'error'           => $cpt['_error'] ?? null,
+            ];
+
+            // 8. DB tables validate
+            $db = $call( 'db/tables/validate' );
+            $db_violations = [];
+            if ( ! isset( $db['_error'] ) ) {
+                foreach ( $db['orphaned_tables'] ?? [] as $t ) {
+                    $db_violations[] = [
+                        'rule'     => 'orphaned_table',
+                        'severity' => 'warning',
+                        'detail'   => $t['table'] . ' (' . ( $t['plugin'] ?? 'onbekend' ) . ')',
+                    ];
+                }
+                foreach ( $db['unknown_tables'] ?? [] as $t ) {
+                    $db_violations[] = [
+                        'rule'     => 'unknown_table',
+                        'severity' => 'observation',
+                        'detail'   => $t['table'],
+                    ];
+                }
+            }
+            $categories['db_tables'] = [
+                'violation_count' => count( $db_violations ),
+                'violations'      => $db_violations,
+                'error'           => $db['_error'] ?? null,
+            ];
+
+            // 9. CSS unused
+            $css = $call( 'css/unused' );
+            $css_violations = [];
+            if ( ! isset( $css['_error'] ) ) {
+                foreach ( $css['unused'] ?? [] as $u ) {
+                    $css_violations[] = [
+                        'rule'     => 'unused_css_class',
+                        'severity' => 'warning',
+                        'detail'   => '.' . $u['class'] . ' (regel ' . ( $u['line'] ?? '?' ) . ')',
+                    ];
+                }
+            }
+            $categories['css'] = [
+                'violation_count' => count( $css_violations ),
+                'violations'      => $css_violations,
+                'error'           => $css['_error'] ?? null,
+            ];
+
+            // 10. Nav menu validate
+            $nav = $call( 'nav/validate' );
+            $nav_violations = [];
+            if ( ! isset( $nav['_error'] ) ) {
+                foreach ( $nav['unused'] ?? [] as $u ) {
+                    $nav_violations[] = [
+                        'rule'     => 'unused_nav_menu',
+                        'severity' => 'warning',
+                        'detail'   => $u['detail'] ?? '',
+                    ];
+                }
+                foreach ( $nav['broken_references'] ?? [] as $b ) {
+                    $nav_violations[] = [
+                        'rule'     => 'broken_menu_reference',
+                        'severity' => 'error',
+                        'post_id'  => $b['post_id'] ?? null,
+                        'detail'   => $b['detail'] ?? '',
+                    ];
+                }
+                foreach ( $nav['naming_issues'] ?? [] as $n ) {
+                    $rule = $n['rule'] ?? 'invalid_menu_name';
+                    $nav_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $severity_map[ $rule ] ?? 'warning',
+                        'detail'   => $n['detail'] ?? '',
+                    ];
+                }
+                foreach ( $nav['link_issues'] ?? [] as $l ) {
+                    $nav_violations[] = [
+                        'rule'     => 'external_link_no_target_blank',
+                        'severity' => 'warning',
+                        'detail'   => $l['detail'] ?? '',
+                    ];
+                }
+                foreach ( $nav['page_issues'] ?? [] as $p ) {
+                    $rule = $p['rule'] ?? 'page_not_in_menu';
+                    $nav_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $severity_map[ $rule ] ?? 'observation',
+                        'detail'   => $p['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['nav'] = [
+                'violation_count' => count( $nav_violations ),
+                'violations'      => $nav_violations,
+                'error'           => $nav['_error'] ?? null,
+            ];
+
+            // 11. WPB modules validate
+            $wpb_mod = $call( 'wpb/modules/validate' );
+            $wpb_mod_violations = [];
+            if ( ! isset( $wpb_mod['_error'] ) ) {
+                foreach ( $wpb_mod['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'wpb_module_active';
+                    $wpb_mod_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $severity_map[ $rule ] ?? 'critical',
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['wpb_modules'] = [
+                'violation_count' => count( $wpb_mod_violations ),
+                'violations'      => $wpb_mod_violations,
+                'error'           => $wpb_mod['_error'] ?? null,
+            ];
+
+            // 12. Theme breakpoints
+            $theme_bp = $call( 'theme/breakpoints' );
+            $theme_bp_violations = [];
+            if ( ! isset( $theme_bp['_error'] ) ) {
+                foreach ( $theme_bp['issues'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $theme_bp_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['theme_breakpoints'] = [
+                'violation_count' => count( $theme_bp_violations ),
+                'violations'      => $theme_bp_violations,
+                'error'           => $theme_bp['_error'] ?? null,
+            ];
+
+            // 13. Widgets validate
+            $widgets = $call( 'widgets/validate' );
+            $widget_violations = [];
+            if ( ! isset( $widgets['_error'] ) ) {
+                foreach ( $widgets['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'error';
+                    $widget_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'post_id'  => $v['post_id'] ?? null,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['widgets'] = [
+                'violation_count' => count( $widget_violations ),
+                'violations'      => $widget_violations,
+                'error'           => $widgets['_error'] ?? null,
+            ];
+
+            // 14. WPB templates validate
+            $wpb_tpl = $call( 'wpb/templates/validate' );
+            $wpb_tpl_violations = [];
+            if ( ! isset( $wpb_tpl['_error'] ) ) {
+                foreach ( $wpb_tpl['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $wpb_tpl_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['wpb_templates'] = [
+                'violation_count' => count( $wpb_tpl_violations ),
+                'violations'      => $wpb_tpl_violations,
+                'error'           => $wpb_tpl['_error'] ?? null,
+            ];
+
+            // 15. Taxonomy validate
+            $tax = $call( 'taxonomy/validate' );
+            $tax_violations = [];
+            if ( ! isset( $tax['_error'] ) ) {
+                foreach ( $tax['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $sev  = $severity_map[ $rule ] ?? 'warning';
+                    $tax_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['taxonomy'] = [
+                'violation_count' => count( $tax_violations ),
+                'violations'      => $tax_violations,
+                'error'           => $tax['_error'] ?? null,
+            ];
+
+            // ── Health score berekenen ────────────────────────────────────
+            $total_deductions = 0;
+            $category_scores  = [];
+
+            foreach ( $categories as $cat_key => $cat_data ) {
+                if ( ! empty( $cat_data['error'] ) ) {
+                    // Endpoint faalde — tel als cap (worst case)
+                    $cap        = $category_caps[ $cat_key ] ?? 10;
+                    $deductions = $cap;
+                } else {
+                    $deductions = 0;
+                    foreach ( $cat_data['violations'] as $v ) {
+                        $sev = $v['severity'] ?? 'warning';
+                        $deductions += $severity_points[ $sev ] ?? 1;
+                    }
+                    $cap        = $category_caps[ $cat_key ] ?? 10;
+                    $deductions = min( $deductions, $cap );
+                }
+
+                $category_scores[ $cat_key ] = [
+                    'deductions'      => $deductions,
+                    'cap'             => $cap,
+                    'violation_count' => $cat_data['violation_count'],
+                ];
+
+                $total_deductions += $deductions;
+            }
+
+            $health_score = max( 0, 100 - $total_deductions );
+
+            // ── Stoplicht ─────────────────────────────────────────────────
+            if ( $health_score >= 80 ) {
+                $traffic_light = 'green';
+            } elseif ( $health_score >= 50 ) {
+                $traffic_light = 'yellow';
+            } else {
+                $traffic_light = 'red';
+            }
+
+            // ── Severity summary ──────────────────────────────────────────
+            $severity_counts = [ 'critical' => 0, 'error' => 0, 'warning' => 0, 'observation' => 0 ];
+            foreach ( $categories as $cat_data ) {
+                foreach ( $cat_data['violations'] as $v ) {
+                    $sev = $v['severity'] ?? 'warning';
+                    if ( isset( $severity_counts[ $sev ] ) ) {
+                        $severity_counts[ $sev ]++;
+                    }
+                }
+            }
+
+            $total_violations = array_sum( array_column( $categories, 'violation_count' ) );
+
+            // ── Token-efficiënt: strip violations als alles ok ────────────
+            $categories_output = [];
+            foreach ( $categories as $cat_key => $cat_data ) {
+                $entry = [
+                    'status'          => $cat_data['violation_count'] === 0 && empty( $cat_data['error'] ) ? 'ok' : 'issues',
+                    'violation_count' => $cat_data['violation_count'],
+                    'deductions'      => $category_scores[ $cat_key ]['deductions'],
+                ];
+                if ( ! empty( $cat_data['error'] ) ) {
+                    $entry['error'] = $cat_data['error'];
+                }
+                if ( ! empty( $cat_data['violations'] ) ) {
+                    $entry['violations'] = $cat_data['violations'];
+                }
+                $categories_output[ $cat_key ] = $entry;
+            }
+
+            // ── Snapshot opslaan ──────────────────────────────────────────
+            $audit_date = gmdate( 'c' );
+            update_option( 'aspera_audit_score', $health_score, false );
+            update_option( 'aspera_audit_date', $audit_date, false );
+            update_option( 'aspera_audit_summary', wp_json_encode( [
+                'score'           => $health_score,
+                'traffic_light'   => $traffic_light,
+                'total_violations'=> $total_violations,
+                'severity_counts' => $severity_counts,
+                'category_scores' => $category_scores,
+            ] ), false );
+
+            return [
+                'health_score'     => $health_score,
+                'traffic_light'    => $traffic_light,
+                'total_violations' => $total_violations,
+                'severity_counts'  => $severity_counts,
+                'category_scores'  => $category_scores,
+                'categories'       => $categories_output,
+                'audit_date'       => $audit_date,
+            ];
+        },
+    ] );
+
+} );
