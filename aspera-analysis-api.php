@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.42.1
+ * Version: 1.42.2
  * Author: Aspera
  */
 
@@ -3878,12 +3878,11 @@ add_action( 'rest_api_init', function () {
             // Twee scanners per post:
             // a) aspera_find_color_violations_in_json  — recursief, alle keys met 'color' in naam
             // b) aspera_scan_grid_extended_colors      — element css-objecten (URL-encoded) + default.options.color_*
-            $json_posts = $wpdb->get_results(
-                "SELECT ID, post_title, post_type, post_content
-                 FROM {$wpdb->posts}
-                 WHERE post_type IN ('us_header','us_grid_layout')
-                 AND post_status = 'publish'"
-            );
+            $json_posts = get_posts( [
+                'post_type'      => [ 'us_header', 'us_grid_layout' ],
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
 
             foreach ( $json_posts as $post ) {
                 $data = json_decode( $post->post_content, true );
