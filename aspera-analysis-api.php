@@ -4626,8 +4626,6 @@ add_action( 'rest_api_init', function () {
 
             foreach ( $menus as $menu ) {
                 foreach ( $menu_items_cache[ $menu->term_id ] as $item ) {
-
-                foreach ( $items as $item ) {
                     if ( $item->object !== 'page' ) continue;
                     $page_id = (int) $item->object_id;
                     $menu_page_ids[ $page_id ] = true;
