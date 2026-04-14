@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.38.0
+ * Version: 1.39.0
  * Author: Aspera
  */
 
@@ -878,6 +878,244 @@ function aspera_site_health_test(): array {
         'test'        => 'aspera_audit',
     ];
 }
+
+// ── Dashboard Widget ──────────────────────────────────────────────────────────
+// Toont de Aspera audit snapshot in WP Dashboard — alleen zichtbaar voor Administrators.
+// Leest opgeslagen snapshots uit wp_options; refresh via AJAX triggert /site/audit opnieuw.
+
+add_action( 'wp_dashboard_setup', function () {
+    if ( ! current_user_can( 'manage_options' ) ) return;
+    wp_add_dashboard_widget(
+        'aspera_audit_widget',
+        'Aspera Site Audit',
+        'aspera_dashboard_widget_render'
+    );
+} );
+
+add_action( 'wp_ajax_aspera_refresh_audit', function () {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( 'Onvoldoende rechten.' );
+    }
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+
+    $key = get_option( 'aspera_secret_key' );
+    if ( ! $key ) {
+        wp_send_json_error( 'aspera_secret_key niet gevonden in wp_options.' );
+    }
+
+    $request = new WP_REST_Request( 'GET', '/aspera/v1/site/audit' );
+    $request->set_param( 'aspera_key', $key );
+    $response = rest_do_request( $request );
+
+    if ( $response->is_error() ) {
+        wp_send_json_error( $response->as_error()->get_error_message() );
+    }
+
+    wp_send_json_success( [ 'reload' => true ] );
+} );
+
+function aspera_dashboard_widget_render(): void {
+    $score    = get_option( 'aspera_audit_score',    null );
+    $date_raw = get_option( 'aspera_audit_date',     null );
+    $summary  = get_option( 'aspera_audit_summary' );
+    $snapshot = get_option( 'aspera_audit_snapshot' );
+
+    $data = is_string( $summary )  ? json_decode( $summary,  true ) : [];
+    $cats = is_string( $snapshot ) ? json_decode( $snapshot, true ) : [];
+
+    $cat_labels = [
+        'wpb'              => 'WPBakery Templates',
+        'grid'             => 'Grid Layouts & Headers',
+        'colors'           => 'Kleuren',
+        'acf_slugs'        => 'ACF Slugs',
+        'forms'            => 'Formulieren',
+        'plugins'          => 'Plugins',
+        'cpt'              => 'Custom Post Types',
+        'db_tables'        => 'Database Tabellen',
+        'css'              => 'Ongebruikte CSS',
+        'nav'              => 'Navigatiemenu\'s',
+        'wpb_modules'      => 'WPBakery Modules',
+        'theme_breakpoints'=> 'Thema Breakpoints',
+        'widgets'          => 'Widgets',
+        'wpb_templates'    => 'Opgeslagen WPBakery Templates',
+        'taxonomy'         => 'Taxonomieën',
+    ];
+
+    $sev_colors = [
+        'critical'    => '#d63638',
+        'error'       => '#d63638',
+        'warning'     => '#dba617',
+        'observation' => '#72777c',
+    ];
+
+    $nonce = wp_create_nonce( 'aspera_refresh_nonce' );
+
+    // ── Inline stijlen (native WP admin kleuren) ──────────────────────────────
+    echo '<style>
+        #aspera_audit_widget details > summary { list-style: none; user-select: none; }
+        #aspera_audit_widget details > summary::-webkit-details-marker { display: none; }
+        #aspera_audit_widget details[open] .aspera-chevron { transform: rotate(90deg); }
+        #aspera_audit_widget .aspera-chevron { display:inline-block; transition: transform 0.15s; margin-right:4px; color:#72777c; }
+        #aspera_audit_widget .aspera-viol-row:last-child { border-bottom: none !important; }
+    </style>';
+
+    // ── Nog geen audit ─────────────────────────────────────────────────────────
+    if ( $score === false || $date_raw === false ) {
+        echo '<p style="color:#72777c;margin:0 0 10px;">Nog geen audit uitgevoerd.</p>';
+        echo '<button class="button" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">Audit uitvoeren</button>';
+        echo '<span id="aspera-refresh-status" style="display:inline-block;margin-left:8px;font-size:12px;color:#72777c;vertical-align:middle;"></span>';
+        aspera_dashboard_widget_script();
+        return;
+    }
+
+    $score_int = (int) $score;
+    $traffic   = $data['traffic_light'] ?? ( $score_int >= 80 ? 'green' : ( $score_int >= 50 ? 'yellow' : 'red' ) );
+    $counts    = $data['severity_counts'] ?? [];
+    $total     = (int) ( $data['total_violations'] ?? 0 );
+
+    $ts       = $date_raw ? strtotime( $date_raw ) : false;
+    $date_fmt = $ts ? date_i18n( 'd-m-Y H:i', $ts ) : esc_html( $date_raw );
+
+    $score_color_map = [ 'green' => '#00a32a', 'yellow' => '#dba617', 'red' => '#d63638' ];
+    $score_color     = $score_color_map[ $traffic ] ?? '#72777c';
+    $score_label_map = [ 'green' => 'Schoon', 'yellow' => 'Aandacht nodig', 'red' => 'Kritieke problemen' ];
+    $score_label     = $score_label_map[ $traffic ] ?? '';
+
+    // ── Score header ───────────────────────────────────────────────────────────
+    echo '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">';
+    echo '<span style="font-size:2.2em;font-weight:800;color:' . esc_attr( $score_color ) . ';line-height:1;">' . $score_int . '</span>';
+    echo '<span style="font-size:1.1em;color:#72777c;font-weight:400;">/100</span>';
+    echo '<span style="font-size:13px;font-weight:700;color:' . esc_attr( $score_color ) . ';padding:3px 9px;background:' . esc_attr( $score_color ) . '22;border-radius:3px;">' . esc_html( $score_label ) . '</span>';
+    echo '</div>';
+
+    // ── Severity badges ────────────────────────────────────────────────────────
+    echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
+    foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
+        $cnt = (int) ( $counts[ $sev ] ?? 0 );
+        $bg  = $cnt > 0 ? ( $sev_colors[ $sev ] ) : '#dcdcde';
+        $fc  = $cnt > 0 ? '#fff' : '#50575e';
+        echo '<span style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</span>';
+    }
+    echo '</div>';
+
+    // ── Per-categorie accordion ────────────────────────────────────────────────
+    echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;margin-bottom:12px;">';
+
+    foreach ( $cat_labels as $key => $label ) {
+        if ( ! isset( $cats[ $key ] ) ) continue;
+
+        $cat     = $cats[ $key ];
+        $v_count = (int) ( $cat['violation_count'] ?? 0 );
+        $viols   = $cat['violations'] ?? [];
+        $cat_err = $cat['error'] ?? null;
+        $is_open = ( $v_count > 0 || $cat_err ) ? ' open' : '';
+
+        $row_bg   = $v_count > 0 ? '#fff8f8' : '#f6f7f7';
+        $badge_bg = $v_count > 0 ? '#d63638' : '#00a32a';
+
+        echo '<details' . $is_open . ' style="border-bottom:1px solid #dcdcde;">';
+        echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:' . esc_attr( $row_bg ) . ';">';
+        echo '<span style="font-size:13px;font-weight:' . ( $v_count > 0 ? '600' : '400' ) . ';color:#1d2327;">';
+        echo '<span class="aspera-chevron">▶</span>' . esc_html( $label );
+        echo '</span>';
+        echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $v_count . '</span>';
+        echo '</summary>';
+
+        echo '<div style="padding:8px 12px;background:#fff;font-size:13px;">';
+
+        if ( $cat_err ) {
+            echo '<p style="color:#d63638;margin:4px 0;">⚠ Endpoint fout: ' . esc_html( $cat_err ) . '</p>';
+        } elseif ( empty( $viols ) ) {
+            echo '<p style="color:#00a32a;margin:4px 0;">✓ Geen violations gevonden.</p>';
+        } else {
+            // Sorteren: critical → error → warning → observation
+            $sev_order = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
+            usort( $viols, function ( $a, $b ) use ( $sev_order ) {
+                return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
+            } );
+
+            foreach ( $viols as $v ) {
+                $sev     = $v['severity'] ?? 'warning';
+                $rule    = esc_html( $v['rule'] ?? '' );
+                $detail  = esc_html( $v['detail'] ?? '' );
+                $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
+                $dot_col = $sev_colors[ $sev ] ?? '#72777c';
+
+                echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
+                echo '<div style="flex:1;min-width:0;">';
+                echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
+                echo '&ensp;<span style="font-size:11px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
+                if ( $post_id ) {
+                    $edit_url   = get_edit_post_link( $post_id );
+                    $post_title = get_the_title( $post_id );
+                    $link_label = $post_title ?: ( 'Post #' . $post_id );
+                    echo ' &mdash; <a href="' . esc_url( (string) $edit_url ) . '" style="font-size:12px;" target="_blank">' . esc_html( $link_label ) . '</a>';
+                }
+                if ( $detail ) {
+                    echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
+                }
+                echo '</div>';
+                echo '</div>';
+            }
+        }
+
+        echo '</div>';
+        echo '</details>';
+    }
+
+    echo '</div>';
+
+    // ── Footer: datum + refresh-knop ───────────────────────────────────────────
+    echo '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">';
+    echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
+    echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
+    echo '</div>';
+    echo '<span id="aspera-refresh-status" style="display:block;margin-top:4px;font-size:12px;color:#72777c;min-height:16px;"></span>';
+
+    aspera_dashboard_widget_script();
+}
+
+function aspera_dashboard_widget_script(): void {
+    ?>
+    <script>
+    (function () {
+        var btn = document.getElementById('aspera-refresh-btn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            btn.disabled = true;
+            var status = document.getElementById('aspera-refresh-status');
+            status.style.color = '#72777c';
+            status.textContent = 'Audit wordt uitgevoerd\u2026 (dit kan 5\u201320 seconden duren)';
+            fetch(ajaxurl, {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body:    'action=aspera_refresh_audit&nonce=' + encodeURIComponent(btn.dataset.nonce)
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.success) {
+                    status.style.color = '#00a32a';
+                    status.textContent = 'Klaar \u2014 pagina herlaadt\u2026';
+                    setTimeout(function () { location.reload(); }, 800);
+                } else {
+                    status.style.color = '#d63638';
+                    status.textContent = 'Fout: ' + (data.data || 'onbekend');
+                    btn.disabled = false;
+                }
+            })
+            .catch(function () {
+                status.style.color = '#d63638';
+                status.textContent = 'Netwerkfout \u2014 probeer opnieuw.';
+                btn.disabled = false;
+            });
+        });
+    })();
+    </script>
+    <?php
+}
+
+// ── Dashboard Widget — einde ──────────────────────────────────────────────────
 
 add_action( 'rest_api_init', function () {
 
@@ -5305,6 +5543,8 @@ add_action( 'rest_api_init', function () {
                 'severity_counts' => $severity_counts,
                 'category_scores' => $category_scores,
             ] ), false );
+            // Volledig snapshot met violations — gebruikt door dashboard widget
+            update_option( 'aspera_audit_snapshot', wp_json_encode( $categories_output ), false );
 
             return [
                 'health_score'     => $health_score,
