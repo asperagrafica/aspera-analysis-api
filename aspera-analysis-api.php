@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.36.0
+ * Version: 1.37.0
  * Author: Aspera
  */
 
@@ -999,10 +999,11 @@ add_action( 'rest_api_init', function () {
 
     /**
      * GET /wp-json/aspera/v1/acf/validate/{id}
-     * Valideert een ACF field group op veelvoorkomende structuuurfouten:
+     * Valideert een ACF field group op veelvoorkomende structuurfouten:
      * - Gebroken conditional logic references (verwijzing naar niet-bestaande field key)
      * - Gemengde choice key types (int én string in dezelfde choices-array)
      * - Ontbrekende veldnamen (exclusief tab-velden)
+     * - WYSIWYG veld met media upload buttons ingeschakeld (wysiwyg_media_upload_enabled)
      */
     register_rest_route( 'aspera/v1', '/acf/validate/(?P<id>\d+)', [
         'methods'             => 'GET',
@@ -1078,6 +1079,16 @@ add_action( 'rest_api_init', function () {
                             'choices' => array_keys( $f['choices'] ),
                         ];
                     }
+                }
+
+                // WYSIWYG veld met media upload buttons ingeschakeld
+                if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
+                    $issues[] = [
+                        'type'        => 'wysiwyg_media_upload_enabled',
+                        'field_label' => $f['label'] ?? $name,
+                        'field_slug'  => $name,
+                        'field_key'   => $key,
+                    ];
                 }
             }
 
