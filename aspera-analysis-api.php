@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.39.0
+ * Version: 1.39.1
  * Author: Aspera
  */
 
@@ -945,7 +945,7 @@ function aspera_dashboard_widget_render(): void {
         'critical'    => '#d63638',
         'error'       => '#d63638',
         'warning'     => '#dba617',
-        'observation' => '#72777c',
+        'observation' => '#2271b1',
     ];
 
     $nonce = wp_create_nonce( 'aspera_refresh_nonce' );
@@ -1011,7 +1011,20 @@ function aspera_dashboard_widget_render(): void {
         $is_open = ( $v_count > 0 || $cat_err ) ? ' open' : '';
 
         $row_bg   = $v_count > 0 ? '#fff8f8' : '#f6f7f7';
-        $badge_bg = $v_count > 0 ? '#d63638' : '#00a32a';
+        // Badge kleur op basis van ergste severity in deze categorie
+        if ( $v_count === 0 ) {
+            $badge_bg = '#00a32a';
+        } else {
+            $sev_prio = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
+            $worst    = 'observation';
+            foreach ( $viols as $_v ) {
+                $_s = $_v['severity'] ?? 'observation';
+                if ( ( $sev_prio[ $_s ] ?? 3 ) < ( $sev_prio[ $worst ] ?? 3 ) ) {
+                    $worst = $_s;
+                }
+            }
+            $badge_bg = $sev_colors[ $worst ] ?? '#d63638';
+        }
 
         echo '<details' . $is_open . ' style="border-bottom:1px solid #dcdcde;">';
         echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:' . esc_attr( $row_bg ) . ';">';
