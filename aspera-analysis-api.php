@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.37.0
+ * Version: 1.38.0
  * Author: Aspera
  */
 
@@ -85,6 +85,38 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
     }
 
     $violations = [];
+
+    // Pre-pass: vc_row_inner columns_reverse controle.
+    // Regel: eerste kolom bevat afbeelding → columns_reverse="1" verplicht.
+    //        eerste kolom bevat geen afbeelding → columns_reverse mag niet voorkomen.
+    preg_match_all( '/\[vc_row_inner([^\]]*)\](.*?)\[\/vc_row_inner\]/s', $content, $ri_blocks, PREG_SET_ORDER );
+    foreach ( $ri_blocks as $ri ) {
+        $ri_attrs  = $ri[1];
+        $ri_body   = $ri[2];
+        $cr        = (bool) preg_match( '/\bcolumns_reverse="1"/', $ri_attrs );
+        $snippet   = '[vc_row_inner' . substr( trim( $ri_attrs ), 0, 60 ) . '…]';
+
+        if ( ! preg_match( '/\[vc_column_inner[^\]]*\](.*?)(?=\[vc_column_inner|\[\/vc_row_inner\])/s', $ri_body, $first_col ) ) {
+            continue;
+        }
+        $first_has_image = (bool) preg_match( '/\[us_image\b/', $first_col[1] );
+
+        if ( $first_has_image && ! $cr ) {
+            $violations[] = [
+                'tag'     => 'vc_row_inner',
+                'rule'    => 'missing_columns_reverse',
+                'detail'  => 'Eerste kolom bevat een afbeelding maar columns_reverse="1" ontbreekt — op mobiel verschijnt de afbeelding boven de tekst',
+                'snippet' => $snippet,
+            ];
+        } elseif ( ! $first_has_image && $cr ) {
+            $violations[] = [
+                'tag'     => 'vc_row_inner',
+                'rule'    => 'unexpected_columns_reverse',
+                'detail'  => 'columns_reverse="1" aanwezig maar eerste kolom bevat geen afbeelding — op mobiel verschijnt de tekst onder de afbeelding',
+                'snippet' => $snippet,
+            ];
+        }
+    }
 
     foreach ( $matches as $m ) {
         $tag     = $m[1];
@@ -4667,6 +4699,8 @@ add_action( 'rest_api_init', function () {
                 'empty_btn_style'             => 'warning',
                 'scroll_effect_forbidden'     => 'warning',
                 'vc_video_wrong_attribute'    => 'warning',
+                'missing_columns_reverse'     => 'error',
+                'unexpected_columns_reverse'  => 'error',
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
 
