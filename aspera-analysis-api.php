@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.44.1
+ * Version: 1.45.0
  * Author: Aspera
  */
 
@@ -2438,6 +2438,21 @@ add_action( 'rest_api_init', function () {
             foreach ( $posts as $post ) {
                 if ( ! $post->post_content ) continue;
 
+                // Deprecated WPForms shortcode detectie
+                if ( preg_match_all( '/\[wpforms\s+[^\]]*id=["\']?(\d+)["\']?/', $post->post_content, $wpf_matches ) ) {
+                    $posts_with_issues++;
+                    foreach ( $wpf_matches[1] as $wpf_id ) {
+                        $all_violations[] = [
+                            'post_id'    => $post->ID,
+                            'post_type'  => $post->post_type,
+                            'post_title' => $post->post_title,
+                            'rule'       => 'wpforms_deprecated',
+                            'severity'   => 'warning',
+                            'snippet'    => '[wpforms id="' . $wpf_id . '"] — deprecated, vervang door us_cform',
+                        ];
+                    }
+                }
+
                 $result           = aspera_wpb_validate_post( $post );
                 $total_shortcodes += $result['shortcode_count'];
 
@@ -3152,6 +3167,112 @@ add_action( 'rest_api_init', function () {
                     'orphaned_rows'       => count( $orphaned ) * 2,
                     'valid_keys'          => $valid_count,
                     'active_option_pages' => $active_slugs,
+                ],
+            ];
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/options/config/validate
+     * Valideert ACF option page configuratie: menu_slug, position, menu_icon.
+     */
+    register_rest_route( 'aspera/v1', '/options/config/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            global $wpdb;
+
+            $violations  = [];
+            $pages       = [];
+
+            $option_pages = $wpdb->get_results(
+                "SELECT ID, post_title, post_content FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-ui-options-page'
+                   AND post_status = 'publish'
+                 ORDER BY post_title"
+            );
+
+            // Expected icons per type keyword
+            $icon_map = [
+                'header'     => 'dashicons-table-row-before',
+                'footer'     => 'dashicons-table-row-after',
+                'widget'     => 'dashicons-table-col-before',
+                'formulier'  => 'dashicons-email',
+                'forms'      => 'dashicons-email',
+                'social'     => 'dashicons-share',
+                'socials'    => 'dashicons-share',
+            ];
+
+            foreach ( $option_pages as $op ) {
+                $data = @unserialize( $op->post_content );
+                if ( ! is_array( $data ) ) continue;
+
+                $slug     = $data['menu_slug'] ?? '';
+                $position = $data['position'] ?? null;
+                $icon     = '';
+
+                // Extract icon from nested structure or string
+                if ( isset( $data['menu_icon'] ) ) {
+                    if ( is_array( $data['menu_icon'] ) ) {
+                        $icon = $data['menu_icon']['value'] ?? '';
+                    } else {
+                        $icon = $data['menu_icon'];
+                    }
+                }
+
+                $page_info = [
+                    'post_id'   => (int) $op->ID,
+                    'title'     => $op->post_title,
+                    'menu_slug' => $slug,
+                    'position'  => $position,
+                    'icon'      => $icon,
+                ];
+                $pages[] = $page_info;
+
+                // Check 1: menu_slug must start with opt_
+                if ( $slug && strpos( $slug, 'opt_' ) !== 0 ) {
+                    $violations[] = [
+                        'rule'     => 'wrong_option_slug',
+                        'severity' => 'warning',
+                        'post_id'  => (int) $op->ID,
+                        'detail'   => '"' . $op->post_title . '" — menu_slug "' . $slug . '" begint niet met "opt_"',
+                    ];
+                }
+
+                // Check 2: position must be 20
+                if ( $position !== null && (int) $position !== 20 ) {
+                    $violations[] = [
+                        'rule'     => 'wrong_option_position',
+                        'severity' => 'warning',
+                        'post_id'  => (int) $op->ID,
+                        'detail'   => '"' . $op->post_title . '" — position is ' . $position . ', verwacht 20',
+                    ];
+                }
+
+                // Check 3: icon must match expected per type
+                $slug_lower = strtolower( $slug );
+                foreach ( $icon_map as $keyword => $expected_icon ) {
+                    if ( strpos( $slug_lower, $keyword ) !== false ) {
+                        if ( $icon && $icon !== $expected_icon ) {
+                            $violations[] = [
+                                'rule'     => 'wrong_option_icon',
+                                'severity' => 'warning',
+                                'post_id'  => (int) $op->ID,
+                                'detail'   => '"' . $op->post_title . '" — icoon is "' . $icon . '", verwacht "' . $expected_icon . '" (type: ' . $keyword . ')',
+                            ];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            return [
+                'status'     => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations' => $violations,
+                'pages'      => $pages,
+                'summary'    => [
+                    'pages_checked' => count( $option_pages ),
+                    'violations'    => count( $violations ),
                 ],
             ];
         },
@@ -4114,6 +4235,113 @@ add_action( 'rest_api_init', function () {
     ] );
 
     /**
+     * GET /wp-json/aspera/v1/naming/validate
+     * Valideert naamgevingsconventies van us_content_template en us_page_block posts.
+     */
+    register_rest_route( 'aspera/v1', '/naming/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            global $wpdb;
+
+            $violations  = [];
+            $valid_count = 0;
+
+            // --- us_content_template ---
+            $templates = $wpdb->get_results(
+                "SELECT ID, post_title FROM {$wpdb->posts}
+                 WHERE post_type = 'us_content_template'
+                   AND post_status = 'publish'
+                 ORDER BY post_title"
+            );
+
+            $valid_template_prefixes = [ 'Page - ', 'CPT - ', 'TAX - ' ];
+
+            foreach ( $templates as $t ) {
+                $has_valid = false;
+                foreach ( $valid_template_prefixes as $pfx ) {
+                    if ( strpos( $t->post_title, $pfx ) === 0 ) {
+                        $has_valid = true;
+                        break;
+                    }
+                }
+                if ( $has_valid ) {
+                    $valid_count++;
+                } else {
+                    $violations[] = [
+                        'rule'      => 'wrong_template_prefix',
+                        'severity'  => 'warning',
+                        'post_id'   => (int) $t->ID,
+                        'post_type' => 'us_content_template',
+                        'detail'    => '"' . $t->post_title . '" — verwacht prefix: Page - , CPT -  of TAX - ',
+                    ];
+                }
+            }
+
+            // --- us_page_block ---
+            $blocks = $wpdb->get_results(
+                "SELECT ID, post_title FROM {$wpdb->posts}
+                 WHERE post_type = 'us_page_block'
+                   AND post_status = 'publish'
+                 ORDER BY post_title"
+            );
+
+            $block_exceptions = [ 'Footer', 'Titelbalk', 'Titlebar' ];
+
+            foreach ( $blocks as $b ) {
+                // Check exceptions first
+                $is_exception = false;
+                foreach ( $block_exceptions as $exc ) {
+                    if ( stripos( $b->post_title, $exc ) !== false ) {
+                        $is_exception = true;
+                        break;
+                    }
+                }
+                if ( $is_exception ) {
+                    $valid_count++;
+                    continue;
+                }
+
+                // Check deprecated term
+                if ( stripos( $b->post_title, 'Page Block' ) !== false ) {
+                    $violations[] = [
+                        'rule'      => 'deprecated_page_block_term',
+                        'severity'  => 'warning',
+                        'post_id'   => (int) $b->ID,
+                        'post_type' => 'us_page_block',
+                        'detail'    => '"' . $b->post_title . '" — verouderde term "Page Block", moet "Reusable Block" zijn',
+                    ];
+                    continue;
+                }
+
+                // Check correct prefix
+                if ( strpos( $b->post_title, 'Reusable Block - ' ) === 0 ) {
+                    $valid_count++;
+                } else {
+                    $violations[] = [
+                        'rule'      => 'wrong_block_prefix',
+                        'severity'  => 'warning',
+                        'post_id'   => (int) $b->ID,
+                        'post_type' => 'us_page_block',
+                        'detail'    => '"' . $b->post_title . '" — verwacht prefix "Reusable Block - " (of uitzondering: Footer, Titelbalk)',
+                    ];
+                }
+            }
+
+            return [
+                'status'     => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations' => $violations,
+                'summary'    => [
+                    'templates_checked' => count( $templates ),
+                    'blocks_checked'    => count( $blocks ),
+                    'valid'             => $valid_count,
+                    'violations'        => count( $violations ),
+                ],
+            ];
+        },
+    ] );
+
+    /**
      * GET /wp-json/aspera/v1/cpt/validate
      * Valideert ACF-geregistreerde custom post types:
      * - supports vs. publicly_queryable consistentie
@@ -4491,9 +4719,38 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // ── 5. Prefix check: custom classes moeten ag_ prefix hebben ─
+            $deprecated_prefixes = [ 'qc_', 'sw_', 'lr_', 'jd_', 'ns_', 'vb_' ];
+            $wrong_prefix = [];
+            foreach ( $custom_classes as $class ) {
+                if ( strpos( $class, 'ag_' ) === 0 ) continue;
+                foreach ( $deprecated_prefixes as $dp ) {
+                    if ( strpos( $class, $dp ) === 0 ) {
+                        $line_num = null;
+                        foreach ( $css_lines as $idx => $line ) {
+                            if ( strpos( $line, '.' . $class ) !== false ) {
+                                $line_num = $idx + 1;
+                                break;
+                            }
+                        }
+                        $wrong_prefix[] = [
+                            'rule'     => 'wrong_css_prefix',
+                            'severity' => 'warning',
+                            'class'    => $class,
+                            'prefix'   => $dp,
+                            'line'     => $line_num,
+                            'detail'   => '"' . $class . '" — site-specifiek prefix "' . $dp . '", verwacht "ag_"',
+                        ];
+                        break;
+                    }
+                }
+            }
+
+            $has_issues = ! empty( $unused ) || ! empty( $wrong_prefix );
             return [
-                'status'              => empty( $unused ) ? 'ok' : 'unused_found',
+                'status'              => $has_issues ? 'issues_found' : 'ok',
                 'unused'              => $unused,
+                'wrong_prefix'        => $wrong_prefix,
                 'used'                => $used,
                 'framework_overrides' => count( $framework_classes ),
                 'total_custom'        => count( $custom_classes ),
@@ -5540,6 +5797,7 @@ add_action( 'rest_api_init', function () {
                 'vc_video_wrong_attribute'    => 'warning',
                 'missing_columns_reverse'     => 'error',
                 'unexpected_columns_reverse'  => 'error',
+                'wpforms_deprecated'          => 'warning',
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
 
@@ -5601,6 +5859,7 @@ add_action( 'rest_api_init', function () {
 
                 // css/unused
                 'unused_css_class'            => 'warning',
+                'wrong_css_prefix'            => 'warning',
 
                 // nav/validate
                 'unused_nav_menu'             => 'warning',
@@ -5660,6 +5919,22 @@ add_action( 'rest_api_init', function () {
 
                 // options/validate
                 'orphaned_option'                        => 'warning',
+
+                // naming/validate
+                'wrong_template_prefix'                  => 'warning',
+                'wrong_block_prefix'                     => 'warning',
+                'deprecated_page_block_term'             => 'warning',
+
+                // options/config/validate
+                'wrong_option_slug'                      => 'warning',
+                'wrong_option_position'                  => 'warning',
+                'wrong_option_icon'                      => 'warning',
+
+                // acf/validate/slugs
+                'missing_number'                         => 'error',
+                'wrong_opt_format'                       => 'error',
+                'wrong_cpt_format'                       => 'error',
+                'wrong_page_format'                      => 'error',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -5683,6 +5958,9 @@ add_action( 'rest_api_init', function () {
                 'acf_fields'       =>  10,
                 'meta_orphaned'    =>   5,
                 'options_orphaned' =>   5,
+                'naming'           =>   5,
+                'options_config'   =>   5,
+                'acf_slugs_audit'  =>  10,
             ];
 
             $severity_points = [
@@ -5712,7 +5990,7 @@ add_action( 'rest_api_init', function () {
             $categories = [];
 
             // 1. WPB validate (alle pagina's, max 100 per keer)
-            $wpb = $call( 'wpb/validate/all', [ 'per_page' => 100 ] );
+            $wpb = $call( 'wpb/validate/all', [ 'per_page' => 100, 'post_types' => 'us_content_template,us_page_block,page' ] );
             $wpb_violations = [];
             if ( ! isset( $wpb['_error'] ) ) {
                 foreach ( $wpb['violations'] ?? [] as $v ) {
@@ -5728,7 +6006,7 @@ add_action( 'rest_api_init', function () {
                 // Paginering: als er meer pagina's zijn, ophalen
                 $total_pages = $wpb['total_pages'] ?? 1;
                 for ( $p = 2; $p <= $total_pages; $p++ ) {
-                    $extra = $call( 'wpb/validate/all', [ 'per_page' => 100, 'page' => $p ] );
+                    $extra = $call( 'wpb/validate/all', [ 'per_page' => 100, 'page' => $p, 'post_types' => 'us_content_template,us_page_block,page' ] );
                     foreach ( $extra['violations'] ?? [] as $v ) {
                         $rule     = $v['rule'] ?? 'unknown';
                         $sev      = $severity_map[ $rule ] ?? 'warning';
@@ -5923,7 +6201,7 @@ add_action( 'rest_api_init', function () {
                 'error'           => $db['_error'] ?? null,
             ];
 
-            // 9. CSS unused
+            // 9. CSS unused + prefix check
             $css = $call( 'css/unused' );
             $css_violations = [];
             if ( ! isset( $css['_error'] ) ) {
@@ -5932,6 +6210,13 @@ add_action( 'rest_api_init', function () {
                         'rule'     => 'unused_css_class',
                         'severity' => 'warning',
                         'detail'   => '.' . $u['class'] . ' (regel ' . ( $u['line'] ?? '?' ) . ')',
+                    ];
+                }
+                foreach ( $css['wrong_prefix'] ?? [] as $wp ) {
+                    $css_violations[] = [
+                        'rule'     => 'wrong_css_prefix',
+                        'severity' => $severity_map['wrong_css_prefix'] ?? 'warning',
+                        'detail'   => $wp['detail'] ?? '',
                     ];
                 }
             }
@@ -6173,6 +6458,64 @@ add_action( 'rest_api_init', function () {
                 'violation_count' => count( $opt_violations ),
                 'violations'      => $opt_violations,
                 'error'           => $opt_val['_error'] ?? null,
+            ];
+
+            // ── 20. naming/validate ──────────────────────────────────────
+            $naming_val = $call( 'naming/validate' );
+            $naming_violations = [];
+            if ( ! empty( $naming_val['violations'] ) ) {
+                foreach ( $naming_val['violations'] as $nv ) {
+                    $naming_violations[] = [
+                        'rule'     => $nv['rule'],
+                        'post_id'  => $nv['post_id'] ?? 0,
+                        'severity' => $severity_map[ $nv['rule'] ] ?? 'warning',
+                        'detail'   => $nv['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['naming'] = [
+                'violation_count' => count( $naming_violations ),
+                'violations'      => $naming_violations,
+                'error'           => $naming_val['_error'] ?? null,
+            ];
+
+            // ── 21. options/config/validate ──────────────────────────────
+            $optcfg_val = $call( 'options/config/validate' );
+            $optcfg_violations = [];
+            if ( ! empty( $optcfg_val['violations'] ) ) {
+                foreach ( $optcfg_val['violations'] as $ov ) {
+                    $optcfg_violations[] = [
+                        'rule'     => $ov['rule'],
+                        'post_id'  => $ov['post_id'] ?? 0,
+                        'severity' => $severity_map[ $ov['rule'] ] ?? 'warning',
+                        'detail'   => $ov['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['options_config'] = [
+                'violation_count' => count( $optcfg_violations ),
+                'violations'      => $optcfg_violations,
+                'error'           => $optcfg_val['_error'] ?? null,
+            ];
+
+            // ── 22. acf/validate/slugs ───────────────────────────────────
+            $slugs_val = $call( 'acf/validate/slugs' );
+            $slugs_violations = [];
+            if ( ! empty( $slugs_val['issues'] ) ) {
+                foreach ( $slugs_val['issues'] as $sv ) {
+                    $rule = $sv['rule'] ?? 'unknown';
+                    $slugs_violations[] = [
+                        'rule'     => $rule,
+                        'post_id'  => $sv['field_group_id'] ?? 0,
+                        'severity' => $severity_map[ $rule ] ?? 'warning',
+                        'detail'   => ( $sv['field_group_title'] ?? '' ) . ': "' . ( $sv['field_slug'] ?? '' ) . '" — ' . ( $sv['detail'] ?? '' ),
+                    ];
+                }
+            }
+            $categories['acf_slugs_audit'] = [
+                'violation_count' => count( $slugs_violations ),
+                'violations'      => $slugs_violations,
+                'error'           => $slugs_val['_error'] ?? null,
             ];
 
             // ── Uitzonderingen laden en markeren ─────────────────────────
