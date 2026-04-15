@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.43.1
+ * Version: 1.44.0
  * Author: Aspera
  */
 
@@ -3020,6 +3020,109 @@ add_action( 'rest_api_init', function () {
     ] );
 
     /**
+     * GET /wp-json/aspera/v1/options/validate
+     * Detecteert verweesde ACF option page data in wp_options.
+     *
+     * Vergelijkt _options_opt_* referenties met actieve ACF field keys.
+     * Keys waarvan de field_key niet meer bestaat zijn orphaned.
+     * Groepeert per option page prefix en toont of de option page zelf nog actief is.
+     */
+    register_rest_route( 'aspera/v1', '/options/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            global $wpdb;
+
+            // 1. Actieve ACF field keys
+            $active_field_keys = $wpdb->get_col(
+                "SELECT post_name FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-field'
+                   AND post_status = 'publish'
+                   AND post_name LIKE 'field_%'"
+            );
+            $active_field_keys = array_values( array_filter( $active_field_keys ) );
+
+            // 2. Actieve option page slugs (uit acf-ui-options-page posts)
+            $active_slugs  = [];
+            $option_pages  = $wpdb->get_results(
+                "SELECT post_content FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-ui-options-page'
+                   AND post_status = 'publish'"
+            );
+            foreach ( $option_pages as $op ) {
+                $data = @unserialize( $op->post_content );
+                if ( is_array( $data ) && ! empty( $data['menu_slug'] ) ) {
+                    $active_slugs[] = $data['menu_slug'];
+                }
+            }
+
+            // 3. Alle _options_opt_* referenties met field_* waarden
+            $refs = $wpdb->get_results(
+                "SELECT option_name, option_value FROM {$wpdb->options}
+                 WHERE option_name LIKE '\\_options\\_opt\\_%'
+                   AND option_value LIKE 'field_%'
+                 ORDER BY option_name",
+                ARRAY_A
+            );
+
+            // 4. Per referentie: actief of orphaned
+            $orphaned    = [];
+            $valid_count = 0;
+
+            foreach ( $refs as $ref ) {
+                $field_key  = $ref['option_value'];
+                $value_name = substr( $ref['option_name'], 1 ); // strip leading _
+
+                if ( in_array( $field_key, $active_field_keys, true ) ) {
+                    $valid_count++;
+                    continue;
+                }
+
+                // Prefix extraheren: options_opt_faq_2_0_text → opt_faq
+                $bare   = preg_replace( '/^options_/', '', $value_name );
+                $prefix = 'unknown';
+                if ( preg_match( '/^(opt_[a-z]+)/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                }
+
+                $orphaned[] = [
+                    'option_name' => $value_name,
+                    'field_key'   => $field_key,
+                    'prefix'      => $prefix,
+                ];
+            }
+
+            // 5. Groeperen per prefix
+            $groups = [];
+            foreach ( $orphaned as $o ) {
+                $pfx = $o['prefix'];
+                if ( ! isset( $groups[ $pfx ] ) ) {
+                    $groups[ $pfx ] = [
+                        'prefix'             => $pfx,
+                        'option_page_active' => in_array( $pfx, $active_slugs, true ),
+                        'keys'               => 0,
+                        'total_rows'         => 0,
+                    ];
+                }
+                $groups[ $pfx ]['keys']++;
+                $groups[ $pfx ]['total_rows'] += 2; // waarde + _referentie
+            }
+
+            return [
+                'status'   => empty( $orphaned ) ? 'ok' : 'issues_found',
+                'orphaned' => array_values( $groups ),
+                'detail'   => $orphaned,
+                'summary'  => [
+                    'orphaned_keys'       => count( $orphaned ),
+                    'orphaned_rows'       => count( $orphaned ) * 2,
+                    'valid_keys'          => $valid_count,
+                    'active_option_pages' => $active_slugs,
+                ],
+            ];
+        },
+    ] );
+
+    /**
      * GET /wp-json/aspera/v1/db/tables/validate
      * Detecteert databasetabellen van plugins die niet meer actief zijn.
      *
@@ -5518,6 +5621,9 @@ add_action( 'rest_api_init', function () {
                 // meta/validate
                 'orphaned_meta'                          => 'warning',
                 'orphaned_meta_in_templates'             => 'error',
+
+                // options/validate
+                'orphaned_option'                        => 'warning',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -5540,6 +5646,7 @@ add_action( 'rest_api_init', function () {
                 'header_config'    =>   5,
                 'acf_fields'       =>  10,
                 'meta_orphaned'    =>   5,
+                'options_orphaned' =>   5,
             ];
 
             $severity_points = [
@@ -6008,6 +6115,28 @@ add_action( 'rest_api_init', function () {
                 'violation_count' => count( $meta_violations ),
                 'violations'      => $meta_violations,
                 'error'           => $meta_val['_error'] ?? null,
+            ];
+
+            // 19. Orphaned option page data
+            $opt_val        = $call( 'options/validate' );
+            $opt_violations = [];
+            if ( ! isset( $opt_val['_error'] ) ) {
+                foreach ( $opt_val['orphaned'] ?? [] as $g ) {
+                    $opt_violations[] = [
+                        'rule'     => 'orphaned_option',
+                        'severity' => $severity_map['orphaned_option'] ?? 'warning',
+                        'detail'   => $g['prefix'] . ' (' . $g['keys'] . ' keys, ' . $g['total_rows'] . ' rijen'
+                            . ( $g['option_page_active']
+                                ? ', option page actief maar veld verwijderd'
+                                : ', option page niet actief' )
+                            . ')',
+                    ];
+                }
+            }
+            $categories['options_orphaned'] = [
+                'violation_count' => count( $opt_violations ),
+                'violations'      => $opt_violations,
+                'error'           => $opt_val['_error'] ?? null,
             ];
 
             // ── Uitzonderingen laden en markeren ─────────────────────────
