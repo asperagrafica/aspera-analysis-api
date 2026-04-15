@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.44.0
+ * Version: 1.44.1
  * Author: Aspera
  */
 
@@ -1641,9 +1641,44 @@ add_action( 'rest_api_init', function () {
                 'broken_conditional_reference' => 'error',
                 'mixed_choice_key_types'       => 'warning',
                 'wysiwyg_media_upload_enabled' => 'warning',
+                'wrong_group_name_prefix'      => 'warning',
             ];
 
             foreach ( $groups as $group ) {
+                // Field group naming convention check
+                $group_content   = @unserialize( $group->post_content );
+                $expected_prefix = null;
+                if ( is_array( $group_content ) && ! empty( $group_content['location'] ) ) {
+                    foreach ( $group_content['location'] as $rule_group ) {
+                        foreach ( $rule_group as $rule ) {
+                            if ( $rule['param'] === 'options_page' ) {
+                                $expected_prefix = 'OPT - ';
+                                break 2;
+                            }
+                            if ( $rule['param'] === 'post_type' && $rule['value'] === 'page' ) {
+                                $expected_prefix = 'Page - ';
+                                break 2;
+                            }
+                            if ( $rule['param'] === 'post_type' && $rule['value'] !== 'page' && $rule['value'] !== 'post' ) {
+                                $expected_prefix = 'CPT - ';
+                                break 2;
+                            }
+                            if ( $rule['param'] === 'taxonomy' ) {
+                                $expected_prefix = 'TAX - ';
+                                break 2;
+                            }
+                        }
+                    }
+                }
+                if ( $expected_prefix !== null && strpos( $group->post_title, $expected_prefix ) !== 0 ) {
+                    $violations[] = [
+                        'rule'     => 'wrong_group_name_prefix',
+                        'severity' => 'warning',
+                        'post_id'  => $group->ID,
+                        'detail'   => '"' . $group->post_title . '" — verwacht prefix "' . $expected_prefix . '"',
+                    ];
+                }
+
                 $result = aspera_validate_acf_group( $group->ID );
                 if ( empty( $result['fields'] ) ) continue;
 
@@ -5617,6 +5652,7 @@ add_action( 'rest_api_init', function () {
                 'broken_conditional_reference'           => 'error',
                 'mixed_choice_key_types'                 => 'warning',
                 'wysiwyg_media_upload_enabled'           => 'warning',
+                'wrong_group_name_prefix'                => 'warning',
 
                 // meta/validate
                 'orphaned_meta'                          => 'warning',
