@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.46.0
+ * Version: 1.46.1
  * Author: Aspera
  */
 
@@ -1036,13 +1036,12 @@ add_action( 'wp_ajax_aspera_add_exception', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
     if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
 
+    $exc_id   = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
     $category = sanitize_text_field( wp_unslash( $_POST['category'] ?? '' ) );
     $rule     = sanitize_text_field( wp_unslash( $_POST['rule']     ?? '' ) );
     $post_id  = intval( $_POST['post_id'] ?? 0 );
 
-    if ( ! $category || ! $rule ) wp_die( -1 );
-
-    $exc_id     = md5( $category . '|' . $rule . '|' . $post_id );
+    if ( ! $exc_id ) wp_die( -1 );
     $exceptions = get_option( 'aspera_audit_exceptions', [] );
     if ( ! is_array( $exceptions ) ) $exceptions = [];
 
@@ -1197,8 +1196,7 @@ function aspera_dashboard_widget_render(): void {
         $active_viols  = [];
         $ignored_viols = [];
         foreach ( $viols as $_v ) {
-            $pid   = (int) ( $_v['post_id'] ?? 0 );
-            $eid   = md5( $key . '|' . ( $_v['rule'] ?? '' ) . '|' . $pid );
+            $eid   = $_v['exception_id'] ?? '';
             $_v['_exc_id'] = $eid;
             if ( isset( $exc_index[ $eid ] ) ) {
                 $ignored_viols[] = $_v;
@@ -1396,6 +1394,7 @@ function aspera_dashboard_widget_script(): void {
 
                 var body = action === 'add'
                     ? 'action=aspera_add_exception&nonce=' + encodeURIComponent(nonce)
+                        + '&exception_id=' + encodeURIComponent(excId)
                         + '&category=' + encodeURIComponent(category)
                         + '&rule='     + encodeURIComponent(rule)
                         + '&post_id='  + encodeURIComponent(postId)
@@ -2902,7 +2901,7 @@ add_action( 'rest_api_init', function () {
 
             // ─── Extra plugins (niet op de whitelist) ─────────────────────────
             $woo_slugs  = [ 'woocommerce', 'mollie-payments-for-woocommerce', 'woocommerce-pdf-invoices-packing-slips' ];
-            $skip_slugs = array_merge( $whitelist_slugs, $woo_slugs, [ 'aspera-analysis-api' ] );
+            $skip_slugs = array_merge( $whitelist_slugs, $woo_slugs );
 
             $extra = [];
             foreach ( $installed as $slug => $p ) {
