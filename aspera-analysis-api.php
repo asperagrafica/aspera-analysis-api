@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.45.0
+ * Version: 1.45.1
  * Author: Aspera
  */
 
@@ -5837,7 +5837,7 @@ add_action( 'rest_api_init', function () {
                 'missing_recaptcha'           => 'critical',
                 'missing_email_field'         => 'error',
                 'wrong_email_field_type'      => 'error',
-                'missing_move_label'          => 'warning',
+                'missing_move_label'          => 'observation',
                 'empty_option_field'          => 'error',
 
                 // plugins/validate
