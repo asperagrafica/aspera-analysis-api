@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.45.2
+ * Version: 1.45.3
  * Author: Aspera
  */
 
@@ -2902,7 +2902,7 @@ add_action( 'rest_api_init', function () {
 
             // ─── Extra plugins (niet op de whitelist) ─────────────────────────
             $woo_slugs  = [ 'woocommerce', 'mollie-payments-for-woocommerce', 'woocommerce-pdf-invoices-packing-slips' ];
-            $skip_slugs = array_merge( $whitelist_slugs, $woo_slugs );
+            $skip_slugs = array_merge( $whitelist_slugs, $woo_slugs, [ 'aspera-analysis-api' ] );
 
             $extra = [];
             foreach ( $installed as $slug => $p ) {
