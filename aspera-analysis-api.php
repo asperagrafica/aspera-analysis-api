@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.45.1
+ * Version: 1.45.2
  * Author: Aspera
  */
 
@@ -5942,7 +5942,6 @@ add_action( 'rest_api_init', function () {
                 'wpb'        => 15,
                 'grid'       => 15,
                 'colors'     => 10,
-                'acf_slugs'  => 10,
                 'forms'      => 10,
                 'plugins'    => 10,
                 'cpt'        => 10,
@@ -5960,7 +5959,7 @@ add_action( 'rest_api_init', function () {
                 'options_orphaned' =>   5,
                 'naming'           =>   5,
                 'options_config'   =>   5,
-                'acf_slugs_audit'  =>  10,
+                'acf_slugs'        =>  10,
             ];
 
             $severity_points = [
@@ -6078,27 +6077,7 @@ add_action( 'rest_api_init', function () {
                 'error'           => $colors['_error'] ?? null,
             ];
 
-            // 4. ACF slug validate
-            $acf = $call( 'acf/validate/slugs' );
-            $acf_violations = [];
-            if ( ! isset( $acf['_error'] ) ) {
-                foreach ( $acf['issues'] ?? [] as $v ) {
-                    $rule = $v['rule'] ?? 'unknown';
-                    $sev  = $severity_map[ $rule ] ?? 'warning';
-                    $acf_violations[] = [
-                        'rule'     => $rule,
-                        'severity' => $sev,
-                        'detail'   => $v['detail'] ?? '',
-                    ];
-                }
-            }
-            $categories['acf_slugs'] = [
-                'violation_count' => count( $acf_violations ),
-                'violations'      => $acf_violations,
-                'error'           => $acf['_error'] ?? null,
-            ];
-
-            // 5. Forms validate
+            // 4. Forms validate
             $forms = $call( 'forms/validate' );
             $form_violations = [];
             if ( ! isset( $forms['_error'] ) ) {
@@ -6512,7 +6491,7 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
             }
-            $categories['acf_slugs_audit'] = [
+            $categories['acf_slugs'] = [
                 'violation_count' => count( $slugs_violations ),
                 'violations'      => $slugs_violations,
                 'error'           => $slugs_val['_error'] ?? null,
