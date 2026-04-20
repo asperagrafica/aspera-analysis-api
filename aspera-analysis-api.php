@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.45.3
+ * Version: 1.46.0
  * Author: Aspera
  */
 
@@ -6505,12 +6505,49 @@ add_action( 'rest_api_init', function () {
                     $exc_index[ $e['id'] ] = true;
                 }
             }
+            // ── Migratie exception hashes v1 → v2 (detail in hash) ──────
+            if ( ! empty( $exc_raw ) && (int) get_option( 'aspera_exception_hash_version', 1 ) < 2 ) {
+                $old_to_new = [];
+                foreach ( $categories as $ck => $cd ) {
+                    foreach ( $cd['violations'] as $v ) {
+                        $pid      = (int) ( $v['post_id'] ?? 0 );
+                        $old_hash = md5( $ck . '|' . ( $v['rule'] ?? '' ) . '|' . $pid );
+                        $new_hash = md5( $ck . '|' . ( $v['rule'] ?? '' ) . '|' . $pid . '|' . ( $v['detail'] ?? '' ) );
+                        if ( $old_hash !== $new_hash ) {
+                            $old_to_new[ $old_hash ][ $new_hash ] = true;
+                        }
+                    }
+                }
+                $new_exc = [];
+                $seen    = [];
+                foreach ( $exc_raw as $e ) {
+                    if ( isset( $old_to_new[ $e['id'] ] ) ) {
+                        foreach ( array_keys( $old_to_new[ $e['id'] ] ) as $nh ) {
+                            if ( ! isset( $seen[ $nh ] ) ) {
+                                $new_exc[]   = [ 'id' => $nh ];
+                                $seen[ $nh ] = true;
+                            }
+                        }
+                    } elseif ( ! isset( $seen[ $e['id'] ] ) ) {
+                        $new_exc[]           = $e;
+                        $seen[ $e['id'] ]    = true;
+                    }
+                }
+                update_option( 'aspera_audit_exceptions', $new_exc );
+                update_option( 'aspera_exception_hash_version', 2 );
+                $exc_raw   = $new_exc;
+                $exc_index = [];
+                foreach ( $exc_raw as $e ) {
+                    $exc_index[ $e['id'] ] = true;
+                }
+            }
+
             // Voeg exception_id toe aan elke violation; markeer genegeerde
             foreach ( $categories as $cat_key => &$cat_ref ) {
                 $active = 0;
                 foreach ( $cat_ref['violations'] as &$vref ) {
                     $pid  = (int) ( $vref['post_id'] ?? 0 );
-                    $eid  = md5( $cat_key . '|' . ( $vref['rule'] ?? '' ) . '|' . $pid );
+                    $eid  = md5( $cat_key . '|' . ( $vref['rule'] ?? '' ) . '|' . $pid . '|' . ( $vref['detail'] ?? '' ) );
                     $vref['exception_id'] = $eid;
                     if ( isset( $exc_index[ $eid ] ) ) {
                         $vref['is_excepted'] = true;
