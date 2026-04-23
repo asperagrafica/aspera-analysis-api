@@ -953,7 +953,8 @@ function aspera_site_health_test(): array {
         'forms'     => 'Formulieren',
         'plugins'   => 'Plugins',
         'cpt'       => 'Custom Post Types',
-        'db_tables' => 'Database Tabellen',
+        'db_tables'   => 'Database Tabellen',
+        'theme_check' => 'Thema Check',
     ];
 
     $rows = '';
@@ -1109,6 +1110,7 @@ function aspera_dashboard_widget_render(): void {
         'header_config'    => 'Header Configuratie',
         'acf_fields'       => 'ACF Field Groups',
         'meta_orphaned'    => 'Orphaned ACF Meta',
+        'theme_check'      => 'Thema Check',
     ];
 
     $sev_colors = [
