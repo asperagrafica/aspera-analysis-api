@@ -5939,6 +5939,10 @@ add_action( 'rest_api_init', function () {
                 'wrong_opt_format'                       => 'error',
                 'wrong_cpt_format'                       => 'error',
                 'wrong_page_format'                      => 'error',
+
+                // theme/check
+                'wrong_active_theme'                     => 'critical',
+                'impreza_license_inactive'               => 'critical',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -5964,6 +5968,7 @@ add_action( 'rest_api_init', function () {
                 'naming'           =>   5,
                 'options_config'   =>   5,
                 'acf_slugs'        =>  10,
+                'theme_check'      =>   5,
             ];
 
             $severity_points = [
@@ -6499,6 +6504,33 @@ add_action( 'rest_api_init', function () {
                 'violation_count' => count( $slugs_violations ),
                 'violations'      => $slugs_violations,
                 'error'           => $slugs_val['_error'] ?? null,
+            ];
+
+            // ── 23. Theme check: Aspera child actief? ─────────────────
+            $theme_violations = [];
+            $stylesheet = get_stylesheet();
+            $theme_name = wp_get_theme()->get( 'Name' );
+            $is_aspera  = ( stripos( $stylesheet, 'aspera' ) !== false )
+                       || ( stripos( $theme_name, 'aspera' ) !== false );
+            if ( ! $is_aspera ) {
+                $theme_violations[] = [
+                    'rule'     => 'wrong_active_theme',
+                    'severity' => 'critical',
+                    'detail'   => 'Actief thema: ' . $theme_name . ' (' . $stylesheet . ')',
+                ];
+            }
+            $license = get_option( 'us_license_activated' );
+            if ( $license !== '1' && $license !== 1 ) {
+                $theme_violations[] = [
+                    'rule'     => 'impreza_license_inactive',
+                    'severity' => 'critical',
+                    'detail'   => 'Impreza licentie is niet geactiveerd',
+                ];
+            }
+            $categories['theme_check'] = [
+                'violation_count' => count( $theme_violations ),
+                'violations'      => $theme_violations,
+                'error'           => null,
             ];
 
             // ── Uitzonderingen laden en markeren ─────────────────────────
