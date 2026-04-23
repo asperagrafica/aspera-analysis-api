@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.54.0
+ * Version: 1.55.0
  * Author: Aspera
  */
 
@@ -438,6 +438,13 @@ function aspera_impreza_extra_vars(): array {
         'header_transparent_bg',
         'alt_content_overlay_grad',
         'content_overlay_grad',
+        'content_primary_grad',
+        'alt_content_primary_grad',
+        'content_secondary_grad',
+        'alt_content_secondary_grad',
+        'content_faded_grad',
+        'alt_content_faded_grad',
+        'footer_bg_grad',
     ];
     return $vars;
 }
@@ -4272,11 +4279,23 @@ add_action( 'rest_api_init', function () {
                     // ── var(--color-*) referenties ────────────────────────────
                     preg_match_all( '/var\(--color-([a-zA-Z0-9_-]+)\)/', $line, $css_m );
 
+                    // Custom global color slugs (zonder leading _) als geldige CSS vars
+                    $custom_color_slugs = [];
+                    $cc_option = get_option( 'usof_options_Impreza', [] );
+                    if ( ! empty( $cc_option['custom_colors'] ) && is_array( $cc_option['custom_colors'] ) ) {
+                        foreach ( $cc_option['custom_colors'] as $cc ) {
+                            if ( ! empty( $cc['slug'] ) ) {
+                                $custom_color_slugs[] = ltrim( $cc['slug'], '_' );
+                            }
+                        }
+                    }
+
                     foreach ( $css_m[1] as $var_raw ) {
                         // Hyphens → underscores voor whitelist-vergelijking
                         $var_name = str_replace( '-', '_', $var_raw );
                         if ( in_array( $var_name, $whitelist, true ) ) continue;
                         if ( in_array( $var_name, aspera_impreza_extra_vars(), true ) ) continue;
+                        if ( in_array( $var_raw, $custom_color_slugs, true ) ) continue;
 
                         // Hex als var-naam vs. onbekende custom var
                         $rule = preg_match( '/^[0-9a-fA-F]{3,8}$/', $var_raw )
