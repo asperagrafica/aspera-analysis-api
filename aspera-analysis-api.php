@@ -1042,30 +1042,40 @@ add_action( 'wp_ajax_aspera_add_exception', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
     if ( ! aspera_user_is_administrator() ) wp_die( -1 );
 
-    $exc_id   = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
-    $category = sanitize_text_field( wp_unslash( $_POST['category'] ?? '' ) );
-    $rule     = sanitize_text_field( wp_unslash( $_POST['rule']     ?? '' ) );
-    $post_id  = intval( $_POST['post_id'] ?? 0 );
+    $items_json = wp_unslash( $_POST['items'] ?? '' );
+    $items      = json_decode( $items_json, true );
 
-    if ( ! $exc_id ) wp_die( -1 );
-    $exceptions = get_option( 'aspera_audit_exceptions', [] );
-    if ( ! is_array( $exceptions ) ) $exceptions = [];
-
-    foreach ( $exceptions as $e ) {
-        if ( $e['id'] === $exc_id ) {
-            wp_send_json_success( [ 'id' => $exc_id ] );
-        }
+    if ( ! is_array( $items ) || empty( $items ) ) {
+        $exc_id   = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
+        $category = sanitize_text_field( wp_unslash( $_POST['category'] ?? '' ) );
+        $rule     = sanitize_text_field( wp_unslash( $_POST['rule']     ?? '' ) );
+        $post_id  = intval( $_POST['post_id'] ?? 0 );
+        if ( ! $exc_id ) wp_die( -1 );
+        $items = [ [ 'id' => $exc_id, 'category' => $category, 'rule' => $rule, 'post_id' => $post_id ] ];
     }
 
-    $exceptions[] = [
-        'id'         => $exc_id,
-        'category'   => $category,
-        'rule'       => $rule,
-        'post_id'    => $post_id,
-        'created_at' => current_time( 'Y-m-d' ),
-    ];
+    $exceptions = get_option( 'aspera_audit_exceptions', [] );
+    if ( ! is_array( $exceptions ) ) $exceptions = [];
+    $existing = [];
+    foreach ( $exceptions as $e ) { $existing[ $e['id'] ] = true; }
+
+    $added = [];
+    foreach ( $items as $item ) {
+        $id = sanitize_text_field( $item['id'] ?? '' );
+        if ( ! $id || isset( $existing[ $id ] ) ) continue;
+        $exceptions[] = [
+            'id'         => $id,
+            'category'   => sanitize_text_field( $item['category'] ?? '' ),
+            'rule'       => sanitize_text_field( $item['rule'] ?? '' ),
+            'post_id'    => intval( $item['post_id'] ?? 0 ),
+            'created_at' => current_time( 'Y-m-d' ),
+        ];
+        $existing[ $id ] = true;
+        $added[] = $id;
+    }
+
     update_option( 'aspera_audit_exceptions', $exceptions );
-    wp_send_json_success( [ 'id' => $exc_id ] );
+    wp_send_json_success( [ 'added' => $added ] );
 } );
 
 add_action( 'wp_ajax_aspera_remove_exception', function () {
@@ -1141,6 +1151,11 @@ function aspera_dashboard_widget_render(): void {
         #aspera_audit_widget .aspera-exc-btn:hover { color:#d63638; }
         #aspera_audit_widget .aspera-exc-btn.is-excepted { color:#a7aaad; }
         #aspera_audit_widget .aspera-exc-btn.is-excepted:hover { color:#2271b1; }
+        #aspera_audit_widget .aspera-exc-cb { flex-shrink:0; margin:3px 0 0; cursor:pointer; }
+        #aspera_audit_widget .aspera-bulk-bar { display:none; align-items:center; gap:8px; padding:6px 0; }
+        #aspera_audit_widget .aspera-bulk-bar.has-selection { display:flex; }
+        #aspera_audit_widget .aspera-bulk-btn { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
+        #aspera_audit_widget .aspera-bulk-btn:hover { background:#e0e0e0; }
         #aspera_audit_widget .aspera-ignored { opacity:0.45; }
     </style>';
 
@@ -1260,6 +1275,10 @@ function aspera_dashboard_widget_render(): void {
                 usort( $active_viols, function ( $a, $b ) use ( $sev_order ) {
                     return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
                 } );
+                echo '<div class="aspera-bulk-bar" data-cat="' . esc_attr( $key ) . '">';
+                echo '<button class="aspera-bulk-btn" data-nonce="' . esc_attr( $nonce ) . '">Negeer geselecteerde</button>';
+                echo '<span class="aspera-bulk-count" style="font-size:12px;color:#50575e;"></span>';
+                echo '</div>';
                 foreach ( $active_viols as $v ) {
                     $sev     = $v['severity'] ?? 'warning';
                     $rule    = esc_html( $v['rule'] ?? '' );
@@ -1272,7 +1291,8 @@ function aspera_dashboard_widget_render(): void {
                     $pid_attr     = esc_attr( (string) ( $post_id ?? 0 ) );
 
                     echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
-                    echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
+                    echo '<input type="checkbox" class="aspera-exc-cb" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '">';
+                    echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">&#x25CF;</span>';
                     echo '<div style="flex:1;min-width:0;">';
                     echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
                     echo '&ensp;<span style="font-size:11px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
@@ -1286,7 +1306,6 @@ function aspera_dashboard_widget_render(): void {
                         echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
                     }
                     echo '</div>';
-                    echo '<button class="aspera-exc-btn" data-action="add" data-nonce="' . esc_attr( $nonce ) . '" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '" title="Negeer deze violation">Negeer</button>';
                     echo '</div>';
                 }
             }
@@ -1386,45 +1405,88 @@ function aspera_dashboard_widget_script(): void {
             refreshBtn.addEventListener('click', function () { runAudit(); });
         }
 
-        // ── Negeer / Herstel knoppen ──────────────────────────────────────────
-        document.querySelectorAll('.aspera-exc-btn').forEach(function (btn) {
+        // ── Checkboxes: bulk-bar tonen/verbergen ─────────────────────────────
+        function updateBulkBars() {
+            document.querySelectorAll('.aspera-bulk-bar').forEach(function (bar) {
+                var container = bar.parentElement;
+                var checked = container.querySelectorAll('.aspera-exc-cb:checked');
+                var count = checked.length;
+                bar.classList.toggle('has-selection', count > 0);
+                var lbl = bar.querySelector('.aspera-bulk-count');
+                if (lbl) lbl.textContent = count > 0 ? count + ' geselecteerd' : '';
+            });
+        }
+        document.querySelectorAll('.aspera-exc-cb').forEach(function (cb) {
+            cb.addEventListener('change', updateBulkBars);
+        });
+
+        // ── Bulk negeer ──────────────────────────────────────────────────────
+        document.querySelectorAll('.aspera-bulk-btn').forEach(function (btn) {
             btn.addEventListener('click', function () {
-                var action   = btn.dataset.action;
-                var nonce    = btn.dataset.nonce;
-                var excId    = btn.dataset.excId;
-                var category = btn.dataset.category;
-                var rule     = btn.dataset.rule;
-                var postId   = btn.dataset.postId || '0';
+                var container = btn.closest('.aspera-bulk-bar').parentElement;
+                var checked   = container.querySelectorAll('.aspera-exc-cb:checked');
+                if (!checked.length) return;
+
+                var items = [];
+                checked.forEach(function (cb) {
+                    items.push({
+                        id:       cb.dataset.excId,
+                        category: cb.dataset.category,
+                        rule:     cb.dataset.rule,
+                        post_id:  cb.dataset.postId || '0'
+                    });
+                });
 
                 btn.disabled    = true;
                 btn.textContent = '\u2026';
 
-                var body = action === 'add'
-                    ? 'action=aspera_add_exception&nonce=' + encodeURIComponent(nonce)
-                        + '&exception_id=' + encodeURIComponent(excId)
-                        + '&category=' + encodeURIComponent(category)
-                        + '&rule='     + encodeURIComponent(rule)
-                        + '&post_id='  + encodeURIComponent(postId)
-                    : 'action=aspera_remove_exception&nonce=' + encodeURIComponent(nonce)
-                        + '&exception_id=' + encodeURIComponent(excId);
-
                 fetch(ajaxurl, {
                     method:  'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body:    body
+                    body:    'action=aspera_add_exception&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                            + '&items=' + encodeURIComponent(JSON.stringify(items))
                 })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (data.success) {
-                        runAudit('Uitzondering opgeslagen \u2014 audit wordt bijgewerkt\u2026');
+                        runAudit('Uitzonderingen opgeslagen \u2014 audit wordt bijgewerkt\u2026');
                     } else {
                         btn.disabled    = false;
-                        btn.textContent = action === 'add' ? 'Negeer' : 'Herstel';
+                        btn.textContent = 'Negeer geselecteerde';
                     }
                 })
                 .catch(function () {
                     btn.disabled    = false;
-                    btn.textContent = action === 'add' ? 'Negeer' : 'Herstel';
+                    btn.textContent = 'Negeer geselecteerde';
+                });
+            });
+        });
+
+        // ── Herstel knoppen (individueel) ─────────────────────────────────────
+        document.querySelectorAll('.aspera-exc-btn.is-excepted').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var nonce = btn.dataset.nonce;
+                var excId = btn.dataset.excId;
+                btn.disabled    = true;
+                btn.textContent = '\u2026';
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    'action=aspera_remove_exception&nonce=' + encodeURIComponent(nonce)
+                            + '&exception_id=' + encodeURIComponent(excId)
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        runAudit('Uitzondering hersteld \u2014 audit wordt bijgewerkt\u2026');
+                    } else {
+                        btn.disabled    = false;
+                        btn.textContent = 'Herstel';
+                    }
+                })
+                .catch(function () {
+                    btn.disabled    = false;
+                    btn.textContent = 'Herstel';
                 });
             });
         });
