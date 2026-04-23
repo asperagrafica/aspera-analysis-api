@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.55.0
+ * Version: 1.56.0
  * Author: Aspera
  */
 
@@ -7521,7 +7521,8 @@ add_action( 'rest_api_init', function () {
             // Verwijder custom_colors array als alle referenties zijn gemigreerd
             $remove_colors  = filter_var( $req->get_param( 'remove_custom_colors' ), FILTER_VALIDATE_BOOLEAN );
             $colors_removed = false;
-            if ( $remove_colors && ! $dry_run ) {
+            $blocking_refs  = [];
+            if ( $remove_colors ) {
                 $still_pending = ! empty( $changes ) || ! empty( $button_changes ) || ! empty( $input_changes ) || ! empty( $scheme_changes );
                 if ( $still_pending ) {
                     return new WP_Error(
@@ -7530,10 +7531,74 @@ add_action( 'rest_api_init', function () {
                         [ 'status' => 409 ]
                     );
                 }
-                $raw_fresh = get_option( $option_name );
-                $raw_fresh['custom_colors'] = [];
-                update_option( $option_name, $raw_fresh );
-                $colors_removed = true;
+
+                // Check post_content op custom color slug referenties
+                global $wpdb;
+                foreach ( $slug_map as $slug => $color ) {
+                    $esc_slug = $wpdb->esc_like( $slug ) . '%';
+                    $found = $wpdb->get_results( $wpdb->prepare(
+                        "SELECT ID, post_title, post_type FROM {$wpdb->posts}
+                         WHERE post_status = 'publish'
+                         AND post_content LIKE %s
+                         LIMIT 5",
+                        '%' . $esc_slug
+                    ) );
+                    foreach ( $found as $row ) {
+                        $blocking_refs[] = [
+                            'slug'      => $slug,
+                            'source'    => 'post_content',
+                            'post_id'   => (int) $row->ID,
+                            'post_type' => $row->post_type,
+                            'title'     => $row->post_title,
+                        ];
+                    }
+
+                    // Check postmeta
+                    $meta_count = (int) $wpdb->get_var( $wpdb->prepare(
+                        "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_value LIKE %s",
+                        '%' . $esc_slug
+                    ) );
+                    if ( $meta_count > 0 ) {
+                        $blocking_refs[] = [
+                            'slug'   => $slug,
+                            'source' => 'postmeta',
+                            'count'  => $meta_count,
+                        ];
+                    }
+                }
+
+                // Check child theme CSS bestanden
+                $theme_dir = get_stylesheet_directory();
+                foreach ( [ 'style.css', 'custom.css' ] as $css_file ) {
+                    $css_path = $theme_dir . '/' . $css_file;
+                    if ( ! file_exists( $css_path ) ) continue;
+                    $css_content = file_get_contents( $css_path );
+                    foreach ( $slug_map as $slug => $color ) {
+                        $css_var = 'var(--color-' . ltrim( $slug, '_' ) . ')';
+                        if ( strpos( $css_content, $css_var ) !== false ) {
+                            $blocking_refs[] = [
+                                'slug'   => $slug,
+                                'source' => $css_file,
+                                'var'    => $css_var,
+                            ];
+                        }
+                    }
+                }
+
+                if ( ! empty( $blocking_refs ) ) {
+                    if ( ! $dry_run ) {
+                        return new WP_Error(
+                            'refs_in_use',
+                            'Custom color slugs worden nog gebruikt buiten theme options. Verwijdering geblokkeerd.',
+                            [ 'status' => 409, 'blocking_refs' => $blocking_refs ]
+                        );
+                    }
+                } elseif ( ! $dry_run ) {
+                    $raw_fresh = get_option( $option_name );
+                    $raw_fresh['custom_colors'] = [];
+                    update_option( $option_name, $raw_fresh );
+                    $colors_removed = true;
+                }
             }
 
             $response = [
@@ -7556,6 +7621,9 @@ add_action( 'rest_api_init', function () {
             }
             if ( $remove_colors ) {
                 $response['custom_colors_removed'] = $colors_removed;
+                if ( ! empty( $blocking_refs ) ) {
+                    $response['blocking_refs'] = $blocking_refs;
+                }
             }
             return $response;
         },
