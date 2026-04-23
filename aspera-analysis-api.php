@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.49.0
+ * Version: 1.50.0
  * Author: Aspera
  */
 
@@ -3502,6 +3502,7 @@ add_action( 'rest_api_init', function () {
                 'wpforms_'      => [ 'plugin' => 'WPForms',              'slug' => 'wpforms-lite' ],
                 'tribe_'        => [ 'plugin' => 'The Events Calendar',  'slug' => 'the-events-calendar' ],
                 'popup_maker_'  => [ 'plugin' => 'Popup Maker',          'slug' => 'popup-maker' ],
+                'pys_'          => [ 'plugin' => 'PixelYourSite',       'slug' => 'pixelyoursite-pro' ],
             ];
 
             $orphaned_options = [];
@@ -3526,17 +3527,46 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // ── Bekende plugin postmeta-prefixen — orphaned wanneer plugin inactief ──
+            $known_meta_prefixes = [
+                '_pys_'         => [ 'plugin' => 'PixelYourSite',       'slug' => 'pixelyoursite-pro' ],
+            ];
+
+            $orphaned_meta = [];
+            foreach ( $known_meta_prefixes as $meta_prefix => $info ) {
+                if ( in_array( $info['slug'], $active_slugs, true ) ) continue;
+                $like  = $wpdb->esc_like( $meta_prefix ) . '%';
+                $count = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key LIKE %s", $like
+                ) );
+                if ( $count > 0 ) {
+                    $examples = $wpdb->get_col( $wpdb->prepare(
+                        "SELECT DISTINCT meta_key FROM {$wpdb->postmeta} WHERE meta_key LIKE %s LIMIT 5", $like
+                    ) );
+                    $orphaned_meta[] = [
+                        'prefix'        => $meta_prefix,
+                        'plugin'        => $info['plugin'],
+                        'plugin_active' => false,
+                        'count'         => $count,
+                        'examples'      => $examples,
+                        'advies'        => 'verwijderen na akkoord',
+                    ];
+                }
+            }
+
             return [
-                'status'              => empty( $orphaned ) && empty( $unknown ) && empty( $orphaned_post_types ) && empty( $orphaned_options ) ? 'ok' : 'issues_found',
+                'status'              => empty( $orphaned ) && empty( $unknown ) && empty( $orphaned_post_types ) && empty( $orphaned_options ) && empty( $orphaned_meta ) ? 'ok' : 'issues_found',
                 'orphaned_tables'     => $orphaned,
                 'unknown_tables'      => $unknown,
                 'orphaned_post_types' => $orphaned_post_types,
                 'orphaned_options'    => $orphaned_options,
+                'orphaned_meta'       => $orphaned_meta,
                 'summary'             => [
                     'orphaned_tables'     => count( $orphaned ),
                     'unknown_tables'      => count( $unknown ),
                     'orphaned_post_types' => count( $orphaned_post_types ),
                     'orphaned_options'    => count( $orphaned_options ),
+                    'orphaned_meta'       => count( $orphaned_meta ),
                 ],
             ];
         },
@@ -5924,6 +5954,9 @@ add_action( 'rest_api_init', function () {
                 // db/tables/validate
                 'orphaned_table'              => 'warning',
                 'unknown_table'               => 'observation',
+                'orphaned_post_type'          => 'warning',
+                'orphaned_plugin_options'     => 'warning',
+                'orphaned_plugin_meta'        => 'warning',
 
                 // css/unused
                 'unused_css_class'            => 'warning',
@@ -6244,6 +6277,27 @@ add_action( 'rest_api_init', function () {
                         'rule'     => 'unknown_table',
                         'severity' => 'observation',
                         'detail'   => $t['table'],
+                    ];
+                }
+                foreach ( $db['orphaned_post_types'] ?? [] as $pt ) {
+                    $db_violations[] = [
+                        'rule'     => 'orphaned_post_type',
+                        'severity' => 'warning',
+                        'detail'   => $pt['post_type'] . ' (' . $pt['plugin'] . ', ' . $pt['count'] . ' posts)',
+                    ];
+                }
+                foreach ( $db['orphaned_options'] ?? [] as $oo ) {
+                    $db_violations[] = [
+                        'rule'     => 'orphaned_plugin_options',
+                        'severity' => 'warning',
+                        'detail'   => $oo['prefix'] . '* (' . $oo['plugin'] . ', ' . $oo['count'] . ' rijen)',
+                    ];
+                }
+                foreach ( $db['orphaned_meta'] ?? [] as $om ) {
+                    $db_violations[] = [
+                        'rule'     => 'orphaned_plugin_meta',
+                        'severity' => 'warning',
+                        'detail'   => $om['prefix'] . '* (' . $om['plugin'] . ', ' . $om['count'] . ' rijen)',
                     ];
                 }
             }
