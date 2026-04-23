@@ -1001,8 +1001,13 @@ function aspera_site_health_test(): array {
 // Toont de Aspera audit snapshot in WP Dashboard — alleen zichtbaar voor Administrators.
 // Leest opgeslagen snapshots uit wp_options; refresh via AJAX triggert /site/audit opnieuw.
 
+function aspera_user_is_administrator(): bool {
+    $user = wp_get_current_user();
+    return in_array( 'administrator', (array) $user->roles, true );
+}
+
 add_action( 'wp_dashboard_setup', function () {
-    if ( ! current_user_can( 'manage_options' ) ) return;
+    if ( ! aspera_user_is_administrator() ) return;
     wp_add_dashboard_widget(
         'aspera_audit_widget',
         'Aspera Site Audit',
@@ -1011,7 +1016,7 @@ add_action( 'wp_dashboard_setup', function () {
 } );
 
 add_action( 'wp_ajax_aspera_refresh_audit', function () {
-    if ( ! current_user_can( 'manage_options' ) ) {
+    if ( ! aspera_user_is_administrator() ) {
         wp_send_json_error( 'Onvoldoende rechten.' );
     }
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
@@ -1034,7 +1039,7 @@ add_action( 'wp_ajax_aspera_refresh_audit', function () {
 
 add_action( 'wp_ajax_aspera_add_exception', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
-    if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
+    if ( ! aspera_user_is_administrator() ) wp_die( -1 );
 
     $exc_id   = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
     $category = sanitize_text_field( wp_unslash( $_POST['category'] ?? '' ) );
@@ -1064,7 +1069,7 @@ add_action( 'wp_ajax_aspera_add_exception', function () {
 
 add_action( 'wp_ajax_aspera_remove_exception', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
-    if ( ! current_user_can( 'manage_options' ) ) wp_die( -1 );
+    if ( ! aspera_user_is_administrator() ) wp_die( -1 );
 
     $exc_id = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
     if ( ! $exc_id ) wp_die( -1 );
