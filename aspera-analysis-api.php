@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.50.0
+ * Version: 1.51.0
  * Author: Aspera
  */
 
@@ -7286,6 +7286,135 @@ add_action( 'rest_api_init', function () {
                 'new_title'     => $new_title,
                 'field_count'   => count( $saved_fields ),
                 'fields'        => $saved_fields,
+            ];
+        },
+    ] );
+
+    /**
+     * POST /wp-json/aspera/v1/impreza/colors/migrate
+     * Vervangt Custom Global Color slug-referenties in Impreza theme options
+     * door directe kleurwaarden (hex, gradient, rgba).
+     *
+     * Leest custom_colors uit usof_options_Impreza, bouwt een slug-naar-waarde mapping,
+     * en vervangt alle referenties in color_* keys. Resolvet ook slugs binnen gradients.
+     * Ondersteunt dry_run=true.
+     */
+    register_rest_route( 'aspera/v1', '/impreza/colors/migrate', [
+        'methods'             => 'POST',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $dry_run     = filter_var( $req->get_param( 'dry_run' ), FILTER_VALIDATE_BOOLEAN );
+            $option_name = 'usof_options_Impreza';
+            $raw         = get_option( $option_name );
+
+            if ( ! is_array( $raw ) ) {
+                return new WP_Error( 'invalid_option', 'usof_options_Impreza is geen array.', [ 'status' => 500 ] );
+            }
+
+            $custom_colors = $raw['custom_colors'] ?? [];
+            if ( empty( $custom_colors ) || ! is_array( $custom_colors ) ) {
+                return new WP_Error( 'no_colors', 'Geen Custom Global Colors gevonden.', [ 'status' => 404 ] );
+            }
+
+            // Bouw slug → waarde mapping
+            $slug_map = [];
+            foreach ( $custom_colors as $cc ) {
+                $slug  = $cc['slug'] ?? '';
+                $color = $cc['color'] ?? '';
+                if ( $slug && $color ) {
+                    $slug_map[ $slug ] = $color;
+                }
+            }
+
+            // Resolve functie: vervangt slugs door directe waarden
+            $resolve = function ( string $value ) use ( $slug_map ): ?string {
+                if ( $value === '' ) return null;
+
+                // Directe slug match (bijv. "_111324" → "#111324")
+                if ( isset( $slug_map[ $value ] ) ) {
+                    $resolved = $slug_map[ $value ];
+                    // Resolve slugs binnen de waarde zelf (gradient met slug-referenties)
+                    foreach ( $slug_map as $s => $v ) {
+                        $resolved = str_replace( $s, $v, $resolved );
+                    }
+                    return $resolved;
+                }
+
+                // Slugs binnen een samengestelde waarde (gradient, rgba string)
+                $changed = $value;
+                foreach ( $slug_map as $s => $v ) {
+                    $changed = str_replace( $s, $v, $changed );
+                }
+                return $changed !== $value ? $changed : null;
+            };
+
+            $changes = [];
+
+            foreach ( $raw as $key => $value ) {
+                if ( strpos( $key, 'color_' ) !== 0 ) continue;
+                if ( ! is_string( $value ) || $value === '' ) continue;
+
+                $new_value = $resolve( $value );
+                if ( $new_value !== null && $new_value !== $value ) {
+                    $changes[] = [
+                        'key'  => $key,
+                        'from' => $value,
+                        'to'   => $new_value,
+                    ];
+                    if ( ! $dry_run ) {
+                        $raw[ $key ] = $new_value;
+                    }
+                }
+            }
+
+            // Style schemes (usof_style_schemes_Impreza)
+            $schemes_name    = 'usof_style_schemes_Impreza';
+            $schemes_raw     = get_option( $schemes_name );
+            $scheme_changes  = [];
+
+            if ( is_array( $schemes_raw ) ) {
+                foreach ( $schemes_raw as $scheme_key => &$scheme ) {
+                    if ( ! is_array( $scheme ) ) continue;
+                    foreach ( $scheme as $sk => $sv ) {
+                        if ( strpos( $sk, 'color_' ) !== 0 ) continue;
+                        if ( ! is_string( $sv ) || $sv === '' ) continue;
+
+                        $new_sv = $resolve( $sv );
+                        if ( $new_sv !== null && $new_sv !== $sv ) {
+                            $scheme_changes[] = [
+                                'scheme' => $scheme_key,
+                                'key'    => $sk,
+                                'from'   => $sv,
+                                'to'     => $new_sv,
+                            ];
+                            if ( ! $dry_run ) {
+                                $scheme[ $sk ] = $new_sv;
+                            }
+                        }
+                    }
+                }
+                unset( $scheme );
+            }
+
+            if ( ! $dry_run && ( ! empty( $changes ) || ! empty( $scheme_changes ) ) ) {
+                if ( ! empty( $changes ) ) {
+                    update_option( $option_name, $raw );
+                }
+                if ( ! empty( $scheme_changes ) ) {
+                    update_option( $schemes_name, $schemes_raw );
+                }
+            }
+
+            return [
+                'dry_run'        => $dry_run,
+                'slug_map'       => $slug_map,
+                'theme_options'  => $changes,
+                'style_schemes'  => $scheme_changes,
+                'totals'         => [
+                    'theme_options' => count( $changes ),
+                    'style_schemes' => count( $scheme_changes ),
+                ],
             ];
         },
     ] );
