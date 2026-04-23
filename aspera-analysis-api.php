@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.52.0
+ * Version: 1.53.0
  * Author: Aspera
  */
 
@@ -7293,10 +7293,12 @@ add_action( 'rest_api_init', function () {
     /**
      * POST /wp-json/aspera/v1/impreza/colors/migrate
      * Vervangt Custom Global Color slug-referenties in Impreza theme options
-     * door directe kleurwaarden (hex, gradient, rgba).
+     * door directe kleurwaarden (hex, gradient, rgba) of thema-kleurrollen.
      *
      * Leest custom_colors uit usof_options_Impreza, bouwt een slug-naar-waarde mapping,
      * en vervangt alle referenties in color_* keys. Resolvet ook slugs binnen gradients.
+     * Met prefer_roles=true worden waarden waar mogelijk vervangen door thema-kleurrollen
+     * (bijv. _content_link, _content_bg) in plaats van directe hex-waarden.
      * Ondersteunt dry_run=true.
      */
     register_rest_route( 'aspera/v1', '/impreza/colors/migrate', [
@@ -7304,9 +7306,10 @@ add_action( 'rest_api_init', function () {
         'permission_callback' => 'aspera_check_key',
         'callback'            => function ( WP_REST_Request $req ) {
 
-            $dry_run     = filter_var( $req->get_param( 'dry_run' ), FILTER_VALIDATE_BOOLEAN );
-            $option_name = 'usof_options_Impreza';
-            $raw         = get_option( $option_name );
+            $dry_run       = filter_var( $req->get_param( 'dry_run' ), FILTER_VALIDATE_BOOLEAN );
+            $prefer_roles  = filter_var( $req->get_param( 'prefer_roles' ), FILTER_VALIDATE_BOOLEAN );
+            $option_name   = 'usof_options_Impreza';
+            $raw           = get_option( $option_name );
 
             if ( ! is_array( $raw ) ) {
                 return new WP_Error( 'invalid_option', 'usof_options_Impreza is geen array.', [ 'status' => 500 ] );
@@ -7327,18 +7330,39 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
-            // Resolve functie: vervangt slugs door directe waarden
-            $resolve = function ( string $value ) use ( $slug_map ): ?string {
+            // Bouw hex → thema-kleurrol mapping uit bestaande color_* top-level keys
+            $role_map = [];
+            if ( $prefer_roles ) {
+                foreach ( $raw as $key => $value ) {
+                    if ( strpos( $key, 'color_' ) !== 0 ) continue;
+                    if ( ! is_string( $value ) || $value === '' ) continue;
+                    $role = '_' . substr( $key, 6 );
+                    if ( ! isset( $role_map[ $value ] ) ) {
+                        $role_map[ $value ] = $role;
+                    }
+                }
+            }
+
+            // Resolve functie: vervangt slugs door thema-kleurrollen (prefer_roles) of directe waarden
+            $resolve = function ( string $value ) use ( $slug_map, $role_map, $prefer_roles ): ?string {
                 if ( $value === '' ) return null;
 
-                // Directe slug match (bijv. "_111324" → "#111324")
+                // Directe slug match (bijv. "_111324" → "_content_heading" of "#111324")
                 if ( isset( $slug_map[ $value ] ) ) {
-                    $resolved = $slug_map[ $value ];
-                    // Resolve slugs binnen de waarde zelf (gradient met slug-referenties)
+                    $hex = $slug_map[ $value ];
+                    if ( $prefer_roles && isset( $role_map[ $hex ] ) ) {
+                        return $role_map[ $hex ];
+                    }
+                    $resolved = $hex;
                     foreach ( $slug_map as $s => $v ) {
                         $resolved = str_replace( $s, $v, $resolved );
                     }
                     return $resolved;
+                }
+
+                // Al een hex-waarde die naar een rol kan (voor reeds-gemigreerde waarden)
+                if ( $prefer_roles && isset( $role_map[ $value ] ) ) {
+                    return $role_map[ $value ];
                 }
 
                 // Slugs binnen een samengestelde waarde (gradient, rgba string)
@@ -7462,8 +7486,9 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
-            return [
+            $response = [
                 'dry_run'        => $dry_run,
+                'prefer_roles'   => $prefer_roles,
                 'slug_map'       => $slug_map,
                 'theme_options'  => $changes,
                 'buttons'        => $button_changes,
@@ -7476,6 +7501,10 @@ add_action( 'rest_api_init', function () {
                     'style_schemes' => count( $scheme_changes ),
                 ],
             ];
+            if ( $prefer_roles ) {
+                $response['role_map'] = $role_map;
+            }
+            return $response;
         },
     ] );
 
