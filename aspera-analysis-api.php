@@ -6830,10 +6830,11 @@ add_action( 'rest_api_init', function () {
             }
 
             $filter_post_type = $req->get_param( 'post_type' );
-            $filter_group_id  = $req->get_param( 'group_id' );
+            $filter_group     = $req->get_param( 'group_id' );
 
-            if ( $filter_group_id ) {
-                $group_obj = acf_get_field_group( (int) $filter_group_id );
+            if ( $filter_group ) {
+                $identifier = is_numeric( $filter_group ) ? (int) $filter_group : $filter_group;
+                $group_obj  = acf_get_field_group( $identifier );
                 if ( ! $group_obj ) {
                     return new WP_Error( 'not_found', 'Field group niet gevonden.', [ 'status' => 404 ] );
                 }
