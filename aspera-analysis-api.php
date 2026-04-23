@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.53.0
+ * Version: 1.53.1
  * Author: Aspera
  */
 
@@ -7331,46 +7331,58 @@ add_action( 'rest_api_init', function () {
             }
 
             // Bouw hex → thema-kleurrol mapping uit bestaande color_* top-level keys
+            // Prioriteit: content_ rollen eerst, dan alt_content_, dan footer_, dan header_
             $role_map = [];
             if ( $prefer_roles ) {
-                foreach ( $raw as $key => $value ) {
-                    if ( strpos( $key, 'color_' ) !== 0 ) continue;
-                    if ( ! is_string( $value ) || $value === '' ) continue;
-                    $role = '_' . substr( $key, 6 );
-                    if ( ! isset( $role_map[ $value ] ) ) {
-                        $role_map[ $value ] = $role;
+                $priority = [ 'color_content_', 'color_alt_content_', 'color_footer_', 'color_header_' ];
+                foreach ( $priority as $prefix ) {
+                    foreach ( $raw as $key => $value ) {
+                        if ( strpos( $key, $prefix ) !== 0 ) continue;
+                        if ( ! is_string( $value ) || $value === '' ) continue;
+                        $role = '_' . substr( $key, 6 );
+                        if ( ! isset( $role_map[ $value ] ) ) {
+                            $role_map[ $value ] = $role;
+                        }
                     }
                 }
             }
 
-            // Resolve functie: vervangt slugs door thema-kleurrollen (prefer_roles) of directe waarden
-            $resolve = function ( string $value ) use ( $slug_map, $role_map, $prefer_roles ): ?string {
+            // Resolve functie: vervangt slugs door directe waarden
+            $resolve = function ( string $value ) use ( $slug_map ): ?string {
                 if ( $value === '' ) return null;
 
-                // Directe slug match (bijv. "_111324" → "_content_heading" of "#111324")
                 if ( isset( $slug_map[ $value ] ) ) {
-                    $hex = $slug_map[ $value ];
-                    if ( $prefer_roles && isset( $role_map[ $hex ] ) ) {
-                        return $role_map[ $hex ];
-                    }
-                    $resolved = $hex;
+                    $resolved = $slug_map[ $value ];
                     foreach ( $slug_map as $s => $v ) {
                         $resolved = str_replace( $s, $v, $resolved );
                     }
                     return $resolved;
                 }
 
-                // Al een hex-waarde die naar een rol kan (voor reeds-gemigreerde waarden)
-                if ( $prefer_roles && isset( $role_map[ $value ] ) ) {
-                    return $role_map[ $value ];
-                }
-
-                // Slugs binnen een samengestelde waarde (gradient, rgba string)
                 $changed = $value;
                 foreach ( $slug_map as $s => $v ) {
                     $changed = str_replace( $s, $v, $changed );
                 }
                 return $changed !== $value ? $changed : null;
+            };
+
+            // Resolve met thema-kleurrollen: custom slug of hex → rol
+            $resolve_role = function ( string $value ) use ( $slug_map, $role_map ): ?string {
+                if ( $value === '' ) return null;
+
+                if ( isset( $slug_map[ $value ] ) ) {
+                    $hex = $slug_map[ $value ];
+                    if ( isset( $role_map[ $hex ] ) ) {
+                        return $role_map[ $hex ];
+                    }
+                    return $hex;
+                }
+
+                if ( isset( $role_map[ $value ] ) ) {
+                    return $role_map[ $value ];
+                }
+
+                return null;
             };
 
             $changes = [];
@@ -7393,6 +7405,7 @@ add_action( 'rest_api_init', function () {
             }
 
             // Buttons (array van button-stijlen met color_* properties)
+            $btn_resolve    = $prefer_roles ? $resolve_role : $resolve;
             $button_changes = [];
             if ( ! empty( $raw['buttons'] ) && is_array( $raw['buttons'] ) ) {
                 foreach ( $raw['buttons'] as $idx => &$button ) {
@@ -7401,7 +7414,7 @@ add_action( 'rest_api_init', function () {
                         if ( strpos( $bk, 'color_' ) !== 0 ) continue;
                         if ( ! is_string( $bv ) || $bv === '' ) continue;
 
-                        $new_bv = $resolve( $bv );
+                        $new_bv = $btn_resolve( $bv );
                         if ( $new_bv !== null && $new_bv !== $bv ) {
                             $button_changes[] = [
                                 'button' => $idx,
@@ -7428,7 +7441,7 @@ add_action( 'rest_api_init', function () {
                         if ( strpos( $ik, 'color_' ) !== 0 ) continue;
                         if ( ! is_string( $iv ) || $iv === '' ) continue;
 
-                        $new_iv = $resolve( $iv );
+                        $new_iv = $btn_resolve( $iv );
                         if ( $new_iv !== null && $new_iv !== $iv ) {
                             $input_changes[] = [
                                 'input'  => $idx,
