@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.48.0
+ * Version: 1.49.0
  * Author: Aspera
  */
 
@@ -6753,6 +6753,484 @@ add_action( 'rest_api_init', function () {
                 'category_scores'  => $category_scores,
                 'categories'       => $categories_output,
                 'audit_date'       => $audit_date,
+            ];
+        },
+    ] );
+
+    // ── ACF Fields endpoints ─────────────────────────────────────────────────
+
+    /**
+     * Formatteert een ACF-veld naar compact JSON.
+     */
+    function aspera_format_acf_field( array $f ): array {
+        $props_whitelist = [
+            'key', 'name', 'label', 'type', 'instructions',
+            'required', 'default_value', 'placeholder',
+            'choices', 'conditional_logic', 'wrapper',
+            'min', 'max', 'step', 'prepend', 'append',
+            'min_val', 'max_val',
+            'rows', 'maxlength', 'new_lines',
+            'return_format', 'display_format',
+            'post_type', 'taxonomy', 'field_type', 'allow_null',
+            'multiple', 'ui', 'ajax',
+            'layouts', 'button_label', 'min_rows', 'max_rows',
+            'sub_fields',
+            'media_upload', 'toolbar', 'tabs', 'delay',
+            'library', 'mime_types', 'preview_size', 'min_width', 'max_width', 'min_height', 'max_height', 'min_size', 'max_size',
+            'layout', 'collapsed',
+        ];
+
+        $out = [];
+        foreach ( $props_whitelist as $prop ) {
+            if ( ! isset( $f[ $prop ] ) ) continue;
+            $val = $f[ $prop ];
+            if ( $val === '' || $val === [] || $val === 0 || $val === false || $val === null ) continue;
+            $out[ $prop ] = $val;
+        }
+
+        if ( ! empty( $f['sub_fields'] ) ) {
+            $out['sub_fields'] = array_map( 'aspera_format_acf_field', $f['sub_fields'] );
+        }
+        if ( ! empty( $f['layouts'] ) ) {
+            $out['layouts'] = array_map( function ( $layout ) {
+                $l = [
+                    'key'        => $layout['key'] ?? '',
+                    'name'       => $layout['name'] ?? '',
+                    'label'      => $layout['label'] ?? '',
+                    'display'    => $layout['display'] ?? 'block',
+                    'min'        => $layout['min'] ?? '',
+                    'max'        => $layout['max'] ?? '',
+                ];
+                if ( ! empty( $layout['sub_fields'] ) ) {
+                    $l['sub_fields'] = array_map( 'aspera_format_acf_field', $layout['sub_fields'] );
+                }
+                return array_filter( $l, function ( $v ) { return $v !== '' && $v !== []; } );
+            }, $f['layouts'] );
+        }
+
+        $out['key']  = $f['key'] ?? '';
+        $out['name'] = $f['name'] ?? '';
+        $out['type'] = $f['type'] ?? '';
+
+        return $out;
+    }
+
+    /**
+     * GET /wp-json/aspera/v1/acf/fields
+     * Geeft field groups met hun volledige configuratie en velden terug.
+     * Optionele filters: ?post_type=casino_cpt  ?group_id=123
+     */
+    register_rest_route( 'aspera/v1', '/acf/fields', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_field_groups' ) || ! function_exists( 'acf_get_fields' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $filter_post_type = $req->get_param( 'post_type' );
+            $filter_group_id  = $req->get_param( 'group_id' );
+
+            if ( $filter_group_id ) {
+                $group_obj = acf_get_field_group( (int) $filter_group_id );
+                if ( ! $group_obj ) {
+                    return new WP_Error( 'not_found', 'Field group niet gevonden.', [ 'status' => 404 ] );
+                }
+                $groups = [ $group_obj ];
+            } else {
+                $groups = acf_get_field_groups();
+            }
+
+            $output = [];
+
+            foreach ( $groups as $group ) {
+                $location = $group['location'] ?? [];
+
+                if ( $filter_post_type ) {
+                    $matches = false;
+                    foreach ( $location as $or_group ) {
+                        foreach ( (array) $or_group as $rule ) {
+                            if ( ( $rule['param'] ?? '' ) === 'post_type'
+                                 && ( $rule['operator'] ?? '==' ) === '=='
+                                 && $rule['value'] === $filter_post_type ) {
+                                $matches = true;
+                                break 2;
+                            }
+                        }
+                    }
+                    if ( ! $matches ) continue;
+                }
+
+                $fields = acf_get_fields( $group['key'] );
+
+                $group_data = [
+                    'id'              => $group['ID'],
+                    'key'             => $group['key'],
+                    'title'           => $group['title'],
+                    'active'          => (bool) $group['active'],
+                    'style'           => $group['style'] ?? 'default',
+                    'position'        => $group['position'] ?? 'normal',
+                    'label_placement' => $group['label_placement'] ?? 'top',
+                    'location'        => $location,
+                    'menu_order'      => $group['menu_order'] ?? 0,
+                    'field_count'     => $fields ? count( $fields ) : 0,
+                    'fields'          => $fields ? array_map( 'aspera_format_acf_field', $fields ) : [],
+                ];
+
+                $output[] = $group_data;
+            }
+
+            return [
+                'group_count' => count( $output ),
+                'groups'      => $output,
+            ];
+        },
+    ] );
+
+    /**
+     * POST /wp-json/aspera/v1/acf/fields/update
+     * Voegt velden toe of wijzigt bestaande velden in een field group.
+     * Ondersteunt dry_run=true om wijzigingen te previeuwen zonder opslaan.
+     *
+     * Body JSON:
+     * {
+     *   "group_id": 123,
+     *   "group_settings": { "title": "...", "label_placement": "left" },  // optioneel
+     *   "fields": [
+     *     { "key": "field_abc123", "label": "Nieuw label", "type": "text", "name": "slug_1" },
+     *     { "name": "new_field_1", "label": "Nieuw veld", "type": "select", "choices": {"a":"A"} }
+     *   ]
+     * }
+     */
+    register_rest_route( 'aspera/v1', '/acf/fields/update', [
+        'methods'             => 'POST',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_field_groups' ) || ! function_exists( 'acf_update_field' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $body     = $req->get_json_params();
+            $group_id = (int) ( $body['group_id'] ?? 0 );
+            $dry_run  = filter_var( $req->get_param( 'dry_run' ), FILTER_VALIDATE_BOOLEAN );
+
+            if ( ! $group_id ) {
+                return new WP_Error( 'missing_group', 'group_id is verplicht.', [ 'status' => 400 ] );
+            }
+
+            $group = acf_get_field_group( $group_id );
+            if ( ! $group ) {
+                return new WP_Error( 'not_found', 'Field group niet gevonden.', [ 'status' => 404 ] );
+            }
+
+            $results = [];
+
+            // Group-level settings update
+            $group_settings = $body['group_settings'] ?? null;
+            if ( is_array( $group_settings ) && ! empty( $group_settings ) ) {
+                $allowed_group_props = [ 'title', 'style', 'position', 'label_placement',
+                                         'instruction_placement', 'active', 'menu_order', 'location' ];
+                $changes = [];
+                foreach ( $group_settings as $prop => $value ) {
+                    if ( ! in_array( $prop, $allowed_group_props, true ) ) continue;
+                    if ( isset( $group[ $prop ] ) && $group[ $prop ] === $value ) continue;
+                    $changes[ $prop ] = [ 'from' => $group[ $prop ] ?? null, 'to' => $value ];
+                    $group[ $prop ] = $value;
+                }
+                if ( ! empty( $changes ) ) {
+                    if ( ! $dry_run ) {
+                        acf_update_field_group( $group );
+                    }
+                    $results[] = [
+                        'action'  => 'group_updated',
+                        'changes' => $changes,
+                    ];
+                }
+            }
+
+            // Field-level updates
+            $fields_input = $body['fields'] ?? [];
+            if ( ! is_array( $fields_input ) ) {
+                $fields_input = [];
+            }
+
+            $existing_fields = acf_get_fields( $group['key'] );
+            $existing_by_key  = [];
+            $existing_by_name = [];
+            foreach ( $existing_fields as $ef ) {
+                $existing_by_key[ $ef['key'] ]   = $ef;
+                $existing_by_name[ $ef['name'] ] = $ef;
+            }
+
+            foreach ( $fields_input as $field_input ) {
+                $field_key  = $field_input['key'] ?? '';
+                $field_name = $field_input['name'] ?? '';
+
+                // Zoek bestaand veld op key of name
+                $existing = null;
+                if ( $field_key && isset( $existing_by_key[ $field_key ] ) ) {
+                    $existing = $existing_by_key[ $field_key ];
+                } elseif ( $field_name && isset( $existing_by_name[ $field_name ] ) ) {
+                    $existing = $existing_by_name[ $field_name ];
+                }
+
+                if ( $existing ) {
+                    $changes = [];
+                    foreach ( $field_input as $prop => $value ) {
+                        if ( $prop === 'key' || $prop === 'ID' ) continue;
+                        $old = $existing[ $prop ] ?? null;
+                        if ( $old !== $value ) {
+                            $changes[ $prop ] = [ 'from' => $old, 'to' => $value ];
+                            $existing[ $prop ] = $value;
+                        }
+                    }
+
+                    if ( ! empty( $changes ) ) {
+                        if ( ! $dry_run ) {
+                            acf_update_field( $existing );
+                        }
+                        $results[] = [
+                            'action'  => 'field_updated',
+                            'key'     => $existing['key'],
+                            'name'    => $existing['name'],
+                            'changes' => $changes,
+                        ];
+                    }
+                } else {
+                    // Nieuw veld
+                    if ( empty( $field_input['name'] ) || empty( $field_input['type'] ) ) {
+                        $results[] = [
+                            'action' => 'skipped',
+                            'reason' => 'Nieuw veld vereist name en type.',
+                            'input'  => $field_input,
+                        ];
+                        continue;
+                    }
+
+                    $new_field = $field_input;
+                    $new_field['parent'] = $group['key'];
+                    if ( empty( $new_field['key'] ) ) {
+                        $new_field['key'] = 'field_' . uniqid();
+                    }
+
+                    if ( ! $dry_run ) {
+                        $saved = acf_update_field( $new_field );
+                        $results[] = [
+                            'action' => 'field_created',
+                            'key'    => $saved['key'],
+                            'name'   => $saved['name'],
+                            'type'   => $saved['type'],
+                        ];
+                    } else {
+                        $results[] = [
+                            'action' => 'field_would_create',
+                            'key'    => $new_field['key'],
+                            'name'   => $new_field['name'],
+                            'type'   => $new_field['type'],
+                        ];
+                    }
+                }
+            }
+
+            return [
+                'dry_run'    => $dry_run,
+                'group_id'   => $group_id,
+                'group_title'=> $group['title'],
+                'actions'    => $results,
+            ];
+        },
+    ] );
+
+    /**
+     * POST /wp-json/aspera/v1/acf/fields/clone
+     * Dupliceert een field group met nieuwe keys en slug-prefix.
+     *
+     * Body JSON:
+     * {
+     *   "source_group_id": 123,
+     *   "new_title": "CPT - nieuwe_cpt",
+     *   "slug_find": "_cpt_vestiging_",
+     *   "slug_replace": "_cpt_nieuwe_"
+     * }
+     */
+    register_rest_route( 'aspera/v1', '/acf/fields/clone', [
+        'methods'             => 'POST',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            if ( ! function_exists( 'acf_get_field_group' ) || ! function_exists( 'acf_update_field' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $body            = $req->get_json_params();
+            $source_id       = (int) ( $body['source_group_id'] ?? 0 );
+            $new_title       = $body['new_title'] ?? '';
+            $slug_find       = $body['slug_find'] ?? '';
+            $slug_replace    = $body['slug_replace'] ?? '';
+            $dry_run         = filter_var( $req->get_param( 'dry_run' ), FILTER_VALIDATE_BOOLEAN );
+
+            if ( ! $source_id || ! $new_title ) {
+                return new WP_Error( 'missing_params', 'source_group_id en new_title zijn verplicht.', [ 'status' => 400 ] );
+            }
+
+            $source = acf_get_field_group( $source_id );
+            if ( ! $source ) {
+                return new WP_Error( 'not_found', 'Bron field group niet gevonden.', [ 'status' => 404 ] );
+            }
+
+            $source_fields = acf_get_fields( $source['key'] );
+            if ( ! $source_fields ) {
+                return new WP_Error( 'empty_group', 'Bron field group heeft geen velden.', [ 'status' => 400 ] );
+            }
+
+            // Key mapping: oud -> nieuw (voor conditional logic referenties)
+            $key_map = [];
+
+            // Genereer nieuwe keys voor alle velden (inclusief sub_fields recursief)
+            $map_keys_recursive = function ( array $fields ) use ( &$map_keys_recursive, &$key_map ) {
+                foreach ( $fields as $f ) {
+                    $old_key = $f['key'] ?? '';
+                    if ( $old_key ) {
+                        $key_map[ $old_key ] = 'field_' . uniqid( '', true );
+                    }
+                    if ( ! empty( $f['sub_fields'] ) ) {
+                        $map_keys_recursive( $f['sub_fields'] );
+                    }
+                    if ( ! empty( $f['layouts'] ) ) {
+                        foreach ( $f['layouts'] as $layout ) {
+                            $layout_key = $layout['key'] ?? '';
+                            if ( $layout_key ) {
+                                $key_map[ $layout_key ] = 'layout_' . uniqid( '', true );
+                            }
+                            if ( ! empty( $layout['sub_fields'] ) ) {
+                                $map_keys_recursive( $layout['sub_fields'] );
+                            }
+                        }
+                    }
+                }
+            };
+            $map_keys_recursive( $source_fields );
+
+            // Nieuwe group key
+            $new_group_key          = 'group_' . uniqid( '', true );
+            $key_map[ $source['key'] ] = $new_group_key;
+
+            // Kloon velden met nieuwe keys en slugs
+            $clone_fields_recursive = function ( array $fields, string $parent_key ) use ( &$clone_fields_recursive, &$key_map, $slug_find, $slug_replace ) {
+                $cloned = [];
+                foreach ( $fields as $f ) {
+                    $new_field = $f;
+                    unset( $new_field['ID'], $new_field['id'] );
+
+                    $new_field['key']    = $key_map[ $f['key'] ] ?? ( 'field_' . uniqid( '', true ) );
+                    $new_field['parent'] = $parent_key;
+
+                    if ( $slug_find && $slug_replace && ! empty( $new_field['name'] ) ) {
+                        $new_field['name'] = str_replace( $slug_find, $slug_replace, $new_field['name'] );
+                    }
+
+                    // Update conditional logic referenties
+                    if ( ! empty( $new_field['conditional_logic'] ) && is_array( $new_field['conditional_logic'] ) ) {
+                        foreach ( $new_field['conditional_logic'] as &$or_group ) {
+                            foreach ( $or_group as &$rule ) {
+                                if ( isset( $rule['field'] ) && isset( $key_map[ $rule['field'] ] ) ) {
+                                    $rule['field'] = $key_map[ $rule['field'] ];
+                                }
+                            }
+                        }
+                    }
+
+                    if ( ! empty( $new_field['sub_fields'] ) ) {
+                        $new_field['sub_fields'] = $clone_fields_recursive( $new_field['sub_fields'], $new_field['key'] );
+                    }
+
+                    if ( ! empty( $new_field['layouts'] ) ) {
+                        $new_layouts = [];
+                        foreach ( $new_field['layouts'] as $layout ) {
+                            $new_layout = $layout;
+                            $new_layout['key'] = $key_map[ $layout['key'] ] ?? ( 'layout_' . uniqid( '', true ) );
+                            if ( ! empty( $new_layout['sub_fields'] ) ) {
+                                $new_layout['sub_fields'] = $clone_fields_recursive( $new_layout['sub_fields'], $new_layout['key'] );
+                            }
+                            $new_layouts[] = $new_layout;
+                        }
+                        $new_field['layouts'] = $new_layouts;
+                    }
+
+                    $cloned[] = $new_field;
+                }
+                return $cloned;
+            };
+
+            $cloned_fields = $clone_fields_recursive( $source_fields, $new_group_key );
+
+            if ( $dry_run ) {
+                return [
+                    'dry_run'        => true,
+                    'source_group'   => $source['title'],
+                    'new_title'      => $new_title,
+                    'new_group_key'  => $new_group_key,
+                    'field_count'    => count( $cloned_fields ),
+                    'slug_mapping'   => $slug_find ? [ $slug_find => $slug_replace ] : null,
+                    'key_mapping'    => $key_map,
+                    'fields_preview' => array_map( 'aspera_format_acf_field', $cloned_fields ),
+                ];
+            }
+
+            // Maak de nieuwe field group aan
+            $new_group = $source;
+            unset( $new_group['ID'], $new_group['id'] );
+            $new_group['key']   = $new_group_key;
+            $new_group['title'] = $new_title;
+
+            $saved_group = acf_update_field_group( $new_group );
+
+            // Sla alle velden op
+            $saved_fields = [];
+            $save_recursive = function ( array $fields ) use ( &$save_recursive, &$saved_fields ) {
+                foreach ( $fields as $field ) {
+                    $subs    = $field['sub_fields'] ?? [];
+                    $layouts = $field['layouts'] ?? [];
+                    unset( $field['sub_fields'], $field['layouts'] );
+
+                    $saved = acf_update_field( $field );
+                    $saved_fields[] = [
+                        'key'  => $saved['key'],
+                        'name' => $saved['name'],
+                        'type' => $saved['type'],
+                    ];
+
+                    if ( ! empty( $subs ) ) {
+                        foreach ( $subs as &$sub ) {
+                            $sub['parent'] = $saved['key'];
+                        }
+                        $save_recursive( $subs );
+                    }
+
+                    if ( ! empty( $layouts ) ) {
+                        foreach ( $layouts as $layout ) {
+                            if ( ! empty( $layout['sub_fields'] ) ) {
+                                foreach ( $layout['sub_fields'] as &$lsub ) {
+                                    $lsub['parent'] = $layout['key'];
+                                }
+                                $save_recursive( $layout['sub_fields'] );
+                            }
+                        }
+                    }
+                }
+            };
+            $save_recursive( $cloned_fields );
+
+            return [
+                'dry_run'       => false,
+                'source_group'  => $source['title'],
+                'new_group_id'  => $saved_group['ID'],
+                'new_group_key' => $new_group_key,
+                'new_title'     => $new_title,
+                'field_count'   => count( $saved_fields ),
+                'fields'        => $saved_fields,
             ];
         },
     ] );
