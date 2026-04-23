@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.53.1
+ * Version: 1.54.0
  * Author: Aspera
  */
 
@@ -7499,6 +7499,24 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // Verwijder custom_colors array als alle referenties zijn gemigreerd
+            $remove_colors  = filter_var( $req->get_param( 'remove_custom_colors' ), FILTER_VALIDATE_BOOLEAN );
+            $colors_removed = false;
+            if ( $remove_colors && ! $dry_run ) {
+                $still_pending = ! empty( $changes ) || ! empty( $button_changes ) || ! empty( $input_changes ) || ! empty( $scheme_changes );
+                if ( $still_pending ) {
+                    return new WP_Error(
+                        'pending_migrations',
+                        'Er zijn nog onverwerkte kleurverwijzingen. Voer eerst de migratie uit zonder remove_custom_colors.',
+                        [ 'status' => 409 ]
+                    );
+                }
+                $raw_fresh = get_option( $option_name );
+                $raw_fresh['custom_colors'] = [];
+                update_option( $option_name, $raw_fresh );
+                $colors_removed = true;
+            }
+
             $response = [
                 'dry_run'        => $dry_run,
                 'prefer_roles'   => $prefer_roles,
@@ -7516,6 +7534,9 @@ add_action( 'rest_api_init', function () {
             ];
             if ( $prefer_roles ) {
                 $response['role_map'] = $role_map;
+            }
+            if ( $remove_colors ) {
+                $response['custom_colors_removed'] = $colors_removed;
             }
             return $response;
         },
