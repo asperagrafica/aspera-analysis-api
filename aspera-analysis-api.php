@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.51.0
+ * Version: 1.52.0
  * Author: Aspera
  */
 
@@ -7368,6 +7368,60 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // Buttons (array van button-stijlen met color_* properties)
+            $button_changes = [];
+            if ( ! empty( $raw['buttons'] ) && is_array( $raw['buttons'] ) ) {
+                foreach ( $raw['buttons'] as $idx => &$button ) {
+                    if ( ! is_array( $button ) ) continue;
+                    foreach ( $button as $bk => $bv ) {
+                        if ( strpos( $bk, 'color_' ) !== 0 ) continue;
+                        if ( ! is_string( $bv ) || $bv === '' ) continue;
+
+                        $new_bv = $resolve( $bv );
+                        if ( $new_bv !== null && $new_bv !== $bv ) {
+                            $button_changes[] = [
+                                'button' => $idx,
+                                'name'   => $button['name'] ?? '',
+                                'key'    => $bk,
+                                'from'   => $bv,
+                                'to'     => $new_bv,
+                            ];
+                            if ( ! $dry_run ) {
+                                $button[ $bk ] = $new_bv;
+                            }
+                        }
+                    }
+                }
+                unset( $button );
+            }
+
+            // Input fields (array van input-stijlen met color_* properties)
+            $input_changes = [];
+            if ( ! empty( $raw['input_fields'] ) && is_array( $raw['input_fields'] ) ) {
+                foreach ( $raw['input_fields'] as $idx => &$input ) {
+                    if ( ! is_array( $input ) ) continue;
+                    foreach ( $input as $ik => $iv ) {
+                        if ( strpos( $ik, 'color_' ) !== 0 ) continue;
+                        if ( ! is_string( $iv ) || $iv === '' ) continue;
+
+                        $new_iv = $resolve( $iv );
+                        if ( $new_iv !== null && $new_iv !== $iv ) {
+                            $input_changes[] = [
+                                'input'  => $idx,
+                                'name'   => $input['name'] ?? '',
+                                'key'    => $ik,
+                                'from'   => $iv,
+                                'to'     => $new_iv,
+                            ];
+                            if ( ! $dry_run ) {
+                                $input[ $ik ] = $new_iv;
+                            }
+                        }
+                    }
+                }
+                unset( $input );
+            }
+
             // Style schemes (usof_style_schemes_Impreza)
             $schemes_name    = 'usof_style_schemes_Impreza';
             $schemes_raw     = get_option( $schemes_name );
@@ -7397,8 +7451,10 @@ add_action( 'rest_api_init', function () {
                 unset( $scheme );
             }
 
-            if ( ! $dry_run && ( ! empty( $changes ) || ! empty( $scheme_changes ) ) ) {
-                if ( ! empty( $changes ) ) {
+            $has_changes = ! empty( $changes ) || ! empty( $button_changes ) || ! empty( $input_changes ) || ! empty( $scheme_changes );
+
+            if ( ! $dry_run && $has_changes ) {
+                if ( ! empty( $changes ) || ! empty( $button_changes ) || ! empty( $input_changes ) ) {
                     update_option( $option_name, $raw );
                 }
                 if ( ! empty( $scheme_changes ) ) {
@@ -7410,9 +7466,13 @@ add_action( 'rest_api_init', function () {
                 'dry_run'        => $dry_run,
                 'slug_map'       => $slug_map,
                 'theme_options'  => $changes,
+                'buttons'        => $button_changes,
+                'input_fields'   => $input_changes,
                 'style_schemes'  => $scheme_changes,
                 'totals'         => [
                     'theme_options' => count( $changes ),
+                    'buttons'      => count( $button_changes ),
+                    'input_fields' => count( $input_changes ),
                     'style_schemes' => count( $scheme_changes ),
                 ],
             ];
