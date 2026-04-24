@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.70.0
+ * Version: 1.71.0
  * Author: Aspera
  */
 
@@ -1500,6 +1500,8 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-ignored { opacity:0.45; }
         #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
         #aspera-audit-page .aspera-fix-btn:hover { background:#135e96; }
+        #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 10px; }
+        #aspera-audit-page .aspera-bulk-fix-btn:hover { background:#135e96; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1639,6 +1641,7 @@ function aspera_dashboard_widget_render(): void {
                 } );
                 echo '<div class="aspera-bulk-bar" data-cat="' . esc_attr( $key ) . '">';
                 echo '<button class="aspera-bulk-btn" data-nonce="' . esc_attr( $nonce ) . '">Negeer geselecteerde</button>';
+                echo '<button class="aspera-bulk-fix-btn" data-nonce="' . esc_attr( $nonce ) . '" style="display:none;">Fix geselecteerde</button>';
                 echo '<span class="aspera-bulk-count" style="font-size:12px;color:#50575e;"></span>';
                 echo '</div>';
                 foreach ( $active_viols as $v ) {
@@ -1652,8 +1655,12 @@ function aspera_dashboard_widget_render(): void {
                     $rule_attr    = esc_attr( $v['rule'] ?? '' );
                     $pid_attr     = esc_attr( (string) ( $post_id ?? 0 ) );
 
+                    $fix = $v['proposed_fix'] ?? null;
+                    $has_fix = is_array( $fix ) && ( $fix['fixable'] ?? false );
+                    $fix_json = $has_fix ? esc_attr( wp_json_encode( $fix ) ) : '';
+
                     echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
-                    echo '<input type="checkbox" class="aspera-exc-cb" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '">';
+                    echo '<input type="checkbox" class="aspera-exc-cb" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '"' . ( $has_fix ? ' data-fix="' . $fix_json . '"' : '' ) . '>';
                     echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">&#x25CF;</span>';
                     echo '<div style="flex:1;min-width:0;">';
                     echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
@@ -1671,10 +1678,21 @@ function aspera_dashboard_widget_render(): void {
                     if ( $detail ) {
                         echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
                     }
+                    if ( $has_fix ) {
+                        $fa = $fix['action'] ?? '';
+                        if ( $fa === 'delete_field_group' ) {
+                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: field group naar prullenbak</span>';
+                        } elseif ( $fa === 'delete_orphaned_meta' ) {
+                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: meta key <code style="font-size:11px;">' . esc_html( $fix['meta_key'] ?? '' ) . '</code> verwijderen (' . (int) ( $fix['rows'] ?? 0 ) . ' rijen)</span>';
+                        } else {
+                            $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
+                            $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
+                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: <code style="font-size:11px;text-decoration:line-through;color:#d63638;">' . $before_short . '</code> &rarr; <code style="font-size:11px;color:#00a32a;">' . $after_short . '</code></span>';
+                        }
+                    }
                     echo '</div>';
-                    $fix = $v['proposed_fix'] ?? null;
-                    if ( is_array( $fix ) && ( $fix['fixable'] ?? false ) ) {
-                        echo '<button class="aspera-fix-btn" data-fix="' . esc_attr( wp_json_encode( $fix ) ) . '" data-post-id="' . $pid_attr . '" data-nonce="' . esc_attr( $nonce ) . '">Fix</button>';
+                    if ( $has_fix ) {
+                        echo '<button class="aspera-fix-btn" data-fix="' . $fix_json . '" data-post-id="' . $pid_attr . '" data-nonce="' . esc_attr( $nonce ) . '">Fix</button>';
                     }
                     echo '</div>';
                 }
@@ -1789,6 +1807,12 @@ function aspera_dashboard_widget_script(): void {
                 bar.classList.toggle('has-selection', count > 0);
                 var lbl = bar.querySelector('.aspera-bulk-count');
                 if (lbl) lbl.textContent = count > 0 ? count + ' geselecteerd' : '';
+                var fixBtn = bar.querySelector('.aspera-bulk-fix-btn');
+                if (fixBtn) {
+                    var fixable = 0;
+                    checked.forEach(function (cb) { if (cb.dataset.fix) fixable++; });
+                    fixBtn.style.display = fixable > 0 ? '' : 'none';
+                }
             });
             document.querySelectorAll('.aspera-bulk-bar-ignored').forEach(function (bar) {
                 var container = bar.parentElement;
@@ -1845,6 +1869,68 @@ function aspera_dashboard_widget_script(): void {
                     btn.disabled    = false;
                     btn.textContent = 'Negeer geselecteerde';
                 });
+            });
+        });
+
+        // ── Bulk fix ─────────────────────────────────────────────────────────
+        document.querySelectorAll('.aspera-bulk-fix-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var container = btn.closest('.aspera-bulk-bar').parentElement;
+                var checked   = container.querySelectorAll('.aspera-exc-cb:checked');
+                var fixes = [];
+                checked.forEach(function (cb) {
+                    if (!cb.dataset.fix) return;
+                    fixes.push({ fix: JSON.parse(cb.dataset.fix), postId: cb.dataset.postId });
+                });
+                if (!fixes.length) return;
+
+                var delFG = 0, delMeta = 0, scFix = 0;
+                fixes.forEach(function (f) {
+                    if (f.fix.action === 'delete_field_group') delFG++;
+                    else if (f.fix.action === 'delete_orphaned_meta') delMeta++;
+                    else scFix++;
+                });
+                var parts = [];
+                if (scFix > 0) parts.push(scFix + ' shortcode-fix' + (scFix > 1 ? 'es' : ''));
+                if (delMeta > 0) parts.push(delMeta + ' meta-verwijdering' + (delMeta > 1 ? 'en' : ''));
+                if (delFG > 0) parts.push(delFG + ' field group-verwijdering' + (delFG > 1 ? 'en' : ''));
+                if (!confirm(fixes.length + ' fixes toepassen?\n\n' + parts.join(' + '))) return;
+
+                btn.disabled    = true;
+                btn.textContent = '0/' + fixes.length + '...';
+                var done = 0, failed = 0;
+
+                function runNext() {
+                    if (done + failed >= fixes.length) {
+                        if (failed > 0) {
+                            btn.textContent = failed + ' mislukt';
+                            btn.style.background = '#d63638';
+                        }
+                        runAudit('Bulk fix voltooid (' + done + '/' + fixes.length + ') — audit wordt vernieuwd…');
+                        return;
+                    }
+                    var f = fixes[done + failed];
+                    var body = 'action=aspera_apply_fix&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                        + '&fix_action=' + encodeURIComponent(f.fix.action)
+                        + '&post_id=' + encodeURIComponent(f.postId);
+                    if (f.fix.meta_key) body += '&meta_key=' + encodeURIComponent(f.fix.meta_key);
+                    if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
+                    if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
+
+                    fetch(ajaxurl, {
+                        method:  'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body:    body
+                    })
+                    .then(function (r) { return r.json(); })
+                    .then(function (data) {
+                        if (data.success) { done++; } else { failed++; }
+                        btn.textContent = (done + failed) + '/' + fixes.length + '...';
+                        runNext();
+                    })
+                    .catch(function () { failed++; btn.textContent = (done + failed) + '/' + fixes.length + '...'; runNext(); });
+                }
+                runNext();
             });
         });
 
