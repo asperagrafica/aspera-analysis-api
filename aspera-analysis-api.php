@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.59.0
+ * Version: 1.60.0
  * Author: Aspera
  */
 
@@ -1247,15 +1247,14 @@ function aspera_dashboard_widget_render(): void {
         }
         $active_count  = count( $active_viols );
         $ignored_count = count( $ignored_viols );
-        $is_open       = ( $active_count > 0 || $cat_err ) ? ' open' : '';
 
-        $row_bg   = $active_count > 0 ? '#fff8f8' : '#f6f7f7';
         // Badge kleur op basis van ergste severity in actieve violations
+        $sev_prio = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
         if ( $active_count === 0 ) {
             $badge_bg = '#00a32a';
+            $worst    = null;
         } else {
-            $sev_prio = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
-            $worst    = 'observation';
+            $worst = 'observation';
             foreach ( $active_viols as $_v ) {
                 $_s = $_v['severity'] ?? 'observation';
                 if ( ( $sev_prio[ $_s ] ?? 3 ) < ( $sev_prio[ $worst ] ?? 3 ) ) {
@@ -1265,9 +1264,16 @@ function aspera_dashboard_widget_render(): void {
             $badge_bg = $sev_colors[ $worst ] ?? '#d63638';
         }
 
+        // Categorie met uitsluitend observations — niet highlighten
+        $obs_only = ( $active_count > 0 && $worst === 'observation' );
+
+        $is_open  = ( $active_count > 0 && ! $obs_only || $cat_err ) ? ' open' : '';
+        $row_bg   = ( $active_count > 0 && ! $obs_only ) ? '#fff8f8' : '#f6f7f7';
+        $font_w   = ( $active_count > 0 && ! $obs_only ) ? '600' : '400';
+
         echo '<details' . $is_open . ' style="border-bottom:1px solid #dcdcde;">';
         echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:' . esc_attr( $row_bg ) . ';">';
-        echo '<span style="font-size:13px;font-weight:' . ( $active_count > 0 ? '600' : '400' ) . ';color:#1d2327;">';
+        echo '<span style="font-size:13px;font-weight:' . $font_w . ';color:#1d2327;">';
         echo '<span class="aspera-chevron">▶</span>' . esc_html( $label );
         echo '</span>';
         echo '<span style="display:flex;align-items:center;gap:5px;">';
