@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.56.0
+ * Version: 1.57.0
  * Author: Aspera
  */
 
@@ -2725,10 +2725,12 @@ add_action( 'rest_api_init', function () {
      * - overig                             → page context       → _p_{fieldgroup}_{n} verwacht
      *
      * Gecontroleerde regels:
-     * - missing_number    : slug eindigt niet op _\d+
-     * - wrong_opt_format  : option page veld zonder opt_ prefix
-     * - wrong_cpt_format  : CPT veld zonder _cpt_ infix
-     * - wrong_page_format : paginaveld zonder _p_ infix
+     * - missing_number          : slug eindigt niet op _\d+
+     * - wrong_opt_format        : option page veld zonder opt_ prefix
+     * - wrong_cpt_format        : CPT veld zonder _cpt_ infix (enkelvoudig gebruik)
+     * - wrong_page_format       : paginaveld zonder _p_ infix (enkelvoudig gebruik)
+     * - wrong_cpt_format_multi  : CPT veld zonder _cpt_ infix, maar cross-context (slug in meerdere field groups) — observation
+     * - wrong_page_format_multi : paginaveld zonder _p_ infix, maar cross-context (slug in meerdere field groups) — observation
      *
      * Tab-velden worden altijd overgeslagen.
      */
@@ -2745,6 +2747,24 @@ add_action( 'rest_api_init', function () {
             $issues         = [];
             $fields_scanned = 0;
             $groups_scanned = 0;
+
+            // Pre-scan: tel hoe vaak elke slug-naam voorkomt over alle field groups.
+            // Slugs in meer dan één field group zijn cross-context (multi-usage).
+            $slug_group_map = [];
+            foreach ( $groups as $g ) {
+                $gf = acf_get_fields( $g['key'] );
+                if ( ! $gf ) continue;
+                foreach ( $gf as $f ) {
+                    if ( ( $f['type'] ?? '' ) === 'tab' ) continue;
+                    $sn = $f['name'] ?? '';
+                    if ( $sn === '' ) continue;
+                    $slug_group_map[ $sn ][] = $g['ID'];
+                }
+            }
+            $slug_usage_count = [];
+            foreach ( $slug_group_map as $sn => $ids ) {
+                $slug_usage_count[ $sn ] = count( array_unique( $ids ) );
+            }
 
             // Post types die geen CPT zijn — worden als page-context behandeld
             $builtin_types = [ 'page', 'post', 'attachment', 'us_content_template',
@@ -2809,20 +2829,28 @@ add_action( 'rest_api_init', function () {
                     }
 
                     // Regel 2: context-specifieke infix
+                    $is_multi = ( $slug_usage_count[ $slug ] ?? 1 ) > 1;
+
                     if ( $context === 'option_page' && ! preg_match( '/(^opt_|_opt_)/', $slug ) ) {
                         $issues[] = $base + [
                             'rule'   => 'wrong_opt_format',
                             'detail' => 'Option page veld verwacht opt_ prefix of _opt_ infix — bijv. opt_socials_1 of recipient_opt_forms_1',
                         ];
                     } elseif ( $context === 'cpt' && ! preg_match( '/_cpt_[a-z0-9_]+_\d+$/', $slug ) ) {
+                        $rule = $is_multi ? 'wrong_cpt_format_multi' : 'wrong_cpt_format';
                         $issues[] = $base + [
-                            'rule'   => 'wrong_cpt_format',
-                            'detail' => 'CPT veld verwacht {naam}_cpt_{cpt}_{n} — ontbreekt _cpt_ infix',
+                            'rule'   => $rule,
+                            'detail' => $is_multi
+                                ? 'Cross-context veld — slug in ' . ( $slug_usage_count[ $slug ] ?? 1 ) . ' field groups; post-type indicatie niet vereist'
+                                : 'CPT veld verwacht {naam}_cpt_{cpt}_{n} — ontbreekt _cpt_ infix',
                         ];
                     } elseif ( $context === 'page' && ! preg_match( '/_p_[a-z0-9_]+_\d+$/', $slug ) ) {
+                        $rule = $is_multi ? 'wrong_page_format_multi' : 'wrong_page_format';
                         $issues[] = $base + [
-                            'rule'   => 'wrong_page_format',
-                            'detail' => 'Paginaveld verwacht {naam}_p_{fieldgroup}_{n} — ontbreekt _p_ infix',
+                            'rule'   => $rule,
+                            'detail' => $is_multi
+                                ? 'Cross-context veld — slug in ' . ( $slug_usage_count[ $slug ] ?? 1 ) . ' field groups; post-type indicatie niet vereist'
+                                : 'Paginaveld verwacht {naam}_p_{fieldgroup}_{n} — ontbreekt _p_ infix',
                         ];
                     }
                 }
@@ -5938,6 +5966,8 @@ add_action( 'rest_api_init', function () {
                 'wrong_opt_format'            => 'error',
                 'wrong_cpt_format'            => 'error',
                 'wrong_page_format'           => 'error',
+                'wrong_cpt_format_multi'      => 'observation',
+                'wrong_page_format_multi'     => 'observation',
 
                 // forms/validate
                 'cform_inbound_disabled'      => 'critical',
@@ -6055,6 +6085,8 @@ add_action( 'rest_api_init', function () {
                 'wrong_opt_format'                       => 'error',
                 'wrong_cpt_format'                       => 'error',
                 'wrong_page_format'                      => 'error',
+                'wrong_cpt_format_multi'                 => 'observation',
+                'wrong_page_format_multi'                => 'observation',
 
                 // theme/check
                 'wrong_active_theme'                     => 'critical',
