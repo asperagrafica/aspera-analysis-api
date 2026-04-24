@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.65.0
+ * Version: 1.66.0
  * Author: Aspera
  */
 
@@ -133,6 +133,20 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         $cr        = (bool) preg_match( '/\bcolumns_reverse="1"/', $ri_attrs );
         $snippet   = '[vc_row_inner' . substr( trim( $ri_attrs ), 0, 60 ) . '…]';
 
+        $ri_pos    = strpos( $content, $ri[0] );
+        $ri_row    = preg_match_all( '/\[vc_row[\s\]]/', substr( $content, 0, $ri_pos ) );
+        $ri_el_id  = '';
+        if ( preg_match( '/\bel_id="([^"]*)"/', $ri_attrs, $_reid ) ) {
+            $ri_el_id = $_reid[1];
+        }
+        $ri_location = [
+            'row'        => $ri_row,
+            'el_id'      => $ri_el_id,
+            'column'     => 0,
+            'position'   => 0,
+            'breadcrumb' => 'Rij ' . $ri_row . ' → Inner rij' . ( $ri_el_id !== '' ? ' (' . $ri_el_id . ')' : '' ),
+        ];
+
         if ( ! preg_match( '/\[vc_column_inner[^\]]*\](.*?)(?=\[vc_column_inner|\[\/vc_row_inner\])/s', $ri_body, $first_col ) ) {
             continue;
         }
@@ -157,25 +171,72 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
 
         if ( $first_has_image && ! $cr ) {
             $violations[] = [
-                'tag'     => 'vc_row_inner',
-                'rule'    => 'missing_columns_reverse',
-                'detail'  => 'Eerste kolom bevat een afbeelding maar columns_reverse="1" ontbreekt — op mobiel verschijnt de afbeelding boven de tekst',
-                'snippet' => $snippet,
+                'tag'      => 'vc_row_inner',
+                'rule'     => 'missing_columns_reverse',
+                'detail'   => 'Eerste kolom bevat een afbeelding maar columns_reverse="1" ontbreekt — op mobiel verschijnt de afbeelding boven de tekst',
+                'snippet'  => $snippet,
+                'location' => $ri_location,
             ];
         } elseif ( ! $first_has_image && $cr ) {
             $violations[] = [
-                'tag'     => 'vc_row_inner',
-                'rule'    => 'unexpected_columns_reverse',
-                'detail'  => 'columns_reverse="1" aanwezig maar eerste kolom bevat geen afbeelding — op mobiel verschijnt de tekst onder de afbeelding',
-                'snippet' => $snippet,
+                'tag'      => 'vc_row_inner',
+                'rule'     => 'unexpected_columns_reverse',
+                'detail'   => 'columns_reverse="1" aanwezig maar eerste kolom bevat geen afbeelding — op mobiel verschijnt de tekst onder de afbeelding',
+                'snippet'  => $snippet,
+                'location' => $ri_location,
             ];
         }
     }
 
+    // ── Locatie-tracking voor violations ──────────────────────────────────────
+    $loc_row   = 0;
+    $loc_col   = 0;
+    $loc_elem  = 0;
+    $loc_el_id = '';
+    $loc_inner = false;
+    $loc_icol  = 0;
+
     foreach ( $matches as $m ) {
         $tag     = $m[1];
         $attrs   = $m[2];
+        $full_sc = $m[0];
         $snippet = substr( trim( $attrs ), 0, 80 );
+
+        // ── Locatie bijwerken ─────────────────────────────────────────────
+        if ( $tag === 'vc_row' ) {
+            $loc_row++;
+            $loc_col   = 0;
+            $loc_elem  = 0;
+            $loc_inner = false;
+            $loc_el_id = '';
+            if ( preg_match( '/\bel_id="([^"]*)"/', $attrs, $_eid ) ) {
+                $loc_el_id = $_eid[1];
+            }
+        } elseif ( $tag === 'vc_column' && ! $loc_inner ) {
+            $loc_col++;
+            $loc_elem = 0;
+        } elseif ( $tag === 'vc_row_inner' ) {
+            $loc_inner = true;
+            $loc_icol  = 0;
+        } elseif ( $tag === 'vc_column_inner' ) {
+            $loc_icol++;
+            $loc_elem = 0;
+        } elseif ( ! in_array( $tag, [ 'vc_row', 'vc_column', 'vc_row_inner', 'vc_column_inner' ], true ) ) {
+            $loc_elem++;
+        }
+
+        $_lc = $loc_inner ? $loc_icol : $loc_col;
+        $_cb = [];
+        if ( $loc_row )  $_cb[] = 'Rij ' . $loc_row . ( $loc_el_id !== '' ? ' (' . $loc_el_id . ')' : '' );
+        if ( $_lc )      $_cb[] = ( $loc_inner ? 'Inner kolom ' : 'Kolom ' ) . $_lc;
+        if ( $loc_elem && ! in_array( $tag, [ 'vc_row', 'vc_column', 'vc_row_inner', 'vc_column_inner' ], true ) ) {
+            $_cb[] = '#' . $loc_elem;
+        }
+        $current_location = [
+            'row' => $loc_row, 'el_id' => $loc_el_id,
+            'column' => $_lc, 'position' => $loc_elem,
+            'breadcrumb' => implode( ' → ', $_cb ),
+        ];
 
         $attr = function ( string $name ) use ( $attrs ): ?string {
             return preg_match( '/\b' . $name . '="([^"]*)"/', $attrs, $v ) ? $v[1] : null;
@@ -186,28 +247,32 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
 
             if ( preg_match( '/\bcss="/', $attrs ) ) {
                 $violations[] = [ 'tag' => $tag, 'rule' => 'css_forbidden',
-                    'detail' => 'css= attribuut aanwezig', 'snippet' => $snippet ];
+                    'detail' => 'css= attribuut aanwezig', 'snippet' => $snippet,
+                    'location' => $current_location ];
             }
 
             if ( $tag === 'vc_row' ) {
 
                 if ( preg_match( '/\bscroll_effect="1"/', $attrs ) ) {
                     $violations[] = [ 'tag' => $tag, 'rule' => 'scroll_effect_forbidden',
-                        'detail' => 'scroll_effect="1" aanwezig', 'snippet' => $snippet ];
+                        'detail' => 'scroll_effect="1" aanwezig', 'snippet' => $snippet,
+                        'location' => $current_location ];
                 }
 
                 $bg_image = $attr( 'us_bg_image' );
                 if ( $bg_image !== null && ctype_digit( $bg_image ) ) {
                     $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_bg_image',
                         'detail' => 'us_bg_image="' . $bg_image . '" — gebruik ACF veldslug in us_bg_image_source',
-                        'snippet' => $snippet ];
+                        'snippet' => $snippet,
+                        'location' => $current_location ];
                 }
 
                 $bg_video = $attr( 'us_bg_video' );
                 if ( $bg_video !== null && preg_match( '/^https?:/', $bg_video ) ) {
                     $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_bg_video',
                         'detail' => 'us_bg_video="' . $bg_video . '" — gebruik {{veldslug}}',
-                        'snippet' => $snippet ];
+                        'snippet' => $snippet,
+                        'location' => $current_location ];
                 }
             }
         }
@@ -218,17 +283,36 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
 
             if ( preg_match( '/\bcss="/', $attrs ) ) {
                 $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'css_forbidden',
-                    'detail' => 'css= attribuut aanwezig' ];
+                    'detail' => 'css= attribuut aanwezig',
+                    'location' => $current_location ];
             }
 
             if ( $attr( 'hide_empty' ) !== '1' ) {
                 $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_hide_empty',
-                    'detail' => 'hide_empty="1" ontbreekt' ];
+                    'detail' => 'hide_empty="1" ontbreekt',
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'   => true,
+                        'action'    => 'add_attribute',
+                        'attribute' => 'hide_empty',
+                        'value'     => '1',
+                        'before'    => $full_sc,
+                        'after'     => substr( $full_sc, 0, -1 ) . ' hide_empty="1"]',
+                    ] ];
             }
 
             if ( $attr( 'color_link' ) !== '0' && aspera_acf_field_type( $key ) !== 'image' ) {
                 $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_color_link',
-                    'detail' => 'color_link="0" ontbreekt' ];
+                    'detail' => 'color_link="0" ontbreekt',
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'   => true,
+                        'action'    => 'add_attribute',
+                        'attribute' => 'color_link',
+                        'value'     => '0',
+                        'before'    => $full_sc,
+                        'after'     => substr( $full_sc, 0, -1 ) . ' color_link="0"]',
+                    ] ];
             }
         }
 
@@ -241,14 +325,24 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             if ( $attr( 'hide_with_empty_link' ) !== '1' ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule' => 'missing_hide_with_empty_link',
-                    'detail' => 'hide_with_empty_link="1" ontbreekt' ];
+                    'detail' => 'hide_with_empty_link="1" ontbreekt',
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'   => true,
+                        'action'    => 'add_attribute',
+                        'attribute' => 'hide_with_empty_link',
+                        'value'     => '1',
+                        'before'    => $full_sc,
+                        'after'     => substr( $full_sc, 0, -1 ) . ' hide_with_empty_link="1"]',
+                    ] ];
             }
 
             $el_class = $attr( 'el_class' );
             if ( $el_class === null || $el_class === '' ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule' => 'missing_el_class',
-                    'detail' => 'el_class ontbreekt op us_btn' ];
+                    'detail' => 'el_class ontbreekt op us_btn',
+                    'location' => $current_location ];
             }
 
             // ─── empty_btn_style: style="" aanwezig ────────────────────────
@@ -256,14 +350,16 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             if ( $style !== null && $style === '' ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule'   => 'empty_btn_style',
-                    'detail' => 'style="" — stijl was ingesteld maar het button-stijlobject bestaat niet meer in Impreza' ];
+                    'detail' => 'style="" — stijl was ingesteld maar het button-stijlobject bestaat niet meer in Impreza',
+                    'location' => $current_location ];
             }
 
             if ( preg_match( '/\{\{bl_[\w_]+\}\}/', $label ) ) {
                 if ( ! isset( $link_data['type'] ) || $link_data['type'] !== 'custom_field' || empty( $link_data['custom_field'] ) ) {
                     $violations[] = [ 'tag' => $tag, 'label' => $label,
                         'rule'   => 'missing_acf_link',
-                        'detail' => 'label verwijst naar ACF bl_-veld maar link= heeft geen custom_field verwijzing' ];
+                        'detail' => 'label verwijst naar ACF bl_-veld maar link= heeft geen custom_field verwijzing',
+                        'location' => $current_location ];
                 }
             }
 
@@ -273,7 +369,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                  && ! empty( $link_data['url'] ) ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule'   => 'hardcoded_link',
-                    'detail' => 'link= bevat hardcoded URL "' . $link_data['url'] . '" — gebruik een ACF custom_field verwijzing' ];
+                    'detail' => 'link= bevat hardcoded URL "' . $link_data['url'] . '" — gebruik een ACF custom_field verwijzing',
+                    'location' => $current_location ];
             }
 
             // ─── wrong_link_field_prefix: opt_ veld zonder option/ ────
@@ -282,7 +379,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                  && preg_match( '/^opt_/', $link_data['custom_field'] ) ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule'   => 'wrong_link_field_prefix',
-                    'detail' => 'link= verwijst naar option page veld "' . $link_data['custom_field'] . '" zonder option/ prefix — gebruik "option/' . $link_data['custom_field'] . '"' ];
+                    'detail' => 'link= verwijst naar option page veld "' . $link_data['custom_field'] . '" zonder option/ prefix — gebruik "option/' . $link_data['custom_field'] . '"',
+                    'location' => $current_location ];
             }
         }
 
@@ -298,6 +396,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                     'tag'    => $tag, 'id' => $pb_id,
                     'rule'   => 'missing_remove_rows',
                     'detail' => $pb_ref . ' — remove_rows ontbreekt — voeg remove_rows="1" toe',
+                    'location' => $current_location,
                 ];
             } elseif ( $remove_rows === 'parent_row' ) {
                 $sibling_count = $pb_sibling[ trim( $attrs ) ] ?? 0;
@@ -306,6 +405,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                         'tag'    => $tag, 'id' => $pb_id,
                         'rule'   => 'parent_row_with_siblings',
                         'detail' => $pb_ref . ' — remove_rows="parent_row" maar de parent container bevat ' . $sibling_count . ' elementen — gebruik remove_rows="1"',
+                        'location' => $current_location,
                     ];
                 }
             }
@@ -316,7 +416,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             $image = $attr( 'image' );
             if ( $image !== null && ctype_digit( $image ) ) {
                 $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_image',
-                    'detail' => 'image="' . $image . '" — hardcoded media-ID; gebruik {{veldslug}} of een ACF-veldverwijzing' ];
+                    'detail' => 'image="' . $image . '" — hardcoded media-ID; gebruik {{veldslug}} of een ACF-veldverwijzing',
+                    'location' => $current_location ];
             }
         }
 
@@ -325,7 +426,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             if ( preg_match( '/\bkey="/', $attrs ) && $attr( 'source' ) === null ) {
                 $violations[] = [ 'tag' => $tag, 'rule' => 'vc_video_wrong_attribute',
                     'detail' => 'key= aanwezig — gebruik source= voor de oEmbed veldslug',
-                    'snippet' => $snippet ];
+                    'snippet' => $snippet,
+                    'location' => $current_location ];
             }
         }
 
@@ -333,10 +435,17 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         if ( strpos( $tag, 'us_' ) === 0 ) {
             if ( preg_match_all( '/\b((?:\w+_)?style)=""/', $attrs, $style_m ) ) {
                 foreach ( $style_m[1] as $style_attr ) {
-                    // us_btn style="" wordt al afgevangen als empty_btn_style
                     if ( $tag === 'us_btn' && $style_attr === 'style' ) continue;
                     $violations[] = [ 'tag' => $tag, 'rule' => 'empty_style_attr',
-                        'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza' ];
+                        'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza',
+                        'location' => $current_location,
+                        'proposed_fix' => [
+                            'fixable'   => true,
+                            'action'    => 'remove_attribute',
+                            'attribute' => $style_attr,
+                            'before'    => $full_sc,
+                            'after'     => preg_replace( '/\s+' . preg_quote( $style_attr, '/' ) . '=""/', '', $full_sc ),
+                        ] ];
                 }
             }
         }
@@ -345,8 +454,18 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         if ( strpos( $attrs, '{{option:' ) !== false ) {
             if ( preg_match_all( '/\b([\w_]+)="([^"]*\{\{option:[^}]*\}\}[^"]*)"/', $attrs, $opt_m, PREG_SET_ORDER ) ) {
                 foreach ( $opt_m as $om ) {
+                    $corrected_val = str_replace( '{{option:', '{{option/', $om[2] );
                     $violations[] = [ 'tag' => $tag, 'rule' => 'wrong_option_syntax',
-                        'detail' => $om[1] . '="' . $om[2] . '" — gebruik {{option/veldslug}} in plaats van {{option:veldslug}}' ];
+                        'detail' => $om[1] . '="' . $om[2] . '" — gebruik {{option/veldslug}} in plaats van {{option:veldslug}}',
+                        'location' => $current_location,
+                        'proposed_fix' => [
+                            'fixable'   => true,
+                            'action'    => 'replace_value',
+                            'attribute' => $om[1],
+                            'value'     => $corrected_val,
+                            'before'    => $om[1] . '="' . $om[2] . '"',
+                            'after'     => $om[1] . '="' . $corrected_val . '"',
+                        ] ];
                 }
             }
         }
@@ -360,7 +479,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 if ( strpos( $val, '%7B' ) === 0 || strpos( $val, '%7b' ) === 0 ) continue;
                 if ( preg_match( '/[a-zA-Z]/', $val ) && ! preg_match( '/^[\w_]+$/', $val ) ) {
                     $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_' . $attr_name,
-                        'detail' => $attr_name . '="' . $val . '" — hardcoded tekst in template/page block' ];
+                        'detail' => $attr_name . '="' . $val . '" — hardcoded tekst in template/page block',
+                        'location' => $current_location ];
                 }
             }
         }
@@ -369,7 +489,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         $animate = $attr( 'animate' );
         if ( $animate !== null && $animate !== '' ) {
             $violations[] = [ 'tag' => $tag, 'rule' => 'animate_detected',
-                'detail' => 'animate="' . $animate . '" — appear animatie aanwezig', 'snippet' => $snippet ];
+                'detail' => 'animate="' . $animate . '" — appear animatie aanwezig', 'snippet' => $snippet,
+                'location' => $current_location ];
         }
 
         // ─── responsive_hide_detected: verborgen op breakpoint (universeel) ──
@@ -381,7 +502,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         }
         if ( ! empty( $hide_bps ) ) {
             $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_hide_detected',
-                'detail' => 'verborgen op: ' . implode( ', ', $hide_bps ), 'snippet' => $snippet ];
+                'detail' => 'verborgen op: ' . implode( ', ', $hide_bps ), 'snippet' => $snippet,
+                'location' => $current_location ];
         }
     }
 
