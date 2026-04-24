@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.64.0
+ * Version: 1.65.0
  * Author: Aspera
  */
 
@@ -1000,12 +1000,14 @@ function aspera_site_health_test(): array {
         'wpb'       => 'WPBakery Templates',
         'grid'      => 'Grid Layouts & Headers',
         'colors'    => 'Kleuren',
-        'acf_slugs' => 'ACF Slugs',
-        'forms'     => 'Formulieren',
-        'plugins'   => 'Plugins',
-        'cpt'       => 'Custom Post Types',
-        'db_tables'   => 'Database Tabellen',
-        'theme_check' => 'Thema Check',
+        'acf_slugs'     => 'ACF Slugs',
+        'acf_locations' => 'ACF Locatieregels',
+        'forms'         => 'Formulieren',
+        'plugins'       => 'Plugins',
+        'cpt'           => 'Custom Post Types',
+        'db_tables'     => 'Database Tabellen',
+        'theme_check'   => 'Thema Check',
+        'wp_settings'   => 'WP Instellingen',
     ];
 
     $rows = '';
@@ -1193,6 +1195,7 @@ function aspera_dashboard_widget_render(): void {
         'grid'             => 'Grid Layouts & Headers',
         'colors'           => 'Kleuren',
         'acf_slugs'        => 'ACF Slugs',
+        'acf_locations'    => 'ACF Locatieregels',
         'forms'            => 'Formulieren',
         'plugins'          => 'Plugins',
         'cpt'              => 'Custom Post Types',
@@ -1208,6 +1211,7 @@ function aspera_dashboard_widget_render(): void {
         'acf_fields'       => 'ACF Field Groups',
         'meta_orphaned'    => 'Orphaned ACF Meta',
         'theme_check'      => 'Thema Check',
+        'wp_settings'      => 'WP Instellingen',
     ];
 
     $sev_colors = [
@@ -3052,6 +3056,152 @@ add_action( 'rest_api_init', function () {
     ] );
 
     /**
+     * GET /wp-json/aspera/v1/acf/validate/locations
+     * Valideert locatieregels van ACF field groups.
+     * Detecteert verwijderde taxonomy-terms, ongeregistreerde taxonomieën,
+     * lege terms en volledig redundante field groups.
+     */
+    register_rest_route( 'aspera/v1', '/acf/validate/locations', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+
+            $groups = get_posts( [
+                'post_type'      => 'acf-field-group',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
+
+            $violations = [];
+            $orphaned_group_ids = [];
+
+            foreach ( $groups as $group ) {
+                $content = @unserialize( $group->post_content );
+                if ( ! is_array( $content ) || empty( $content['location'] ) ) continue;
+
+                foreach ( $content['location'] as $rule_group ) {
+                    foreach ( $rule_group as $rule ) {
+                        if ( ( $rule['param'] ?? '' ) !== 'post_taxonomy' ) continue;
+                        if ( ( $rule['operator'] ?? '' ) !== '==' ) continue;
+
+                        $parts = explode( ':', $rule['value'] ?? '', 2 );
+                        if ( count( $parts ) !== 2 ) continue;
+
+                        $taxonomy  = $parts[0];
+                        $term_slug = $parts[1];
+
+                        if ( ! taxonomy_exists( $taxonomy ) ) {
+                            $violations[] = [
+                                'rule'     => 'orphaned_location_taxonomy',
+                                'severity' => 'error',
+                                'post_id'  => $group->ID,
+                                'detail'   => '"' . $group->post_title . '" — taxonomy "' . $taxonomy . '" is niet geregistreerd',
+                            ];
+                            $orphaned_group_ids[] = $group->ID;
+                            continue;
+                        }
+
+                        $term = get_term_by( 'slug', $term_slug, $taxonomy );
+                        if ( ! $term || is_wp_error( $term ) ) {
+                            $violations[] = [
+                                'rule'     => 'orphaned_location_term',
+                                'severity' => 'warning',
+                                'post_id'  => $group->ID,
+                                'detail'   => '"' . $group->post_title . '" — term "' . $term_slug . '" bestaat niet in taxonomy "' . $taxonomy . '"',
+                            ];
+                            $orphaned_group_ids[] = $group->ID;
+                            continue;
+                        }
+
+                        if ( (int) $term->count === 0 ) {
+                            $violations[] = [
+                                'rule'     => 'empty_location_term',
+                                'severity' => 'observation',
+                                'post_id'  => $group->ID,
+                                'detail'   => '"' . $group->post_title . '" — term "' . $term_slug . '" in "' . $taxonomy . '" heeft geen gekoppelde posts',
+                            ];
+                            $orphaned_group_ids[] = $group->ID;
+                        }
+                    }
+                }
+            }
+
+            // Redundantie-check: zijn alle velden van orphaned groups gedekt door andere groups?
+            $orphaned_group_ids = array_unique( $orphaned_group_ids );
+            if ( ! empty( $orphaned_group_ids ) ) {
+                $active_group_ids = array_diff(
+                    wp_list_pluck( $groups, 'ID' ),
+                    $orphaned_group_ids
+                );
+
+                // Bouw slug-map van actieve groups
+                $active_slugs = [];
+                foreach ( $active_group_ids as $gid ) {
+                    $fields = get_posts( [
+                        'post_type'      => 'acf-field',
+                        'post_status'    => 'publish',
+                        'post_parent'    => (int) $gid,
+                        'posts_per_page' => -1,
+                    ] );
+                    foreach ( $fields as $f ) {
+                        if ( $f->post_excerpt === '' ) continue;
+                        $active_slugs[ $f->post_excerpt ] = (int) $gid;
+                    }
+                }
+
+                // Check per orphaned group
+                foreach ( $orphaned_group_ids as $oid ) {
+                    $fields = get_posts( [
+                        'post_type'      => 'acf-field',
+                        'post_status'    => 'publish',
+                        'post_parent'    => (int) $oid,
+                        'posts_per_page' => -1,
+                    ] );
+                    if ( empty( $fields ) ) continue;
+
+                    $all_covered   = true;
+                    $covered_by    = [];
+                    $orphan_slugs  = [];
+                    foreach ( $fields as $f ) {
+                        if ( $f->post_excerpt === '' ) continue;
+                        $orphan_slugs[] = $f->post_excerpt;
+                        if ( isset( $active_slugs[ $f->post_excerpt ] ) ) {
+                            $covered_by[ $active_slugs[ $f->post_excerpt ] ] = true;
+                        } else {
+                            $all_covered = false;
+                        }
+                    }
+
+                    if ( ! empty( $orphan_slugs ) ) {
+                        // Zoek de bestaande violation en voeg redundantie-info toe
+                        foreach ( $violations as &$v ) {
+                            if ( (int) ( $v['post_id'] ?? 0 ) !== (int) $oid ) continue;
+                            $v['field_count']  = count( $orphan_slugs );
+                            $v['redundant']    = $all_covered;
+                            if ( $all_covered && ! empty( $covered_by ) ) {
+                                $cover_titles = [];
+                                foreach ( array_keys( $covered_by ) as $cid ) {
+                                    $cover_titles[] = get_the_title( $cid ) . ' (ID ' . $cid . ')';
+                                }
+                                $v['covered_by'] = $cover_titles;
+                            }
+                            break;
+                        }
+                        unset( $v );
+                    }
+                }
+            }
+
+            return [
+                'status'          => empty( $violations ) ? 'ok' : 'issues_found',
+                'violations'      => $violations,
+                'groups_scanned'  => count( $groups ),
+                'orphaned_groups' => count( $orphaned_group_ids ),
+            ];
+        },
+    ] );
+
+    /**
      * GET /wp-json/aspera/v1/site/passport
      * Geeft het site-paspoort terug. Genereert opnieuw als de stale-vlag gezet is.
      * Slaat het resultaat op in wp_options (autoload: no).
@@ -4710,7 +4860,7 @@ add_action( 'rest_api_init', function () {
                 $rename_capabilities = ! empty( $config['rename_capabilities'] );
 
                 $acf_slugs[]     = $slug;
-                $icon_tracker[]  = [ 'slug' => $slug, 'icon' => $menu_icon ];
+                $icon_tracker[]  = [ 'slug' => $slug, 'icon' => $menu_icon, 'type' => 'cpt' ];
                 $post_violations  = [];
                 $post_observations = [];
 
@@ -4838,7 +4988,33 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
-            // ── 4. Duplicate icoon check ──────────────────────────────────
+            // ── 4. Option page iconen toevoegen aan icon_tracker ──────────
+            $opt_pages = get_posts( [
+                'post_type'      => 'acf-ui-options-page',
+                'post_status'    => 'publish',
+                'posts_per_page' => -1,
+            ] );
+            foreach ( $opt_pages as $opt ) {
+                $opt_config   = maybe_unserialize( $opt->post_content );
+                if ( ! is_array( $opt_config ) ) continue;
+                $opt_icon_raw = $opt_config['menu_icon'] ?? [];
+                $opt_icon     = is_array( $opt_icon_raw ) ? ( $opt_icon_raw['value'] ?? '' ) : (string) $opt_icon_raw;
+                if ( empty( $opt_icon ) ) continue;
+                $opt_slug     = $opt_config['menu_slug'] ?? $opt->post_excerpt;
+                $icon_tracker[] = [ 'slug' => $opt_slug, 'icon' => $opt_icon, 'type' => 'option_page' ];
+            }
+
+            // ── 5. Duplicate icoon check (CPTs + option pages) ────────────
+            $governed_icons = [
+                'opt_header'  => 'dashicons-table-row-before',
+                'opt_footer'  => 'dashicons-table-row-after',
+                'opt_widgets' => 'dashicons-table-col-before',
+                'opt_forms'   => 'dashicons-email',
+                'opt_socials' => 'dashicons-share',
+                'nav_cpt'     => 'dashicons-menu-alt3',
+                'links_cpt'   => 'dashicons-admin-links',
+            ];
+
             $icon_map = [];
             foreach ( $icon_tracker as $item ) {
                 if ( empty( $item['icon'] ) ) continue;
@@ -4846,17 +5022,29 @@ add_action( 'rest_api_init', function () {
             }
             foreach ( $icon_map as $icon => $slugs ) {
                 if ( count( $slugs ) < 2 ) continue;
-                foreach ( $cpt_overview as &$entry ) {
-                    if ( ! in_array( $entry['slug'], $slugs, true ) ) continue;
-                    $others = implode( ', ', array_diff( $slugs, [ $entry['slug'] ] ) );
-                    $dup    = [
-                        'rule'   => 'duplicate_icon',
-                        'detail' => 'Icoon ' . $icon . ' wordt ook gebruikt door: ' . $others,
-                    ];
-                    $entry['violations'][] = $dup;
-                    $violations[]          = array_merge( [ 'cpt' => $entry['slug'] ], $dup );
+                foreach ( $slugs as $slug ) {
+                    if ( isset( $governed_icons[ $slug ] ) && $governed_icons[ $slug ] === $icon ) continue;
+
+                    $others           = array_diff( $slugs, [ $slug ] );
+                    $governed_others  = array_filter( $others, function ( $o ) use ( $governed_icons, $icon ) {
+                        return isset( $governed_icons[ $o ] ) && $governed_icons[ $o ] === $icon;
+                    } );
+                    $detail = 'Icoon ' . $icon . ' wordt ook gebruikt door: ' . implode( ', ', $others );
+                    if ( ! empty( $governed_others ) ) {
+                        $detail .= ' (vastgelegd door beleid voor ' . implode( ', ', $governed_others ) . ')';
+                    }
+
+                    $dup = [ 'rule' => 'duplicate_icon', 'detail' => $detail ];
+
+                    foreach ( $cpt_overview as &$entry ) {
+                        if ( $entry['slug'] !== $slug ) continue;
+                        $entry['violations'][] = $dup;
+                        break;
+                    }
+                    unset( $entry );
+
+                    $violations[] = array_merge( [ 'cpt' => $slug ], $dup );
                 }
-                unset( $entry );
             }
 
             $error_count = count( $violations ) + ( $cptui_leftover ? 1 : 0 );
@@ -6263,6 +6451,11 @@ add_action( 'rest_api_init', function () {
                 'menu_mobile_exceeds_content_width'      => 'observation',
                 'menu_mobile_exceeds_breakpoints'        => 'observation',
 
+                // acf/validate/locations
+                'orphaned_location_taxonomy'             => 'error',
+                'orphaned_location_term'                 => 'warning',
+                'empty_location_term'                    => 'observation',
+
                 // acf/validate/all
                 'missing_name'                           => 'error',
                 'broken_conditional_reference'           => 'error',
@@ -6298,6 +6491,7 @@ add_action( 'rest_api_init', function () {
                 // theme/check
                 'wrong_active_theme'                     => 'critical',
                 'impreza_license_inactive'               => 'critical',
+                'search_engine_noindex'                  => 'critical',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -6323,7 +6517,9 @@ add_action( 'rest_api_init', function () {
                 'naming'           =>   5,
                 'options_config'   =>   5,
                 'acf_slugs'        =>  10,
+                'acf_locations'    =>   5,
                 'theme_check'      =>   5,
+                'wp_settings'      =>  10,
             ];
 
             $severity_points = [
@@ -6882,7 +7078,35 @@ add_action( 'rest_api_init', function () {
                 'error'           => $slugs_val['_error'] ?? null,
             ];
 
-            // ── 23. Theme check: Aspera child actief? ─────────────────
+            // ── 23. acf/validate/locations ────────────────────────────
+            $loc_val = $call( 'acf/validate/locations' );
+            $loc_violations = [];
+            if ( ! empty( $loc_val['violations'] ) ) {
+                foreach ( $loc_val['violations'] as $lv ) {
+                    $rule = $lv['rule'] ?? 'unknown';
+                    $entry = [
+                        'rule'     => $rule,
+                        'post_id'  => $lv['post_id'] ?? 0,
+                        'severity' => $severity_map[ $rule ] ?? 'warning',
+                        'detail'   => $lv['detail'] ?? '',
+                    ];
+                    if ( isset( $lv['redundant'] ) ) {
+                        $entry['redundant']   = $lv['redundant'];
+                        $entry['field_count'] = $lv['field_count'] ?? 0;
+                        if ( ! empty( $lv['covered_by'] ) ) {
+                            $entry['covered_by'] = $lv['covered_by'];
+                        }
+                    }
+                    $loc_violations[] = $entry;
+                }
+            }
+            $categories['acf_locations'] = [
+                'violation_count' => count( $loc_violations ),
+                'violations'      => $loc_violations,
+                'error'           => $loc_val['_error'] ?? null,
+            ];
+
+            // ── 24. Theme check: Aspera child actief? ─────────────────
             $theme_violations = [];
             $stylesheet = get_stylesheet();
             $theme_name = wp_get_theme()->get( 'Name' );
@@ -6906,6 +7130,21 @@ add_action( 'rest_api_init', function () {
             $categories['theme_check'] = [
                 'violation_count' => count( $theme_violations ),
                 'violations'      => $theme_violations,
+                'error'           => null,
+            ];
+
+            // ── 25. WP Settings ──────────────────────────────────────────
+            $wp_settings_violations = [];
+            if ( get_option( 'blog_public' ) === '0' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'search_engine_noindex',
+                    'severity' => 'critical',
+                    'detail'   => 'Search engine visibility staat uit (Settings > Reading) — de site wordt niet geindexeerd door Google',
+                ];
+            }
+            $categories['wp_settings'] = [
+                'violation_count' => count( $wp_settings_violations ),
+                'violations'      => $wp_settings_violations,
                 'error'           => null,
             ];
 
