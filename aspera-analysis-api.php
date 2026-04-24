@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.61.0
+ * Version: 1.62.0
  * Author: Aspera
  */
 
@@ -1107,6 +1107,34 @@ add_action( 'wp_ajax_aspera_remove_exception', function () {
     wp_send_json_success();
 } );
 
+add_action( 'wp_ajax_aspera_cleanup_exceptions', function () {
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+    if ( ! aspera_user_is_administrator() ) wp_die( -1 );
+
+    // Verzamel alle exception_ids die voorkomen in de huidige audit-snapshot
+    $snapshot = get_option( 'aspera_audit_snapshot' );
+    $cats     = is_string( $snapshot ) ? json_decode( $snapshot, true ) : [];
+    $active   = [];
+    if ( is_array( $cats ) ) {
+        foreach ( $cats as $cat_data ) {
+            foreach ( $cat_data['violations'] ?? [] as $v ) {
+                $eid = $v['exception_id'] ?? '';
+                if ( $eid ) $active[ $eid ] = true;
+            }
+        }
+    }
+
+    // Bewaar alleen exceptions die matchen met een violation in de snapshot
+    $exceptions = get_option( 'aspera_audit_exceptions', [] );
+    if ( ! is_array( $exceptions ) ) $exceptions = [];
+    $before     = count( $exceptions );
+    $exceptions = array_values( array_filter( $exceptions, fn( $e ) => isset( $active[ $e['id'] ] ) ) );
+    $removed    = $before - count( $exceptions );
+    update_option( 'aspera_audit_exceptions', $exceptions );
+
+    wp_send_json_success( [ 'removed' => $removed ] );
+} );
+
 function aspera_dashboard_widget_render(): void {
     $score    = get_option( 'aspera_audit_score',    null );
     $date_raw = get_option( 'aspera_audit_date',     null );
@@ -1225,8 +1253,12 @@ function aspera_dashboard_widget_render(): void {
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
         echo '<span style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</span>';
     }
+    $stale_count = count( $exceptions_raw ) - $ignored_total;
     if ( $ignored_total > 0 ) {
         echo '<span style="background:#dcdcde;color:#50575e;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;margin-left:4px;">' . $ignored_total . '&nbsp;genegeerd</span>';
+    }
+    if ( $stale_count > 0 ) {
+        echo '<button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>';
     }
     echo '</div>';
 
@@ -1575,6 +1607,32 @@ function aspera_dashboard_widget_script(): void {
                 });
             });
         });
+        // ── Stale exceptions opruimen ─────────────────────────────────────────
+        var cleanupBtn = document.getElementById('aspera-cleanup-btn');
+        if (cleanupBtn) {
+            cleanupBtn.addEventListener('click', function () {
+                cleanupBtn.disabled    = true;
+                cleanupBtn.textContent = '…';
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    'action=aspera_cleanup_exceptions&nonce=' + encodeURIComponent(cleanupBtn.dataset.nonce)
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        cleanupBtn.disabled    = false;
+                        cleanupBtn.textContent = '🧹 stale';
+                    }
+                })
+                .catch(function () {
+                    cleanupBtn.disabled    = false;
+                    cleanupBtn.textContent = '🧹 stale';
+                });
+            });
+        }
     })();
     </script>
     <?php
