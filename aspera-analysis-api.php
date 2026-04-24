@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.63.0
+ * Version: 1.64.0
  * Author: Aspera
  */
 
@@ -136,13 +136,21 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         if ( ! preg_match( '/\[vc_column_inner[^\]]*\](.*?)(?=\[vc_column_inner|\[\/vc_row_inner\])/s', $ri_body, $first_col ) ) {
             continue;
         }
-        $first_has_image = (bool) preg_match( '/\[us_image\b/', $first_col[1] );
-        if ( ! $first_has_image ) {
-            preg_match_all( '/\[us_post_custom_field\b[^\]]*\bkey="([^"]+)"/', $first_col[1], $pcf_matches );
-            foreach ( $pcf_matches[1] as $_pcf_key ) {
-                if ( aspera_acf_field_type( $_pcf_key ) === 'image' ) {
+        // Controleer alleen het EERSTE inhoudelijke element van col1.
+        // columns_reverse is bedoeld voor kolommen waarbij de afbeelding als eerste
+        // element staat — niet voor kolommen waarbij tekst eerst staat en een afbeelding
+        // verder naar beneden voorkomt.
+        $first_has_image = false;
+        if ( preg_match( '/\[(us_image|us_post_custom_field|us_text|us_btn|vc_video)\b([^\]]*)\]/', $first_col[1], $first_el ) ) {
+            $first_el_tag   = $first_el[1];
+            $first_el_attrs = $first_el[2];
+            if ( $first_el_tag === 'us_image' ) {
+                $first_has_image = true;
+            } elseif ( $first_el_tag === 'us_post_custom_field' ) {
+                preg_match( '/\bkey="([^"]+)"/', $first_el_attrs, $key_match );
+                $first_key = $key_match[1] ?? '';
+                if ( $first_key !== '' && aspera_acf_field_type( $first_key ) === 'image' ) {
                     $first_has_image = true;
-                    break;
                 }
             }
         }
