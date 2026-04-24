@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.69.0
+ * Version: 1.70.0
  * Author: Aspera
  */
 
@@ -1182,14 +1182,75 @@ function aspera_user_is_administrator(): bool {
     return in_array( 'administrator', (array) $user->roles, true );
 }
 
+add_action( 'admin_menu', function () {
+    if ( ! aspera_user_is_administrator() ) return;
+    add_management_page(
+        'Aspera Analysis API',
+        'Aspera Analysis API',
+        'manage_options',
+        'aspera-analysis-api',
+        'aspera_admin_page_render'
+    );
+} );
+
+function aspera_admin_page_render(): void {
+    echo '<div class="wrap" id="aspera-audit-page">';
+    echo '<h1>Aspera Analysis API</h1>';
+    aspera_dashboard_widget_render();
+    echo '</div>';
+}
+
 add_action( 'wp_dashboard_setup', function () {
     if ( ! aspera_user_is_administrator() ) return;
     wp_add_dashboard_widget(
         'aspera_audit_widget',
         'Aspera Site Audit',
-        'aspera_dashboard_widget_render'
+        'aspera_dashboard_summary_render'
     );
 } );
+
+function aspera_dashboard_summary_render(): void {
+    $score    = get_option( 'aspera_audit_score', null );
+    $summary  = get_option( 'aspera_audit_summary' );
+    $data     = is_string( $summary ) ? json_decode( $summary, true ) : [];
+
+    if ( $score === false ) {
+        echo '<p style="color:#72777c;margin:0;">Nog geen audit uitgevoerd.</p>';
+        echo '<p style="margin:8px 0 0;"><a href="' . esc_url( admin_url( 'tools.php?page=aspera-analysis-api' ) ) . '" class="button">Audit uitvoeren</a></p>';
+        return;
+    }
+
+    $score_int = (int) $score;
+    $counts    = $data['severity_counts'] ?? [];
+    $traffic   = $data['traffic_light'] ?? ( $score_int >= 80 ? 'green' : ( $score_int >= 50 ? 'yellow' : 'red' ) );
+
+    $score_color_map = [ 'green' => '#00a32a', 'yellow' => '#dba617', 'red' => '#d63638' ];
+    $score_color     = $score_color_map[ $traffic ] ?? '#72777c';
+    $score_label_map = [ 'green' => 'Schoon', 'yellow' => 'Aandacht nodig', 'red' => 'Kritieke problemen' ];
+    $score_label     = $score_label_map[ $traffic ] ?? '';
+
+    $sev_colors = [
+        'critical' => '#d63638', 'error' => '#d63638',
+        'warning'  => '#dba617', 'observation' => '#2271b1',
+    ];
+
+    echo '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">';
+    echo '<span style="font-size:2.2em;font-weight:800;color:' . esc_attr( $score_color ) . ';line-height:1;">' . $score_int . '</span>';
+    echo '<span style="font-size:1.1em;color:#72777c;font-weight:400;">/100</span>';
+    echo '<span style="font-size:13px;font-weight:700;color:' . esc_attr( $score_color ) . ';padding:3px 9px;background:' . esc_attr( $score_color ) . '22;border-radius:3px;">' . esc_html( $score_label ) . '</span>';
+    echo '</div>';
+
+    echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
+    foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
+        $cnt = (int) ( $counts[ $sev ] ?? 0 );
+        $bg  = $cnt > 0 ? $sev_colors[ $sev ] : '#dcdcde';
+        $fc  = $cnt > 0 ? '#fff' : '#50575e';
+        echo '<span style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</span>';
+    }
+    echo '</div>';
+
+    echo '<a href="' . esc_url( admin_url( 'tools.php?page=aspera-analysis-api' ) ) . '" class="button button-primary">Volledig rapport</a>';
+}
 
 add_action( 'wp_ajax_aspera_refresh_audit', function () {
     if ( ! aspera_user_is_administrator() ) {
@@ -1418,27 +1479,27 @@ function aspera_dashboard_widget_render(): void {
 
     // ── Inline stijlen (native WP admin kleuren) ──────────────────────────────
     echo '<style>
-        #aspera_audit_widget details > summary { list-style: none; user-select: none; }
-        #aspera_audit_widget details > summary::-webkit-details-marker { display: none; }
-        #aspera_audit_widget details[open] .aspera-chevron { transform: rotate(90deg); }
-        #aspera_audit_widget .aspera-chevron { display:inline-block; transition: transform 0.15s; margin-right:4px; color:#72777c; }
-        #aspera_audit_widget .aspera-viol-row:last-child { border-bottom: none !important; }
-        #aspera_audit_widget .aspera-exc-btn { background:none; border:none; padding:0; cursor:pointer; font-size:11px; color:#a7aaad; text-decoration:underline; flex-shrink:0; margin-left:auto; }
-        #aspera_audit_widget .aspera-exc-btn:hover { color:#d63638; }
-        #aspera_audit_widget .aspera-exc-btn.is-excepted { color:#a7aaad; }
-        #aspera_audit_widget .aspera-exc-btn.is-excepted:hover { color:#2271b1; }
-        #aspera_audit_widget .aspera-exc-cb { flex-shrink:0; margin:3px 0 0; cursor:pointer; }
-        #aspera_audit_widget .aspera-bulk-bar { display:none; align-items:center; gap:8px; padding:6px 0; }
-        #aspera_audit_widget .aspera-bulk-bar.has-selection { display:flex; }
-        #aspera_audit_widget .aspera-bulk-btn { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
-        #aspera_audit_widget .aspera-bulk-btn:hover { background:#e0e0e0; }
-        #aspera_audit_widget .aspera-bulk-bar-ignored { display:none; align-items:center; gap:8px; padding:6px 0; }
-        #aspera_audit_widget .aspera-bulk-bar-ignored.has-selection { display:flex; }
-        #aspera_audit_widget .aspera-bulk-btn-ignored { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
-        #aspera_audit_widget .aspera-bulk-btn-ignored:hover { background:#e0e0e0; }
-        #aspera_audit_widget .aspera-ignored { opacity:0.45; }
-        #aspera_audit_widget .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
-        #aspera_audit_widget .aspera-fix-btn:hover { background:#135e96; }
+        #aspera-audit-page details > summary { list-style: none; user-select: none; }
+        #aspera-audit-page details > summary::-webkit-details-marker { display: none; }
+        #aspera-audit-page details[open] .aspera-chevron { transform: rotate(90deg); }
+        #aspera-audit-page .aspera-chevron { display:inline-block; transition: transform 0.15s; margin-right:4px; color:#72777c; }
+        #aspera-audit-page .aspera-viol-row:last-child { border-bottom: none !important; }
+        #aspera-audit-page .aspera-exc-btn { background:none; border:none; padding:0; cursor:pointer; font-size:11px; color:#a7aaad; text-decoration:underline; flex-shrink:0; margin-left:auto; }
+        #aspera-audit-page .aspera-exc-btn:hover { color:#d63638; }
+        #aspera-audit-page .aspera-exc-btn.is-excepted { color:#a7aaad; }
+        #aspera-audit-page .aspera-exc-btn.is-excepted:hover { color:#2271b1; }
+        #aspera-audit-page .aspera-exc-cb { flex-shrink:0; margin:3px 0 0; cursor:pointer; }
+        #aspera-audit-page .aspera-bulk-bar { display:none; align-items:center; gap:8px; padding:6px 0; }
+        #aspera-audit-page .aspera-bulk-bar.has-selection { display:flex; }
+        #aspera-audit-page .aspera-bulk-btn { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
+        #aspera-audit-page .aspera-bulk-btn:hover { background:#e0e0e0; }
+        #aspera-audit-page .aspera-bulk-bar-ignored { display:none; align-items:center; gap:8px; padding:6px 0; }
+        #aspera-audit-page .aspera-bulk-bar-ignored.has-selection { display:flex; }
+        #aspera-audit-page .aspera-bulk-btn-ignored { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
+        #aspera-audit-page .aspera-bulk-btn-ignored:hover { background:#e0e0e0; }
+        #aspera-audit-page .aspera-ignored { opacity:0.45; }
+        #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
+        #aspera-audit-page .aspera-fix-btn:hover { background:#135e96; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
