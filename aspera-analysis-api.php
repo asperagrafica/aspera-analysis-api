@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.68.0
+ * Version: 1.69.0
  * Author: Aspera
  */
 
@@ -1324,6 +1324,23 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             wp_send_json_success( [ 'message' => 'Field group "' . $post->post_title . '" verplaatst naar prullenbak.' ] );
             break;
 
+        case 'delete_orphaned_meta':
+            global $wpdb;
+            $meta_key = sanitize_text_field( $_POST['meta_key'] ?? '' );
+            if ( ! $meta_key ) {
+                wp_send_json_error( 'meta_key ontbreekt.' );
+            }
+            $del_data = (int) $wpdb->query( $wpdb->prepare(
+                "DELETE FROM {$wpdb->postmeta} WHERE meta_key = %s", $meta_key
+            ) );
+            $del_ref = (int) $wpdb->query( $wpdb->prepare(
+                "DELETE FROM {$wpdb->postmeta} WHERE meta_key = %s", '_' . $meta_key
+            ) );
+            wp_send_json_success( [
+                'message' => 'Meta key "' . $meta_key . '" verwijderd (' . ( $del_data + $del_ref ) . ' rijen).',
+            ] );
+            break;
+
         case 'add_attribute':
         case 'remove_attribute':
         case 'replace_value':
@@ -1868,6 +1885,8 @@ function aspera_dashboard_widget_script(): void {
                 var msg    = 'Fix toepassen?\n\n';
                 if (fix.action === 'delete_field_group') {
                     msg += 'Field group "' + (fix.title || '#' + postId) + '" wordt verplaatst naar de prullenbak.';
+                } else if (fix.action === 'delete_orphaned_meta') {
+                    msg += 'Meta key "' + fix.meta_key + '" verwijderen (' + fix.rows + ' rijen + referenties).';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -1877,6 +1896,7 @@ function aspera_dashboard_widget_script(): void {
                 var body = 'action=aspera_apply_fix&nonce=' + encodeURIComponent(btn.dataset.nonce)
                     + '&fix_action=' + encodeURIComponent(fix.action)
                     + '&post_id=' + encodeURIComponent(postId);
+                if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
 
@@ -7230,11 +7250,20 @@ add_action( 'rest_api_init', function () {
                 foreach ( $meta_val['orphaned'] ?? [] as $m ) {
                     $rule = $m['in_templates'] ? 'orphaned_meta_in_templates' : 'orphaned_meta';
                     $sev  = $severity_map[ $rule ] ?? 'warning';
-                    $meta_violations[] = [
+                    $entry = [
                         'rule'     => $rule,
                         'severity' => $sev,
                         'detail'   => $m['meta_key'] . ' (' . $m['rows'] . ' rijen' . ( $m['in_templates'] ? ', gevonden in templates' : '' ) . ')',
                     ];
+                    if ( ! $m['in_templates'] ) {
+                        $entry['proposed_fix'] = [
+                            'fixable'   => true,
+                            'action'    => 'delete_orphaned_meta',
+                            'meta_key'  => $m['meta_key'],
+                            'rows'      => (int) $m['rows'],
+                        ];
+                    }
+                    $meta_violations[] = $entry;
                 }
             }
             $categories['meta_orphaned'] = [
