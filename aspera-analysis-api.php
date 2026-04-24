@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.57.0
+ * Version: 1.58.0
  * Author: Aspera
  */
 
@@ -1089,12 +1089,20 @@ add_action( 'wp_ajax_aspera_remove_exception', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
     if ( ! aspera_user_is_administrator() ) wp_die( -1 );
 
-    $exc_id = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
-    if ( ! $exc_id ) wp_die( -1 );
+    $items_json = wp_unslash( $_POST['items'] ?? '' );
+    $items      = json_decode( $items_json, true );
+
+    if ( is_array( $items ) && ! empty( $items ) ) {
+        $ids = array_flip( array_map( 'sanitize_text_field', $items ) );
+    } else {
+        $exc_id = sanitize_text_field( wp_unslash( $_POST['exception_id'] ?? '' ) );
+        if ( ! $exc_id ) wp_die( -1 );
+        $ids = [ $exc_id => true ];
+    }
 
     $exceptions = get_option( 'aspera_audit_exceptions', [] );
     if ( ! is_array( $exceptions ) ) $exceptions = [];
-    $exceptions = array_values( array_filter( $exceptions, fn( $e ) => $e['id'] !== $exc_id ) );
+    $exceptions = array_values( array_filter( $exceptions, fn( $e ) => ! isset( $ids[ $e['id'] ] ) ) );
     update_option( 'aspera_audit_exceptions', $exceptions );
     wp_send_json_success();
 } );
@@ -1163,6 +1171,10 @@ function aspera_dashboard_widget_render(): void {
         #aspera_audit_widget .aspera-bulk-bar.has-selection { display:flex; }
         #aspera_audit_widget .aspera-bulk-btn { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
         #aspera_audit_widget .aspera-bulk-btn:hover { background:#e0e0e0; }
+        #aspera_audit_widget .aspera-bulk-bar-ignored { display:none; align-items:center; gap:8px; padding:6px 0; }
+        #aspera_audit_widget .aspera-bulk-bar-ignored.has-selection { display:flex; }
+        #aspera_audit_widget .aspera-bulk-btn-ignored { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
+        #aspera_audit_widget .aspera-bulk-btn-ignored:hover { background:#e0e0e0; }
         #aspera_audit_widget .aspera-ignored { opacity:0.45; }
     </style>';
 
@@ -1320,6 +1332,10 @@ function aspera_dashboard_widget_render(): void {
             // ── Genegeerde violations ─────────────────────────────────────
             if ( ! empty( $ignored_viols ) ) {
                 echo '<div style="margin-top:4px;border-top:1px dashed #dcdcde;padding-top:4px;">';
+                echo '<div class="aspera-bulk-bar-ignored" data-cat="' . esc_attr( $key ) . '">';
+                echo '<button class="aspera-bulk-btn-ignored" data-nonce="' . esc_attr( $nonce ) . '">Herstel geselecteerde</button>';
+                echo '<span class="aspera-bulk-count-ignored" style="font-size:12px;color:#50575e;"></span>';
+                echo '</div>';
                 foreach ( $ignored_viols as $v ) {
                     $sev     = $v['severity'] ?? 'warning';
                     $rule    = esc_html( $v['rule'] ?? '' );
@@ -1328,6 +1344,7 @@ function aspera_dashboard_widget_render(): void {
                     $eid     = esc_attr( $v['_exc_id'] ?? '' );
 
                     echo '<div class="aspera-viol-row aspera-ignored" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<input type="checkbox" class="aspera-unexc-cb" data-exc-id="' . $eid . '">';
                     echo '<span style="color:#a7aaad;font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
                     echo '<div style="flex:1;min-width:0;">';
                     echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;text-decoration:line-through;color:#a7aaad;">' . $rule . '</code>';
@@ -1422,8 +1439,19 @@ function aspera_dashboard_widget_script(): void {
                 var lbl = bar.querySelector('.aspera-bulk-count');
                 if (lbl) lbl.textContent = count > 0 ? count + ' geselecteerd' : '';
             });
+            document.querySelectorAll('.aspera-bulk-bar-ignored').forEach(function (bar) {
+                var container = bar.parentElement;
+                var checked = container.querySelectorAll('.aspera-unexc-cb:checked');
+                var count = checked.length;
+                bar.classList.toggle('has-selection', count > 0);
+                var lbl = bar.querySelector('.aspera-bulk-count-ignored');
+                if (lbl) lbl.textContent = count > 0 ? count + ' geselecteerd' : '';
+            });
         }
         document.querySelectorAll('.aspera-exc-cb').forEach(function (cb) {
+            cb.addEventListener('change', updateBulkBars);
+        });
+        document.querySelectorAll('.aspera-unexc-cb').forEach(function (cb) {
             cb.addEventListener('change', updateBulkBars);
         });
 
@@ -1465,6 +1493,41 @@ function aspera_dashboard_widget_script(): void {
                 .catch(function () {
                     btn.disabled    = false;
                     btn.textContent = 'Negeer geselecteerde';
+                });
+            });
+        });
+
+        // ── Bulk herstel ─────────────────────────────────────────────────────
+        document.querySelectorAll('.aspera-bulk-btn-ignored').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var container = btn.closest('.aspera-bulk-bar-ignored').parentElement;
+                var checked   = container.querySelectorAll('.aspera-unexc-cb:checked');
+                if (!checked.length) return;
+
+                var ids = [];
+                checked.forEach(function (cb) { ids.push(cb.dataset.excId); });
+
+                btn.disabled    = true;
+                btn.textContent = '…';
+
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    'action=aspera_remove_exception&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                            + '&items=' + encodeURIComponent(JSON.stringify(ids))
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        runAudit('Uitzonderingen hersteld — audit wordt bijgewerkt…');
+                    } else {
+                        btn.disabled    = false;
+                        btn.textContent = 'Herstel geselecteerde';
+                    }
+                })
+                .catch(function () {
+                    btn.disabled    = false;
+                    btn.textContent = 'Herstel geselecteerde';
                 });
             });
         });
