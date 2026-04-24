@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.66.0
+ * Version: 1.67.0
  * Author: Aspera
  */
 
@@ -3217,7 +3217,13 @@ add_action( 'rest_api_init', function () {
                                 'rule'     => 'orphaned_location_taxonomy',
                                 'severity' => 'error',
                                 'post_id'  => $group->ID,
-                                'detail'   => '"' . $group->post_title . '" — taxonomy "' . $taxonomy . '" is niet geregistreerd',
+                                'detail'   => '"' . $group->post_title . '" — gekoppeld aan verwijderde taxonomy "' . $taxonomy . '"; field group is ongebruikt',
+                                'proposed_fix' => [
+                                    'fixable'   => true,
+                                    'action'    => 'delete_field_group',
+                                    'post_id'   => $group->ID,
+                                    'title'     => $group->post_title,
+                                ],
                             ];
                             $orphaned_group_ids[] = $group->ID;
                             continue;
@@ -3229,7 +3235,13 @@ add_action( 'rest_api_init', function () {
                                 'rule'     => 'orphaned_location_term',
                                 'severity' => 'warning',
                                 'post_id'  => $group->ID,
-                                'detail'   => '"' . $group->post_title . '" — term "' . $term_slug . '" bestaat niet in taxonomy "' . $taxonomy . '"',
+                                'detail'   => '"' . $group->post_title . '" — gekoppeld aan verwijderde term "' . $term_slug . '" in taxonomy "' . $taxonomy . '"; field group is ongebruikt',
+                                'proposed_fix' => [
+                                    'fixable'   => true,
+                                    'action'    => 'delete_field_group',
+                                    'post_id'   => $group->ID,
+                                    'title'     => $group->post_title,
+                                ],
                             ];
                             $orphaned_group_ids[] = $group->ID;
                             continue;
