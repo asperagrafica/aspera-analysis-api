@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.58.0
+ * Version: 1.59.0
  * Author: Aspera
  */
 
@@ -4831,6 +4831,17 @@ add_action( 'rest_api_init', function () {
                 'size_',        // Impreza size modifier
             ];
 
+            // Exact-match klassen die volledig genegeerd worden (framework/3rd-party)
+            $framework_exact = [
+                'owl-dot',       // OWL Carousel
+                'has_text_color', // WordPress block editor
+            ];
+
+            // Prefix-patronen die als observation gerapporteerd worden (niet als warning)
+            $observation_prefixes = [
+                'page-id-',     // WordPress body class per pagina-ID
+            ];
+
             // Alle classes extraheren uit de CSS (zonder theme header)
             preg_match_all( '/\.([a-zA-Z_][a-zA-Z0-9_-]*)/', $css_body, $class_matches );
             $all_classes = array_unique( $class_matches[1] );
@@ -4840,6 +4851,12 @@ add_action( 'rest_api_init', function () {
             $framework_classes = [];
 
             foreach ( $all_classes as $class ) {
+                // Exact-match framework klassen — volledig overslaan
+                if ( in_array( $class, $framework_exact, true ) ) {
+                    $framework_classes[] = $class;
+                    continue;
+                }
+                // Prefix-check framework
                 $is_framework = false;
                 foreach ( $framework_prefixes as $prefix ) {
                     if ( strpos( $class, $prefix ) === 0 || $class === rtrim( $prefix, '-_' ) ) {
@@ -4919,10 +4936,20 @@ add_action( 'rest_api_init', function () {
                         $selector = trim( $sel_match[1] );
                     }
 
+                    // Bepaal severity: observation voor bekende WordPress body-class patronen
+                    $unused_severity = 'warning';
+                    foreach ( $observation_prefixes as $obs_prefix ) {
+                        if ( strpos( $class, $obs_prefix ) === 0 ) {
+                            $unused_severity = 'observation';
+                            break;
+                        }
+                    }
+
                     $unused[] = [
                         'class'    => $class,
                         'selector' => $selector,
                         'line'     => $line_num,
+                        'severity' => $unused_severity,
                     ];
                 }
             }
@@ -6428,7 +6455,7 @@ add_action( 'rest_api_init', function () {
                 foreach ( $css['unused'] ?? [] as $u ) {
                     $css_violations[] = [
                         'rule'     => 'unused_css_class',
-                        'severity' => 'warning',
+                        'severity' => $u['severity'] ?? 'warning',
                         'detail'   => '.' . $u['class'] . ' (regel ' . ( $u['line'] ?? '?' ) . ')',
                     ];
                 }
