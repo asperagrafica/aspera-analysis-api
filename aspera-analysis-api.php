@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.60.0
+ * Version: 1.61.0
  * Author: Aspera
  */
 
@@ -1208,7 +1208,16 @@ function aspera_dashboard_widget_render(): void {
     echo '</div>';
 
     // ── Severity badges ────────────────────────────────────────────────────────
-    $ignored_total = count( $exceptions_raw );
+    // Tel alleen exceptions die daadwerkelijk matchen met een violation in de huidige audit
+    $ignored_total = 0;
+    foreach ( $cats as $cat_data ) {
+        foreach ( $cat_data['violations'] ?? [] as $_v ) {
+            $eid = $_v['exception_id'] ?? '';
+            if ( $eid && isset( $exc_index[ $eid ] ) ) {
+                $ignored_total++;
+            }
+        }
+    }
     echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
     foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
