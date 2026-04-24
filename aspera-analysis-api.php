@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.67.0
+ * Version: 1.68.0
  * Author: Aspera
  */
 
@@ -1303,6 +1303,52 @@ add_action( 'wp_ajax_aspera_cleanup_exceptions', function () {
     wp_send_json_success( [ 'removed' => $removed ] );
 } );
 
+add_action( 'wp_ajax_aspera_apply_fix', function () {
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+    if ( ! aspera_user_is_administrator() ) wp_die( -1 );
+
+    $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
+    $post_id = intval( $_POST['post_id'] ?? 0 );
+
+    if ( ! $post_id || ! $action ) {
+        wp_send_json_error( 'Ongeldige parameters.' );
+    }
+
+    switch ( $action ) {
+        case 'delete_field_group':
+            $post = get_post( $post_id );
+            if ( ! $post || $post->post_type !== 'acf-field-group' ) {
+                wp_send_json_error( 'Field group niet gevonden.' );
+            }
+            wp_trash_post( $post_id );
+            wp_send_json_success( [ 'message' => 'Field group "' . $post->post_title . '" verplaatst naar prullenbak.' ] );
+            break;
+
+        case 'add_attribute':
+        case 'remove_attribute':
+        case 'replace_value':
+            $before = wp_unslash( $_POST['before'] ?? '' );
+            $after  = wp_unslash( $_POST['after'] ?? '' );
+            if ( $before === '' ) {
+                wp_send_json_error( 'before-waarde ontbreekt.' );
+            }
+            $post = get_post( $post_id );
+            if ( ! $post ) {
+                wp_send_json_error( 'Post niet gevonden.' );
+            }
+            if ( strpos( $post->post_content, $before ) === false ) {
+                wp_send_json_error( 'Shortcode niet gevonden in post_content — mogelijk al gewijzigd.' );
+            }
+            $new_content = str_replace( $before, $after, $post->post_content );
+            wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_content ] );
+            wp_send_json_success( [ 'message' => 'Shortcode bijgewerkt in post #' . $post_id . '.' ] );
+            break;
+
+        default:
+            wp_send_json_error( 'Onbekende fix-actie: ' . $action );
+    }
+} );
+
 function aspera_dashboard_widget_render(): void {
     $score    = get_option( 'aspera_audit_score',    null );
     $date_raw = get_option( 'aspera_audit_date',     null );
@@ -1374,6 +1420,8 @@ function aspera_dashboard_widget_render(): void {
         #aspera_audit_widget .aspera-bulk-btn-ignored { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
         #aspera_audit_widget .aspera-bulk-btn-ignored:hover { background:#e0e0e0; }
         #aspera_audit_widget .aspera-ignored { opacity:0.45; }
+        #aspera_audit_widget .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
+        #aspera_audit_widget .aspera-fix-btn:hover { background:#135e96; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1538,10 +1586,18 @@ function aspera_dashboard_widget_render(): void {
                         $link_label = $post_title ?: ( 'Post #' . $post_id );
                         echo ' &mdash; <a href="' . esc_url( (string) $edit_url ) . '" style="font-size:12px;" target="_blank">' . esc_html( $link_label ) . '</a>';
                     }
+                    $loc = $v['location'] ?? null;
+                    if ( is_array( $loc ) && ! empty( $loc['breadcrumb'] ) ) {
+                        echo ' &mdash; <span style="font-size:11px;color:#72777c;">' . esc_html( $loc['breadcrumb'] ) . '</span>';
+                    }
                     if ( $detail ) {
                         echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
                     }
                     echo '</div>';
+                    $fix = $v['proposed_fix'] ?? null;
+                    if ( is_array( $fix ) && ( $fix['fixable'] ?? false ) ) {
+                        echo '<button class="aspera-fix-btn" data-fix="' . esc_attr( wp_json_encode( $fix ) ) . '" data-post-id="' . $pid_attr . '" data-nonce="' . esc_attr( $nonce ) . '">Fix</button>';
+                    }
                     echo '</div>';
                 }
             }
@@ -1803,6 +1859,55 @@ function aspera_dashboard_widget_script(): void {
                 });
             });
         }
+
+        // ── Fix-knoppen ──────────────────────────────────────────────────────
+        document.querySelectorAll('.aspera-fix-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var fix    = JSON.parse(btn.dataset.fix);
+                var postId = btn.dataset.postId;
+                var msg    = 'Fix toepassen?\n\n';
+                if (fix.action === 'delete_field_group') {
+                    msg += 'Field group "' + (fix.title || '#' + postId) + '" wordt verplaatst naar de prullenbak.';
+                } else {
+                    msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
+                    if (fix.value) msg += '\nWaarde: ' + fix.value;
+                }
+                if (!confirm(msg)) return;
+
+                var body = 'action=aspera_apply_fix&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                    + '&fix_action=' + encodeURIComponent(fix.action)
+                    + '&post_id=' + encodeURIComponent(postId);
+                if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
+                if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
+
+                btn.disabled    = true;
+                btn.textContent = '...';
+
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    body
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        btn.textContent   = '✓';
+                        btn.style.background = '#00a32a';
+                        runAudit('Fix toegepast — audit wordt vernieuwd…');
+                    } else {
+                        alert('Fix mislukt: ' + (data.data || 'onbekend'));
+                        btn.disabled    = false;
+                        btn.textContent = 'Fix';
+                        btn.style.background = '';
+                    }
+                })
+                .catch(function () {
+                    btn.disabled    = false;
+                    btn.textContent = 'Fix';
+                    btn.style.background = '';
+                });
+            });
+        });
     })();
     </script>
     <?php
@@ -6689,12 +6794,15 @@ add_action( 'rest_api_init', function () {
                 foreach ( $wpb['violations'] ?? [] as $v ) {
                     $rule     = $v['rule'] ?? 'unknown';
                     $sev      = $severity_map[ $rule ] ?? 'warning';
-                    $wpb_violations[] = [
+                    $entry = [
                         'rule'     => $rule,
                         'severity' => $sev,
                         'post_id'  => $v['post_id'] ?? null,
-                        'detail'   => $v['snippet'] ?? $v['detail'] ?? '',
+                        'detail'   => $v['detail'] ?? $v['snippet'] ?? '',
                     ];
+                    if ( isset( $v['location'] ) )     $entry['location']     = $v['location'];
+                    if ( isset( $v['proposed_fix'] ) ) $entry['proposed_fix'] = $v['proposed_fix'];
+                    $wpb_violations[] = $entry;
                 }
                 // Paginering: als er meer pagina's zijn, ophalen
                 $total_pages = $wpb['total_pages'] ?? 1;
@@ -6703,12 +6811,15 @@ add_action( 'rest_api_init', function () {
                     foreach ( $extra['violations'] ?? [] as $v ) {
                         $rule     = $v['rule'] ?? 'unknown';
                         $sev      = $severity_map[ $rule ] ?? 'warning';
-                        $wpb_violations[] = [
+                        $entry = [
                             'rule'     => $rule,
                             'severity' => $sev,
                             'post_id'  => $v['post_id'] ?? null,
-                            'detail'   => $v['snippet'] ?? $v['detail'] ?? '',
+                            'detail'   => $v['detail'] ?? $v['snippet'] ?? '',
                         ];
+                        if ( isset( $v['location'] ) )     $entry['location']     = $v['location'];
+                        if ( isset( $v['proposed_fix'] ) ) $entry['proposed_fix'] = $v['proposed_fix'];
+                        $wpb_violations[] = $entry;
                     }
                 }
             }
@@ -7231,6 +7342,7 @@ add_action( 'rest_api_init', function () {
                             $entry['covered_by'] = $lv['covered_by'];
                         }
                     }
+                    if ( isset( $lv['proposed_fix'] ) ) $entry['proposed_fix'] = $lv['proposed_fix'];
                     $loc_violations[] = $entry;
                 }
             }
