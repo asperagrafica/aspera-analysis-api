@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.62.0
+ * Version: 1.63.0
  * Author: Aspera
  */
 
@@ -46,6 +46,33 @@ function aspera_strip_empty( array $data ): array {
         $result[ $key ] = $value;
     }
     return $result;
+}
+
+/**
+/**
+ * Geeft het ACF veldtype terug voor een gegeven veldslug.
+ * Bouwt eenmalig per request een slug→type map op basis van acf-field posts.
+ * Geeft null terug als de slug niet gevonden wordt.
+ */
+function aspera_acf_field_type( string $slug ): ?string {
+    static $map = null;
+    if ( $map === null ) {
+        global $wpdb;
+        $rows = $wpdb->get_results(
+            "SELECT post_excerpt AS slug, post_content AS content
+             FROM {$wpdb->posts}
+             WHERE post_type = 'acf-field' AND post_status = 'publish'"
+        );
+        $map = [];
+        foreach ( $rows as $row ) {
+            if ( $row->slug === '' || isset( $map[ $row->slug ] ) ) continue;
+            $data = @unserialize( $row->content );
+            if ( is_array( $data ) && isset( $data['type'] ) ) {
+                $map[ $row->slug ] = $data['type'];
+            }
+        }
+    }
+    return $map[ $slug ] ?? null;
 }
 
 /**
@@ -110,6 +137,15 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             continue;
         }
         $first_has_image = (bool) preg_match( '/\[us_image\b/', $first_col[1] );
+        if ( ! $first_has_image ) {
+            preg_match_all( '/\[us_post_custom_field\b[^\]]*\bkey="([^"]+)"/', $first_col[1], $pcf_matches );
+            foreach ( $pcf_matches[1] as $_pcf_key ) {
+                if ( aspera_acf_field_type( $_pcf_key ) === 'image' ) {
+                    $first_has_image = true;
+                    break;
+                }
+            }
+        }
 
         if ( $first_has_image && ! $cr ) {
             $violations[] = [
@@ -182,7 +218,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                     'detail' => 'hide_empty="1" ontbreekt' ];
             }
 
-            if ( $attr( 'color_link' ) !== '0' ) {
+            if ( $attr( 'color_link' ) !== '0' && aspera_acf_field_type( $key ) !== 'image' ) {
                 $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_color_link',
                     'detail' => 'color_link="0" ontbreekt' ];
             }
@@ -4267,7 +4303,7 @@ add_action( 'rest_api_init', function () {
                                 'detail'  => 'hide_empty is niet ingeschakeld — lege veldwaarden worden zichtbaar weergegeven',
                             ];
                         }
-                        if ( ( $element['color_link'] ?? 0 ) != 0 ) {
+                        if ( ( $element['color_link'] ?? 0 ) != 0 && aspera_acf_field_type( $element['key'] ?? '' ) !== 'image' ) {
                             $violations[] = [
                                 'element' => $element_key,
                                 'rule'    => 'missing_color_link',
