@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.89.0
+ * Version: 1.89.1
  * Author: Aspera
  */
 
@@ -66,7 +66,7 @@ function aspera_acf_field_type( string $slug ): ?string {
         $map = [];
         foreach ( $rows as $row ) {
             if ( $row->slug === '' || isset( $map[ $row->slug ] ) ) continue;
-            $data = @unserialize( $row->content );
+            $data = maybe_unserialize( $row->content );
             if ( is_array( $data ) && isset( $data['type'] ) ) {
                 $map[ $row->slug ] = $data['type'];
             }
@@ -433,7 +433,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
 
         // ─── empty_style_attr: lege *_style attribuut op us_* elementen ─
         if ( strpos( $tag, 'us_' ) === 0 ) {
-            if ( preg_match_all( '/\b((?:\w+_)?style)=""/', $attrs, $style_m ) ) {
+            if ( preg_match_all( '/\b((?:\w+_)?style)="\s*"/', $attrs, $style_m ) ) {
                 foreach ( $style_m[1] as $style_attr ) {
                     if ( $tag === 'us_btn' && $style_attr === 'style' ) continue;
                     $violations[] = [ 'tag' => $tag, 'rule' => 'empty_style_attr',
@@ -444,7 +444,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                             'action'    => 'remove_attribute',
                             'attribute' => $style_attr,
                             'before'    => $full_sc,
-                            'after'     => preg_replace( '/\s+' . preg_quote( $style_attr, '/' ) . '=""/', '', $full_sc ),
+                            'after'     => preg_replace( '/\s+' . preg_quote( $style_attr, '/' ) . '="\s*"/', '', $full_sc ),
                         ] ];
                 }
             }
@@ -1423,6 +1423,25 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             $meta_key = sanitize_text_field( $_POST['meta_key'] ?? '' );
             if ( ! $meta_key ) {
                 wp_send_json_error( 'meta_key ontbreekt.' );
+            }
+            // Re-verify: bevestig dat meta_key nog steeds verweesd is
+            // (zelfde criterium als /meta/validate: bijbehorende _<key>=field_* bestaat
+            // én die field_key komt niet voor in actieve acf-field post_name's).
+            $field_key = $wpdb->get_var( $wpdb->prepare(
+                "SELECT meta_value FROM {$wpdb->postmeta}
+                 WHERE meta_key = %s AND meta_value LIKE 'field_%%' LIMIT 1",
+                '_' . $meta_key
+            ) );
+            if ( ! $field_key ) {
+                wp_send_json_error( 'Verificatie mislukt: geen field_* referentie meer voor "' . $meta_key . '". Voer audit opnieuw uit.' );
+            }
+            $field_key_active = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-field' AND post_status = 'publish' AND post_name = %s",
+                $field_key
+            ) );
+            if ( $field_key_active > 0 ) {
+                wp_send_json_error( 'Verificatie mislukt: meta_key "' . $meta_key . '" is weer in gebruik (actief ACF-veld). Verwijdering geannuleerd.' );
             }
             $del_data = (int) $wpdb->query( $wpdb->prepare(
                 "DELETE FROM {$wpdb->postmeta} WHERE meta_key = %s", $meta_key
@@ -2860,7 +2879,7 @@ add_action( 'rest_api_init', function () {
 
             foreach ( $groups as $group ) {
                 // Field group naming convention check
-                $group_content   = @unserialize( $group->post_content );
+                $group_content   = maybe_unserialize( $group->post_content );
                 $expected_prefix = null;
                 if ( is_array( $group_content ) && ! empty( $group_content['location'] ) ) {
                     foreach ( $group_content['location'] as $rule_group ) {
@@ -4263,7 +4282,7 @@ add_action( 'rest_api_init', function () {
             $orphaned_group_ids = [];
 
             foreach ( $groups as $group ) {
-                $content = @unserialize( $group->post_content );
+                $content = maybe_unserialize( $group->post_content );
                 if ( ! is_array( $content ) || empty( $content['location'] ) ) continue;
 
                 foreach ( $content['location'] as $rule_group ) {
@@ -4732,7 +4751,7 @@ add_action( 'rest_api_init', function () {
                    AND post_status = 'publish'"
             );
             foreach ( $option_pages as $op ) {
-                $data = @unserialize( $op->post_content );
+                $data = maybe_unserialize( $op->post_content );
                 if ( is_array( $data ) && ! empty( $data['menu_slug'] ) ) {
                     $active_slugs[] = $data['menu_slug'];
                 }
@@ -4836,7 +4855,7 @@ add_action( 'rest_api_init', function () {
             ];
 
             foreach ( $option_pages as $op ) {
-                $data = @unserialize( $op->post_content );
+                $data = maybe_unserialize( $op->post_content );
                 if ( ! is_array( $data ) ) continue;
 
                 $slug     = $data['menu_slug'] ?? '';
