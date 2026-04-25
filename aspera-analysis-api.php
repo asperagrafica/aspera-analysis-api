@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.90.0
+ * Version: 1.90.1
  * Author: Aspera
  */
 
@@ -1332,7 +1332,7 @@ function aspera_dashboard_summary_render(): void {
     echo '</div>';
 
     echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
-    foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
+    foreach ( [ 'critical' => 'Kritiek', 'error' => 'Fout', 'warning' => 'Waarschuwing', 'observation' => 'Opmerking' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
         $bg  = $cnt > 0 ? $sev_colors[ $sev ] : '#dcdcde';
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
@@ -1929,10 +1929,10 @@ function aspera_dashboard_widget_render(): void {
         #aspera-hero.is-green  { background:linear-gradient(135deg, #e6f6ea 0%, #f6fbf7 100%); border:1px solid #b7e0c2; }
         #aspera-hero.is-yellow { background:linear-gradient(135deg, #fcf2d9 0%, #fdfaf0 100%); border:1px solid #ecd58a; }
         #aspera-hero.is-red    { background:linear-gradient(135deg, #fbe5e6 0%, #fdf3f3 100%); border:1px solid #e8a5a7; }
-        #aspera-hero .aspera-hero-score { display:flex; align-items:baseline; gap:6px; flex-shrink:0; }
+        #aspera-hero .aspera-hero-score { display:flex; align-items:center; gap:4px; flex-shrink:0; }
         #aspera-hero .aspera-hero-num { font-size:3em; font-weight:800; line-height:1; }
-        #aspera-hero .aspera-hero-100 { font-size:1.1em; color:#72777c; font-weight:500; }
-        #aspera-hero .aspera-hero-label { display:inline-block; font-size:13px; font-weight:700; padding:4px 12px; border-radius:14px; }
+        #aspera-hero .aspera-hero-100 { font-size:1em; color:#72777c; font-weight:400; align-self:center; }
+        #aspera-hero .aspera-hero-label { display:inline-block; font-size:12px; font-weight:700; padding:4px 10px; border-radius:3px; cursor:default; }
         #aspera-hero .aspera-hero-divider { width:1px; align-self:stretch; background:rgba(0,0,0,0.08); }
         #aspera-hero .aspera-hero-meta { display:flex; flex-direction:column; gap:6px; flex:1; min-width:200px; }
         #aspera-hero .aspera-hero-total { font-size:13px; color:#50575e; }
@@ -2059,7 +2059,7 @@ function aspera_dashboard_widget_render(): void {
         if ( $diff_total !== 0 ) {
             $sign = $diff_total > 0 ? '+' : '';
             $col  = $diff_total > 0 ? '#d63638' : '#00a32a';
-            $parts[] = '<span style="color:' . $col . ';font-weight:700;">' . $sign . $diff_total . ' issues</span>';
+            $parts[] = '<span style="color:' . $col . ';font-weight:700;">' . $sign . $diff_total . ' meldingen</span>';
         }
         if ( $diff_score !== 0 ) {
             $sign = $diff_score > 0 ? '+' : '';
@@ -2068,9 +2068,9 @@ function aspera_dashboard_widget_render(): void {
         }
         $delta_html = ' &middot; <span style="font-size:12px;color:#50575e;" title="vorige run: ' . esc_attr( $prev_fmt ) . '">sinds vorige run: ' . implode( ', ', $parts ) . '</span>';
     }
-    echo '<div class="aspera-hero-total"><strong>' . (int) $total . '</strong> violations totaal' . ( $ignored_total > 0 ? ' &middot; ' . $ignored_total . ' genegeerd' : '' ) . ( $stale_count > 0 ? ' &middot; <button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;vertical-align:baseline;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>' : '' ) . $delta_html . '</div>';
+    echo '<div class="aspera-hero-total"><strong>' . (int) $total . '</strong> meldingen totaal' . ( $ignored_total > 0 ? ' &middot; ' . $ignored_total . ' genegeerd' : '' ) . ( $stale_count > 0 ? ' &middot; <button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;vertical-align:baseline;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige melding' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>' : '' ) . $delta_html . '</div>';
     echo '<div id="aspera-sev-bar" class="aspera-sev-grid">';
-    foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
+    foreach ( [ 'critical' => 'Kritiek', 'error' => 'Fout', 'warning' => 'Waarschuwing', 'observation' => 'Opmerking' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
         $bg  = $cnt > 0 ? ( $sev_colors[ $sev ] ) : '#dcdcde';
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
@@ -2081,7 +2081,7 @@ function aspera_dashboard_widget_render(): void {
     $passed_bg = $passed_disabled ? '#dcdcde' : '#00a32a';
     $passed_fc = $passed_disabled ? '#50575e' : '#fff';
     $passed_cursor = $passed_disabled ? 'default' : 'pointer';
-    echo '<button type="button" class="aspera-passed-toggle-btn" ' . ( $passed_disabled ? 'disabled' : '' ) . ' style="background:' . $passed_bg . ';color:' . $passed_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $passed_cursor . ';">&#x2713;&nbsp;' . (int) $passed_total . '&nbsp;Passed</button>';
+    echo '<button type="button" class="aspera-passed-toggle-btn" ' . ( $passed_disabled ? 'disabled' : '' ) . ' style="background:' . $passed_bg . ';color:' . $passed_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $passed_cursor . ';">' . (int) $passed_total . '&nbsp;Geslaagd</button>';
     echo '</div>';
     echo '</div>';
     echo '</div>';
@@ -2164,7 +2164,7 @@ function aspera_dashboard_widget_render(): void {
         if ( $cat_err ) {
             echo '<p style="color:#d63638;margin:4px 0;">⚠ Endpoint fout: ' . esc_html( $cat_err ) . '</p>';
         } elseif ( empty( $active_viols ) && empty( $ignored_viols ) ) {
-            echo '<p style="color:#00a32a;margin:4px 0;">✓ Geen violations gevonden.</p>';
+            echo '<p style="color:#00a32a;margin:4px 0;">✓ Geen meldingen gevonden.</p>';
         } else {
             $sev_order = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
 
@@ -2827,7 +2827,7 @@ function aspera_dashboard_widget_script(): void {
                         }
                     } catch (e) {}
                 });
-                if (!fixes.length) { alert('Geen fixable shortcode-violations gevonden.'); return; }
+                if (!fixes.length) { alert('Geen fixable shortcode-meldingen gevonden.'); return; }
                 if (!confirm('Pas ' + fixes.length + ' shortcode-fixes toe? Verwijderingen (orphaned meta, scheduled actions) zijn uitgesloten en moeten individueel worden bevestigd.')) return;
 
                 fixAllBtn.disabled = true;
