@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Aspera Analysis API
- * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.82.0
+ * Plugin Name: AsperAi Site Tools
+ * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
+ * Version: 1.85.0
  * Author: Aspera
  */
 
@@ -1402,7 +1402,8 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
     $post_id = intval( $_POST['post_id'] ?? 0 );
 
-    if ( ! $action || ( ! $post_id && $action !== 'delete_orphaned_meta' ) ) {
+    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_wpforms_scheduled_actions' ];
+    if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
 
@@ -1430,6 +1431,34 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             ) );
             wp_send_json_success( [
                 'message' => 'Meta key "' . $meta_key . '" verwijderd (' . ( $del_data + $del_ref ) . ' rijen).',
+            ] );
+            break;
+
+        case 'delete_wpforms_scheduled_actions':
+            global $wpdb;
+            $wpforms_active = false;
+            foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                if ( stripos( $p, 'wpforms' ) !== false ) { $wpforms_active = true; break; }
+            }
+            if ( $wpforms_active ) {
+                wp_send_json_error( 'WPForms is actief — scheduled actions worden niet verwijderd.' );
+            }
+            $as_table  = $wpdb->prefix . 'actionscheduler_actions';
+            $log_table = $wpdb->prefix . 'actionscheduler_logs';
+            $table_exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $as_table ) );
+            if ( ! $table_exists ) {
+                wp_send_json_error( 'actionscheduler_actions tabel niet gevonden.' );
+            }
+            $action_ids = $wpdb->get_col( "SELECT action_id FROM {$as_table} WHERE hook LIKE 'wpforms%'" );
+            $deleted_logs    = 0;
+            $deleted_actions = 0;
+            if ( ! empty( $action_ids ) ) {
+                $placeholders = implode( ',', array_fill( 0, count( $action_ids ), '%d' ) );
+                $deleted_logs    = (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$log_table} WHERE action_id IN ($placeholders)", $action_ids ) );
+                $deleted_actions = (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$as_table} WHERE action_id IN ($placeholders)", $action_ids ) );
+            }
+            wp_send_json_success( [
+                'message' => $deleted_actions . ' WPForms scheduled action(s) verwijderd, ' . $deleted_logs . ' loggegevens.',
             ] );
             break;
 
@@ -1533,6 +1562,9 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-fix-btn:hover { background:#135e96; }
         #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 10px; }
         #aspera-audit-page .aspera-bulk-fix-btn:hover { background:#135e96; }
+        #aspera-audit-toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; padding:8px 0 12px; border-bottom:1px solid #dcdcde; margin-bottom:12px; }
+        #aspera-audit-sticky-bar { position:sticky; bottom:0; left:0; right:0; background:#f0f0f1; border-top:1px solid #c3c4c7; padding:10px 16px; margin:24px -20px 0; display:flex; align-items:center; justify-content:flex-end; gap:8px; box-shadow:0 -2px 6px rgba(0,0,0,0.04); z-index:50; }
+        @media print { #aspera-audit-sticky-bar { display:none !important; } }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1556,6 +1588,15 @@ function aspera_dashboard_widget_render(): void {
     $score_color     = $score_color_map[ $traffic ] ?? '#72777c';
     $score_label_map = [ 'green' => 'Schoon', 'yellow' => 'Aandacht nodig', 'red' => 'Kritieke problemen' ];
     $score_label     = $score_label_map[ $traffic ] ?? '';
+
+    // ── Top toolbar: datum + Vernieuwen + PDF ──────────────────────────────────
+    echo '<div id="aspera-audit-toolbar">';
+    echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
+    echo '<span>';
+    echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
+    echo '</span>';
+    echo '</div>';
+    echo '<span id="aspera-refresh-status" style="display:block;margin-bottom:10px;font-size:12px;color:#72777c;min-height:16px;"></span>';
 
     // ── Score header ───────────────────────────────────────────────────────────
     echo '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">';
@@ -1715,6 +1756,8 @@ function aspera_dashboard_widget_render(): void {
                             echo '<br><span style="font-size:11px;color:#72777c;">Fix: field group naar prullenbak</span>';
                         } elseif ( $fa === 'delete_orphaned_meta' ) {
                             echo '<br><span style="font-size:11px;color:#72777c;">Fix: meta key <code style="font-size:11px;">' . esc_html( $fix['meta_key'] ?? '' ) . '</code> verwijderen (' . (int) ( $fix['rows'] ?? 0 ) . ' rijen)</span>';
+                        } elseif ( $fa === 'delete_wpforms_scheduled_actions' ) {
+                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: ' . (int) ( $fix['count'] ?? 0 ) . ' WPForms scheduled action(s) verwijderen</span>';
                         } else {
                             $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
                             $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
@@ -1771,12 +1814,10 @@ function aspera_dashboard_widget_render(): void {
 
     echo '</div>';
 
-    // ── Footer: datum + refresh-knop ───────────────────────────────────────────
-    echo '<div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">';
-    echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
-    echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
+    // ── Sticky bottom bar: tweede Vernieuwen-trigger ──────────────────────────
+    echo '<div id="aspera-audit-sticky-bar">';
+    echo '<button class="button button-primary aspera-refresh-btn-sticky" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
     echo '</div>';
-    echo '<span id="aspera-refresh-status" style="display:block;margin-top:4px;font-size:12px;color:#72777c;min-height:16px;"></span>';
 
     aspera_dashboard_widget_script();
 }
@@ -1787,6 +1828,11 @@ function aspera_dashboard_widget_script(): void {
     (function () {
         var refreshBtn = document.getElementById('aspera-refresh-btn');
         var status     = document.getElementById('aspera-refresh-status');
+        document.querySelectorAll('.aspera-refresh-btn-sticky').forEach(function (b) {
+            b.addEventListener('click', function () {
+                if (refreshBtn) refreshBtn.click();
+            });
+        });
 
         function runAudit(statusMsg) {
             if (!refreshBtn) return;
@@ -2065,6 +2111,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Field group "' + (fix.title || '#' + postId) + '" wordt verplaatst naar de prullenbak.';
                 } else if (fix.action === 'delete_orphaned_meta') {
                     msg += 'Meta key "' + fix.meta_key + '" verwijderen (' + fix.rows + ' rijen + referenties).';
+                } else if (fix.action === 'delete_wpforms_scheduled_actions') {
+                    msg += fix.count + ' WPForms scheduled action(s) en bijbehorende logs verwijderen uit actionscheduler tabellen.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -7345,6 +7393,7 @@ add_action( 'rest_api_init', function () {
                 'php_version_critical'                   => 'critical',
                 'php_version_outdated'                   => 'warning',
                 'php_memory_limit_low'                   => 'warning',
+                'orphaned_wpforms_scheduled_actions'     => 'warning',
                 'scroll_breakpoint_not_1px'              => 'observation',
                 'scroll_breakpoint_inconsistent'         => 'observation',
                 'centering_missing'                      => 'warning',
@@ -8207,6 +8256,33 @@ add_action( 'rest_api_init', function () {
                     'severity' => 'warning',
                     'detail'   => 'memory_limit=' . $memory_limit_raw . ' (minimaal 128M vereist)',
                 ];
+            }
+            // Orphaned WPForms scheduled actions: alleen als WPForms inactief
+            $wpforms_active_check = false;
+            foreach ( (array) get_option( 'active_plugins', [] ) as $ap ) {
+                if ( stripos( $ap, 'wpforms' ) !== false ) { $wpforms_active_check = true; break; }
+            }
+            if ( ! $wpforms_active_check ) {
+                global $wpdb;
+                $as_table_name = $wpdb->prefix . 'actionscheduler_actions';
+                $as_exists     = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $as_table_name ) );
+                if ( $as_exists ) {
+                    $wpforms_action_count = (int) $wpdb->get_var(
+                        "SELECT COUNT(*) FROM {$as_table_name} WHERE hook LIKE 'wpforms%'"
+                    );
+                    if ( $wpforms_action_count > 0 ) {
+                        $wp_settings_violations[] = [
+                            'rule'         => 'orphaned_wpforms_scheduled_actions',
+                            'severity'     => 'warning',
+                            'detail'       => $wpforms_action_count . ' WPForms scheduled action(s) gevonden terwijl WPForms inactief is — kunnen verwijderd worden',
+                            'proposed_fix' => [
+                                'fixable' => true,
+                                'action'  => 'delete_wpforms_scheduled_actions',
+                                'count'   => $wpforms_action_count,
+                            ],
+                        ];
+                    }
+                }
             }
             $show_on_front  = (string) get_option( 'show_on_front', 'posts' );
             $page_on_front  = (int) get_option( 'page_on_front', 0 );
