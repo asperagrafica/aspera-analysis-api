@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.86.0
+ * Version: 1.87.0
  * Author: Aspera
  */
 
@@ -1488,6 +1488,237 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     }
 } );
 
+function aspera_humanize_rule( string $rule ): string {
+    return ucwords( str_replace( '_', ' ', $rule ) );
+}
+
+function aspera_get_rule_context(): array {
+    static $ctx = null;
+    if ( $ctx !== null ) return $ctx;
+    $ctx = [
+        // ── Cache (WP Fastest Cache) ──────────────────────────────────────
+        'cache_disabled' => [ 'label' => 'WP Fastest Cache hoofdstatus uit', 'explanation' => 'Master cache-toggle staat op off; geen enkele pagina wordt gecached.', 'action' => 'WP Fastest Cache > Settings > vink "Cache System" aan.' ],
+        'cache_preload_disabled' => [ 'label' => 'Preload uit', 'explanation' => 'Cache-pages worden niet vooraf opgebouwd; eerste bezoeker krijgt langzame uncached response.', 'action' => 'WP Fastest Cache > Preload > activeer Preload + sub-opties (homepage, post, page, customposttypes).' ],
+        'cache_preload_homepage_missing' => [ 'label' => 'Homepage niet in preload', 'explanation' => 'De homepage wordt niet vooraf gecached.', 'action' => 'WP Fastest Cache > Preload > vink Homepage aan.' ],
+        'cache_preload_post_missing' => [ 'label' => 'Posts niet in preload', 'explanation' => 'Posts worden niet vooraf gecached.', 'action' => 'WP Fastest Cache > Preload > vink Posts aan.' ],
+        'cache_preload_page_missing' => [ 'label' => 'Pages niet in preload', 'explanation' => 'Pages worden niet vooraf gecached.', 'action' => 'WP Fastest Cache > Preload > vink Pages aan.' ],
+        'cache_preload_cpt_missing' => [ 'label' => 'Custom post types niet in preload', 'explanation' => 'CPT-posts worden niet vooraf gecached.', 'action' => 'WP Fastest Cache > Preload > vink Custom Post Types aan.' ],
+        'cache_preload_threads_missing' => [ 'label' => 'Preload-threads niet ingesteld', 'explanation' => 'Aantal parallelle preload-threads is leeg.', 'action' => 'WP Fastest Cache > Preload > stel een waarde in (default 4).' ],
+        'cache_preload_restart_missing' => [ 'label' => 'Preload herstart na cache-clear uit', 'explanation' => 'Na een cache-clear wordt preload niet opnieuw uitgevoerd; site blijft uncached tot bezoek.', 'action' => 'WP Fastest Cache > Preload > vink "Restart after completed" aan.' ],
+        'cache_purge_on_new_post_missing' => [ 'label' => 'Cache wordt niet gewist bij nieuwe post', 'explanation' => 'Bij publicatie van nieuwe content blijft oude cache staan; nieuwe content niet zichtbaar voor bezoekers.', 'action' => 'WP Fastest Cache > Delete Cache > vink "Clear cache when a post is published" aan.' ],
+        'cache_purge_on_update_post_missing' => [ 'label' => 'Cache wordt niet gewist bij update post', 'explanation' => 'Bij content-update blijft oude cache staan; wijzigingen niet zichtbaar.', 'action' => 'WP Fastest Cache > Delete Cache > vink "Clear cache when a post is updated" aan.' ],
+        'cache_minify_html_disabled' => [ 'label' => 'Minify HTML uit', 'explanation' => 'HTML-output wordt niet gecomprimeerd; gemiste performance-winst.', 'action' => 'WP Fastest Cache > Settings > vink "Minify HTML" aan.' ],
+        'cache_minify_css_disabled' => [ 'label' => 'Minify CSS uit', 'explanation' => 'CSS wordt niet gecomprimeerd.', 'action' => 'WP Fastest Cache > Settings > vink "Minify CSS" aan.' ],
+        'cache_combine_css_disabled' => [ 'label' => 'Combine CSS uit', 'explanation' => 'Meerdere CSS-bestanden worden niet samengevoegd; meer HTTP-requests.', 'action' => 'WP Fastest Cache > Settings > vink "Combine CSS" aan.' ],
+        'cache_minify_js_enabled' => [ 'label' => 'Minify JS staat aan (moet uit)', 'explanation' => 'Minify JS breekt vaak reCAPTCHA en formulier-scripts; voor Aspera-sites bewust uit.', 'action' => 'WP Fastest Cache > Settings > Minify JS uitvinken.' ],
+        'cache_combine_js_enabled' => [ 'label' => 'Combine JS staat aan (moet uit)', 'explanation' => 'Combine JS breekt vaak reCAPTCHA en formulier-scripts; voor Aspera-sites bewust uit.', 'action' => 'WP Fastest Cache > Settings > Combine JS uitvinken.' ],
+        'cache_gzip_disabled' => [ 'label' => 'Gzip-compressie uit', 'explanation' => 'Server-output wordt niet gecomprimeerd; tragere transfer.', 'action' => 'WP Fastest Cache > Settings > vink "Gzip" aan.' ],
+        'cache_browser_caching_disabled' => [ 'label' => 'Browser caching uit', 'explanation' => 'Browsers krijgen geen cache-headers; statics moeten elke keer opnieuw geladen.', 'action' => 'WP Fastest Cache > Settings > vink "Leverage Browser Caching" aan.' ],
+        'cache_emojis_enabled' => [ 'label' => 'Emoji-script wordt geladen', 'explanation' => 'WP-emoji-fallback-script (~17KB) wordt op elke pagina geladen; nutteloos voor moderne browsers.', 'action' => 'WP Fastest Cache > Settings > vink "Disable Emojis" aan.' ],
+        'cache_mobile_theme_enabled' => [ 'label' => 'Aparte mobiele cache aan (moet uit)', 'explanation' => 'Aparte mobile cache is voor sites met aparte mobiele theme; niet van toepassing bij responsive design.', 'action' => 'WP Fastest Cache > Settings > "Mobile Theme" uitvinken.' ],
+        'cache_logged_in_user_enabled' => [ 'label' => 'Cache voor ingelogde users aan', 'explanation' => 'Cachen voor ingelogde users veroorzaakt cross-user-leaks (mini-cart, account-data, nonces) en is een privacy/security-risico, vooral bij WooCommerce.', 'action' => 'WP Fastest Cache > Settings > "Logged-in Users" uitvinken.' ],
+        'cache_timeout_missing' => [ 'label' => 'Geen cache-timeout ingesteld', 'explanation' => 'Zonder timeout-rule blijft cache oneindig staan; stale content op stille content-mutaties (widgets, menu).', 'action' => 'WP Fastest Cache > Delete Cache > Timeout Rules > voeg dagelijkse "all/all" rule toe op 00:00.' ],
+        'cache_timeout_not_daily' => [ 'label' => 'Cache-timeout niet dagelijks', 'explanation' => 'Standaard is 1× per dag (onceaday/86400). Vaker = onnodig veel preload-werk; zelden = stale content.', 'action' => 'WP Fastest Cache > Delete Cache > Timeout Rules > stel "Once a Day" in.' ],
+        'cache_timeout_scope_partial' => [ 'label' => 'Timeout-rule purge-scope onvolledig', 'explanation' => 'Timeout-rule wist niet alle cache; sommige content blijft stale.', 'action' => 'WP Fastest Cache > Delete Cache > Timeout Rules > zet prefix=all en content=all.' ],
+        'cache_language_not_english' => [ 'label' => 'Plugin-taal niet Engels', 'explanation' => 'Admin-interface van WP Fastest Cache is niet op Engels gezet; visueel inconsistent met overige Aspera-conventie.', 'action' => 'WP Fastest Cache > Languages > kies English (US) of English (UK).' ],
+        'cache_toolbar_admin_only_missing' => [ 'label' => 'Admin-toolbar niet beperkt tot beheerder', 'explanation' => 'Cache-toolbar is voor andere user-rollen zichtbaar; klanten zien admin-tooling.', 'action' => 'WP Fastest Cache > Toolbar > activeer "Admin only".' ],
+
+        // ── ACF slugs / cross-context ─────────────────────────────────────
+        'wrong_cpt_format' => [ 'label' => 'ACF-veldnaam mist CPT-prefix', 'explanation' => 'Een veld dat alleen op één CPT gebruikt wordt hoort de format "<cpt>_<context>_<num>" te volgen (bv. "casinovestiging_blok_1").', 'action' => 'Hernoem het veld in ACF zodat het start met de CPT-slug.' ],
+        'wrong_cpt_format_multi' => [ 'label' => 'ACF-veld in meerdere field groups (cross-context)', 'explanation' => 'Een veld komt in 2+ field groups voor over verschillende post types. Normaal bij hergebruik (bv. "afbeelding_block_1" op meerdere CPTs). Als observation gemeld omdat geen CPT-prefix nodig is.', 'action' => 'Bevestigen dat cross-context bewust is. Geen actie tenzij onbedoelde duplicatie.' ],
+        'wrong_page_format' => [ 'label' => 'ACF-veldnaam voor pagina mist juiste prefix', 'explanation' => 'Pagina-specifieke velden horen format "p_<context>_<num>" te volgen.', 'action' => 'Hernoem het veld in ACF.' ],
+        'wrong_page_format_multi' => [ 'label' => 'ACF-veld op meerdere pages (cross-context)', 'explanation' => 'Een veld wordt op meerdere pages gebruikt; geen p_-prefix vereist.', 'action' => 'Bevestigen dat cross-page-gebruik bewust is.' ],
+        'wrong_opt_format' => [ 'label' => 'ACF option page veldnaam mist opt_-prefix', 'explanation' => 'Velden op een ACF option page horen "opt_<naam>" te zijn.', 'action' => 'Hernoem het veld in ACF.' ],
+        'missing_number' => [ 'label' => 'ACF-veldnaam mist volgnummer', 'explanation' => 'Veldnaam eindigt niet op "_<nummer>" — Aspera-conventie vereist volgnummer voor sortering en uniciteit.', 'action' => 'Hernoem het veld met _1, _2 etc. aan het einde.' ],
+        'missing_name' => [ 'label' => 'ACF-veld zonder naam', 'explanation' => 'Field heeft geen naam-attribuut.', 'action' => 'Open de field group in ACF en geef het veld een naam.' ],
+        'wrong_group_name_prefix' => [ 'label' => 'ACF field group naam zonder juiste prefix', 'explanation' => 'Field group naam volgt niet de Aspera prefix-conventie (CPT/Page/Opt).', 'action' => 'Hernoem de field group in ACF.' ],
+        'broken_conditional_reference' => [ 'label' => 'ACF conditional logic verwijst naar niet-bestaand veld', 'explanation' => 'Een veld heeft conditional-logic die wijst naar een veld dat niet (meer) bestaat.', 'action' => 'Open de field group, los de conditional logic op (verwijder of pas aan).' ],
+        'mixed_choice_key_types' => [ 'label' => 'ACF select-veld met gemixte key-types', 'explanation' => 'Choices in een select hebben deels numerieke deels string-keys; lastig te queryen.', 'action' => 'Standaardiseer choice-keys (alle string of alle numeriek).' ],
+        'wysiwyg_media_upload_enabled' => [ 'label' => 'ACF wysiwyg met media-upload aan', 'explanation' => 'Een wysiwyg-veld laat media-upload toe; klanten kunnen ongecontroleerd images plaatsen.', 'action' => 'ACF veld > Toolbar > zet "Media Upload" uit.' ],
+
+        // ── Orphaned ─────────────────────────────────────────────────────
+        'orphaned_meta' => [ 'label' => 'Verweesde post-meta', 'explanation' => 'Een meta_key wordt nergens meer in field groups, templates of code gerefereerd; alleen historische data in postmeta.', 'action' => 'Beoordeel of de meta verwijderd kan; gebruik fix-button om alle rijen te verwijderen.' ],
+        'orphaned_meta_in_templates' => [ 'label' => 'Verweesde meta in templates', 'explanation' => 'Een meta_key komt nog voor in WPBakery-templates ondanks dat de field group hem niet meer kent.', 'action' => 'Verwijder de referentie uit de template eerst, dan meta opruimen.' ],
+        'orphaned_table' => [ 'label' => 'Verweesde database-tabel', 'explanation' => 'Een tabel hoort bij een plugin/feature die niet meer actief is.', 'action' => 'Bevestig dat de tabel niet meer nodig is en drop hem.' ],
+        'unknown_table' => [ 'label' => 'Onbekende database-tabel', 'explanation' => 'Een tabel is niet herkend uit de Aspera-whitelist; mogelijk onbekende plugin of legacy.', 'action' => 'Onderzoek herkomst en classificeer (governed/orphaned).' ],
+        'orphaned_post_type' => [ 'label' => 'Verweesde posts van inactief post-type', 'explanation' => 'Posts in een post-type dat niet meer geregistreerd is.', 'action' => 'Onderzoek herkomst; verwijderen of post-type herregistreren.' ],
+        'orphaned_plugin_options' => [ 'label' => 'Options van inactieve plugin', 'explanation' => 'wp_options-rijen van een plugin die niet meer actief is.', 'action' => 'Beoordeel of options nog nodig (deactivatie tijdelijk?) en verwijder anders.' ],
+        'orphaned_plugin_meta' => [ 'label' => 'Postmeta van inactieve plugin', 'explanation' => 'Postmeta-rijen van een plugin die niet meer actief is.', 'action' => 'Beoordeel en verwijder.' ],
+        'orphaned_taxonomy' => [ 'label' => 'Verweesde taxonomy', 'explanation' => 'Een taxonomy is niet meer geregistreerd maar terms en relaties bestaan nog.', 'action' => 'Verwijder ongebruikte terms of herregistreer de taxonomy.' ],
+        'orphaned_taxonomy_has_dependencies' => [ 'label' => 'Verweesde taxonomy met dependencies', 'explanation' => 'Taxonomy is verdwenen maar er zijn nog posts/term-relations gekoppeld; opruimen vereist eerst dependency-resolutie.', 'action' => 'Identificeer afhankelijke posts; verwijder relaties voor je de taxonomy laat staan.' ],
+        'orphaned_option' => [ 'label' => 'Verweesde wp_option', 'explanation' => 'Een wp_options-key matcht geen actieve plugin/theme.', 'action' => 'Beoordeel en verwijder indien legacy.' ],
+        'orphaned_location_taxonomy' => [ 'label' => 'ACF location-rule wijst naar inactieve taxonomy', 'explanation' => 'Een field group heeft een location-rule die verwijst naar een taxonomy die niet bestaat.', 'action' => 'Verwijder de location-rule of herregistreer de taxonomy.' ],
+        'orphaned_location_term' => [ 'label' => 'ACF location-rule wijst naar verwijderde term', 'explanation' => 'Location-rule wijst naar een specifieke term die niet meer bestaat.', 'action' => 'Pas de location-rule aan.' ],
+        'empty_location_term' => [ 'label' => 'ACF location-rule wijst naar lege term', 'explanation' => 'Location-rule verwijst naar een term zonder posts.', 'action' => 'Bevestig of dit de bedoeling is; eventueel verwijderen.' ],
+        'orphaned_wpforms_scheduled_actions' => [ 'label' => 'WPForms scheduled actions terwijl plugin inactief', 'explanation' => 'In de actionscheduler-tabellen staan WPForms-hooks terwijl WPForms niet (meer) actief is. Deze blijven failen en groeien onbeperkt.', 'action' => 'Gebruik de fix-button om alle WPForms scheduled actions en logs op te ruimen.' ],
+
+        // ── Hardcoded content ─────────────────────────────────────────────
+        'hardcoded_label' => [ 'label' => 'Hardcoded button-label in shortcode', 'explanation' => 'Een button heeft een vaste tekst i.p.v. via ACF-veld; niet vertaalbaar of beheerbaar via dashboard.', 'action' => 'Vervang door us_post_custom_field shortcode met ACF-koppeling.' ],
+        'hardcoded_image' => [ 'label' => 'Hardcoded afbeelding (us_image)', 'explanation' => 'Image-shortcode heeft vaste image_id in plaats van ACF.', 'action' => 'Vervang door ACF-gekoppelde image, of zet via us_image image="{{acf_field}}".' ],
+        'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
+        'hardcoded_text' => [ 'label' => 'Hardcoded tekst in shortcode', 'explanation' => 'Tekst is vast in shortcode i.p.v. via ACF.', 'action' => 'Vervang door ACF-veld referentie.' ],
+        'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
+        'hardcoded_bg_video' => [ 'label' => 'Hardcoded achtergrond-video', 'explanation' => 'Row heeft vaste video-URL i.p.v. ACF.', 'action' => 'Vervang door ACF-veld of verwijder de video.' ],
+        'hardcoded_button_text' => [ 'label' => 'Hardcoded button-tekst in formulier', 'explanation' => 'Submit-button-tekst is vast i.p.v. via opt_forms option.', 'action' => 'Verplaats naar option page (opt_forms) en refereer dynamisch.' ],
+        'hardcoded_receiver_email' => [ 'label' => 'Hardcoded e-mailadres in formulier', 'explanation' => 'Receiver e-mail is vast in shortcode; niet centraal beheerbaar.', 'action' => 'Verplaats naar opt_forms option page.' ],
+        'hardcoded_success_message' => [ 'label' => 'Hardcoded success-message in formulier', 'explanation' => 'Bevestigingstekst is vast in shortcode.', 'action' => 'Verplaats naar opt_forms option.' ],
+        'hardcoded_hex_color' => [ 'label' => 'Hardcoded hex-kleur', 'explanation' => 'Een vaste kleurcode (#bd0000 etc.) i.p.v. theme-variabele. Niet centraal aanpasbaar.', 'action' => 'Vervang door theme color var (bv. _content_primary).' ],
+
+        // ── Forms / reCAPTCHA / Cookies ───────────────────────────────────
+        'missing_recaptcha' => [ 'label' => 'Formulier zonder reCAPTCHA', 'explanation' => 'Het formulier heeft geen reCAPTCHA-veld; spam-risico.', 'action' => 'Voeg een reCAPTCHA-veld toe in de us_cform shortcode.' ],
+        'missing_receiver_email' => [ 'label' => 'Formulier zonder ontvanger-e-mailadres', 'explanation' => 'Geen receiver_email gedefinieerd; submissions gaan nergens heen.', 'action' => 'Voeg receiver_email toe via opt_forms.' ],
+        'missing_email_field' => [ 'label' => 'Formulier zonder e-mail-veld', 'explanation' => 'Geen email-input; de gebruiker kan niet teruggebeld worden.', 'action' => 'Voeg een email-veld toe.' ],
+        'missing_button_text' => [ 'label' => 'Formulier zonder button-tekst', 'explanation' => 'Submit-button heeft geen tekst.', 'action' => 'Voeg button-tekst toe via opt_forms.' ],
+        'missing_email_subject' => [ 'label' => 'Formulier zonder e-mail-onderwerp', 'explanation' => 'Notificatie-mail heeft geen subject.', 'action' => 'Voeg email_subject toe.' ],
+        'missing_email_message' => [ 'label' => 'Formulier zonder e-mail-bericht-template', 'explanation' => 'Geen email_message gedefinieerd.', 'action' => 'Voeg email_message toe.' ],
+        'missing_field_list' => [ 'label' => 'Formulier zonder field_list', 'explanation' => 'field_list ontbreekt; mail-output toont niet welke velden ingevuld zijn.', 'action' => 'Voeg field_list toe in shortcode.' ],
+        'missing_success_message' => [ 'label' => 'Formulier zonder success-message', 'explanation' => 'Geen bevestigingstekst na submit.', 'action' => 'Voeg success_message toe via opt_forms.' ],
+        'cform_inbound_disabled' => [ 'label' => 'us_cform inbound-mailbox uit', 'explanation' => 'Inbound-mail-opslag uit; submissions worden niet bewaard, alleen gemaild.', 'action' => 'us_cform shortcode > zet inbound="true".' ],
+        'wpforms_deprecated' => [ 'label' => 'Deprecated WPForms shortcode', 'explanation' => '[wpforms]-shortcode wordt niet meer gebruikt; vervang door us_cform.', 'action' => 'Migreer naar us_cform met dezelfde velden.' ],
+
+        // ── WPBakery / Modules / Widgets ──────────────────────────────────
+        'wpb_module_active' => [ 'label' => 'WPBakery module actief', 'explanation' => 'Een WPBakery Module Manager module is aan; alle modules horen uit op Aspera-sites.', 'action' => 'WPBakery > Role Manager > Module Manager > schakel alle modules uit.' ],
+        'wpb_post_custom_css' => [ 'label' => 'WPBakery Custom CSS op post', 'explanation' => 'Per-post Custom CSS is gedefinieerd; CSS hoort centraal in theme/Custom Code.', 'action' => 'Verplaats CSS naar theme of Impreza Custom CSS.' ],
+        'wpb_post_custom_js' => [ 'label' => 'WPBakery Custom JS op post', 'explanation' => 'Per-post Custom JS gedefinieerd; JS hoort centraal.', 'action' => 'Verplaats JS naar theme of header/footer template.' ],
+        'wpb_saved_templates' => [ 'label' => 'Opgeslagen WPBakery templates aanwezig', 'explanation' => 'Templates in WPBakery template library; meestal niet meer nodig.', 'action' => 'WPBakery > My Templates > opruimen.' ],
+        'beheerder_post_types_not_disabled' => [ 'label' => 'Beheerder-rol heeft post types niet disabled', 'explanation' => 'Voor WPBakery Role Manager moet de "beheerder"-rol post types op disabled hebben (vc_access_rules_post_types=false).', 'action' => 'WPBakery > Role Manager > Beheerder > Post Types > zet op "None".' ],
+        'default_sidebar_not_empty' => [ 'label' => 'Default sidebar bevat widgets', 'explanation' => 'WordPress default sidebar heeft widgets; widgets horen niet gebruikt te worden.', 'action' => 'Appearance > Widgets > leeg de default sidebar.' ],
+        'extra_widget_area' => [ 'label' => 'Extra widget area gedefinieerd', 'explanation' => 'Een extra (Impreza) widget area is gedefinieerd; widgets niet toegestaan.', 'action' => 'Verwijder de extra widget area.' ],
+        'active_widget_text' => [ 'label' => 'Actieve text-widget', 'explanation' => 'Tekstwidget in een sidebar.', 'action' => 'Verwijder of migreer inhoud naar opt_widgets.' ],
+        'active_widget_nav_menu' => [ 'label' => 'Actieve nav-menu-widget', 'explanation' => 'Menu-widget in sidebar.', 'action' => 'Verwijder; navigatie hoort in header/footer-template.' ],
+        'active_widget_other' => [ 'label' => 'Andere actieve widget', 'explanation' => 'Niet-text/menu widget actief.', 'action' => 'Verwijder.' ],
+        'widgetised_sidebar_in_template' => [ 'label' => 'Sidebar-shortcode in template', 'explanation' => 'us_sidebar shortcode in een WPBakery-template; widgets horen niet gebruikt.', 'action' => 'Verwijder us_sidebar shortcode.' ],
+
+        // ── Theme / Header / Permalinks / Settings ────────────────────────
+        'wrong_active_theme' => [ 'label' => 'Verkeerd actief thema', 'explanation' => 'Actief thema is niet Aspera (Child); alleen Aspera mag actief zijn.', 'action' => 'Appearance > Themes > activeer Aspera Child.' ],
+        'impreza_license_inactive' => [ 'label' => 'Impreza licentie niet geactiveerd', 'explanation' => 'us_license_activated option staat niet op 1; theme-updates en addons werken niet.', 'action' => 'Impreza > Licentie activeren met purchase-code.' ],
+        'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera/Impreza-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
+        'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Impreza theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Impreza > Theme Options > reCAPTCHA > vul site_key in.' ],
+        'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Impreza theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Impreza > Theme Options > reCAPTCHA > vul secret_key in.' ],
+        'permalink_structure_invalid' => [ 'label' => 'Permalink-structuur niet conform', 'explanation' => 'Permalink-structure is iets anders dan /%postname%/ of /%category%/%postname%/.', 'action' => 'Settings > Permalinks > kies "Post name".' ],
+        'posts_per_page_invalid' => [ 'label' => 'Posts per pagina afwijkend', 'explanation' => 'Settings > Reading > Blog pages show at most ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
+        'posts_per_rss_invalid' => [ 'label' => 'Syndication feed-aantal afwijkend', 'explanation' => 'Syndication feeds show ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
+        'homepage_on_latest_posts' => [ 'label' => 'Homepage staat op latest posts', 'explanation' => 'Voorpagina toont laatste posts in plaats van static page.', 'action' => 'Settings > Reading > kies "A static page".' ],
+        'homepage_missing' => [ 'label' => 'Static homepage ontbreekt of unpublished', 'explanation' => 'Voorpagina is op static page gezet maar de pagina bestaat niet of is niet gepubliceerd.', 'action' => 'Settings > Reading > selecteer een gepubliceerde page als front page.' ],
+        'homepage_unexpected_title' => [ 'label' => 'Homepage-pagina-titel ongebruikelijk', 'explanation' => 'Static homepage heet niet "Home" of "Homepage".', 'action' => 'Hernoem of bevestig dat afwijkende titel bewust is.' ],
+        'date_format_invalid' => [ 'label' => 'Datum-format afwijkend', 'explanation' => 'Settings > General > Date Format ≠ "j F Y".', 'action' => 'Settings > General > Custom > j F Y.' ],
+        'timezone_invalid' => [ 'label' => 'Tijdzone afwijkend', 'explanation' => 'Site-tijdzone ≠ Europe/Amsterdam.', 'action' => 'Settings > General > Timezone > Amsterdam.' ],
+        'site_language_invalid' => [ 'label' => 'Site-taal afwijkend', 'explanation' => 'get_locale() niet in [nl_NL, en_US, en_GB].', 'action' => 'Settings > General > Site Language > Nederlands of English.' ],
+        'start_of_week_invalid' => [ 'label' => 'Eerste dag van de week niet maandag', 'explanation' => 'start_of_week ≠ 1 (maandag).', 'action' => 'Settings > General > Week Starts On > Monday.' ],
+        'default_role_invalid' => [ 'label' => 'Default user-rol niet subscriber', 'explanation' => 'New User Default Role ≠ subscriber.', 'action' => 'Settings > General > New User Default Role > Subscriber.' ],
+        'users_can_register_enabled' => [ 'label' => 'Membership-registratie aan', 'explanation' => 'Anyone can register staat aan; ongewenste user-creatie mogelijk.', 'action' => 'Settings > General > Membership > vink uit.' ],
+        'admin_email_invalid' => [ 'label' => 'Admin-email afwijkend', 'explanation' => 'admin_email ≠ wp@asperagrafica.nl.', 'action' => 'Settings > General > Administration Email Address > wp@asperagrafica.nl.' ],
+        'php_version_critical' => [ 'label' => 'PHP-versie kritiek verouderd', 'explanation' => 'PHP < 8.0; security-risico en compatibiliteitsproblemen.', 'action' => 'Hosting > PHP-versie naar 8.4.' ],
+        'php_version_outdated' => [ 'label' => 'PHP-versie verouderd', 'explanation' => 'PHP < 8.4 (aanbevolen).', 'action' => 'Hosting > PHP-versie naar 8.4.' ],
+        'php_memory_limit_low' => [ 'label' => 'PHP memory limit te laag', 'explanation' => 'memory_limit < 128M; complexe pagina\'s kunnen crashen.', 'action' => 'Hosting > verhoog memory_limit naar 256M.' ],
+        'search_engine_noindex' => [ 'label' => 'Site geblokkeerd voor zoekmachines', 'explanation' => 'blog_public=0; site indexeert niet.', 'action' => 'Settings > Reading > "Discourage search engines" uitvinken.' ],
+        'missing_favicon' => [ 'label' => 'Favicon ontbreekt', 'explanation' => 'Site Icon is niet ingesteld.', 'action' => 'Settings > General > Site Icon > upload.' ],
+
+        // ── Header / Breakpoints ──────────────────────────────────────────
+        'breakpoint_mobile_group_mismatch' => [ 'label' => 'Mobile-groep breakpoints onjuist', 'explanation' => 'Theme- en grid-mobile breakpoints kloppen niet met elkaar.', 'action' => 'Impreza > Theme Options > breakpoints harmoniseren.' ],
+        'breakpoint_order_invalid' => [ 'label' => 'Breakpoints in verkeerde volgorde', 'explanation' => 'Mobile > tablet > laptop volgorde klopt niet.', 'action' => 'Pas breakpoint-waarden aan.' ],
+        'breakpoint_exceeds_content_width' => [ 'label' => 'Breakpoint groter dan content-width', 'explanation' => 'Een breakpoint is groter dan de site-content-width; layout-bug.', 'action' => 'Verlaag breakpoint of verhoog content-width.' ],
+        'laptops_breakpoint_mismatch' => [ 'label' => 'Laptops-breakpoint inconsistent', 'explanation' => 'Laptops-breakpoint matcht niet de theme-conventie.', 'action' => 'Theme Options > stel laptops_breakpoint in op 1400px.' ],
+        'orientation_vertical_forbidden' => [ 'label' => 'Header in vertical orientation', 'explanation' => 'Header staat op vertical; alleen horizontal toegestaan.', 'action' => 'Header builder > orientation > Horizontal.' ],
+
+        // ── Naming ────────────────────────────────────────────────────────
+        'wrong_template_prefix' => [ 'label' => 'us_content_template naam zonder juiste prefix', 'explanation' => 'Template heet niet "Page - X", "CPT - X" of "TAX - X".', 'action' => 'Hernoem template volgens conventie.' ],
+        'wrong_block_prefix' => [ 'label' => 'us_page_block naam zonder juiste prefix', 'explanation' => 'Page-block volgt niet "Block - X" conventie.', 'action' => 'Hernoem het page-block.' ],
+        'deprecated_page_block_term' => [ 'label' => 'Deprecated page_block-term', 'explanation' => 'Een term gebruikt verouderde naamgeving.', 'action' => 'Hernoem term.' ],
+
+        // ── Options config ────────────────────────────────────────────────
+        'wrong_option_slug' => [ 'label' => 'ACF option page slug ongebruikelijk', 'explanation' => 'Slug volgt niet de opt_-conventie.', 'action' => 'Pas option page slug aan.' ],
+        'wrong_option_position' => [ 'label' => 'ACF option page positie afwijkend', 'explanation' => 'Menu-positie van option page is ongebruikelijk.', 'action' => 'Pas position-attribuut aan.' ],
+        'wrong_option_icon' => [ 'label' => 'ACF option page icon afwijkend', 'explanation' => 'Dashicon ongebruikelijk voor de inhoud.', 'action' => 'Kies passende dashicon.' ],
+
+        // ── Colors ────────────────────────────────────────────────────────
+        'deprecated_hex_var' => [ 'label' => 'Deprecated hex-kleurvar', 'explanation' => 'Een verouderde hex-variabele in shortcode (bv. oude Aspera-rood).', 'action' => 'Vervang door huidige theme color var.' ],
+        'deprecated_custom_var' => [ 'label' => 'Deprecated custom-kleurvar', 'explanation' => 'Verouderde custom kleur-naam.', 'action' => 'Migreer naar huidige naming.' ],
+        'deprecated_theme_var' => [ 'label' => 'Deprecated theme-kleurvar', 'explanation' => 'Theme color var is verouderd.', 'action' => 'Vervang door huidige.' ],
+        'unknown_theme_var' => [ 'label' => 'Onbekende theme-kleurvar', 'explanation' => 'Verwijst naar theme color var die niet meer bestaat.', 'action' => 'Pas naar bestaande var aan.' ],
+        'rgba_color' => [ 'label' => 'Rgba-kleur', 'explanation' => 'rgba(...) gebruikt; werkt maar minder consistent dan theme var met opacity.', 'action' => 'Optioneel: vervang door theme var.' ],
+
+        // ── Plugins ───────────────────────────────────────────────────────
+        'extra_plugin' => [ 'label' => 'Extra plugin actief', 'explanation' => 'Plugin niet in Aspera-whitelist; bewust of legacy?', 'action' => 'Beoordeel of plugin nodig is, anders deactiveren/verwijderen.' ],
+
+        // ── CPT ───────────────────────────────────────────────────────────
+        'missing_rest' => [ 'label' => 'CPT zonder REST-API support', 'explanation' => 'show_in_rest=false; CPT niet via REST/Gutenberg/MCP toegankelijk.', 'action' => 'CPT-registratie > zet show_in_rest op true.' ],
+        'default_icon' => [ 'label' => 'CPT met default dashicon', 'explanation' => 'Geen specifieke dashicon gekozen; default pin gebruikt.', 'action' => 'Kies passende dashicon.' ],
+        'duplicate_icon' => [ 'label' => 'CPT-dashicon dupliceert andere CPT', 'explanation' => 'Twee CPTs delen dezelfde dashicon; verwarrend in admin-menu.', 'action' => 'Kies unieke dashicon per CPT.' ],
+        'empty_labels' => [ 'label' => 'CPT zonder labels', 'explanation' => 'Labels-array is leeg of incomplete.', 'action' => 'Vul labels (singular_name, menu_name, etc.).' ],
+        'unexpected_supports' => [ 'label' => 'CPT met ongebruikelijke supports-array', 'explanation' => 'Supports bevat onverwachte features.', 'action' => 'Beoordeel en pas supports aan.' ],
+        'missing_title_support' => [ 'label' => 'CPT zonder title-support', 'explanation' => 'CPT heeft geen "title" in supports; admin-edit broken.', 'action' => 'Voeg "title" toe.' ],
+        'nav_menus_no_frontend' => [ 'label' => 'CPT zonder publicly_queryable', 'explanation' => 'CPT laat zich niet via menu naar frontend linken.', 'action' => 'Beoordeel; activeer publicly_queryable indien nodig.' ],
+        'cptui_leftover' => [ 'label' => 'CPTUI-data nog aanwezig', 'explanation' => 'cptui_post_types option bestaat terwijl ACF leidend is.', 'action' => 'Verwijder CPTUI-data of migreer.' ],
+
+        // ── Nav ──────────────────────────────────────────────────────────
+        'unused_nav_menu' => [ 'label' => 'Ongebruikt navigatiemenu', 'explanation' => 'Menu bestaat maar is nergens aan een location toegewezen.', 'action' => 'Verwijder of wijs toe aan location.' ],
+        'broken_menu_reference' => [ 'label' => 'Menu-item verwijst naar niet-bestaande post', 'explanation' => 'Menu-item linkt naar post die niet meer bestaat.', 'action' => 'Pas menu-item aan of verwijder.' ],
+        'invalid_menu_name' => [ 'label' => 'Menu-naam volgt niet conventie', 'explanation' => 'Naam van het menu is niet "Header - X" of vergelijkbaar.', 'action' => 'Hernoem het menu.' ],
+        'mismatched_menu_placement' => [ 'label' => 'Menu in afwijkende plaatsing', 'explanation' => 'Menu hangt op een ander theme-location dan z\'n naam suggereert.', 'action' => 'Verschuif menu naar correcte location.' ],
+        'external_link_no_target_blank' => [ 'label' => 'Externe link zonder target=_blank', 'explanation' => 'Custom link in menu wijst naar externe URL maar opent in zelfde tab.', 'action' => 'Menu-item > zet "Open in new tab" aan.' ],
+        'page_not_in_menu' => [ 'label' => 'Pagina niet in enig menu', 'explanation' => 'Een gepubliceerde page is in geen enkel menu opgenomen.', 'action' => 'Beoordeel of bewust (landingspagina) of toevoegen.' ],
+        'custom_menu_label' => [ 'label' => 'Custom label in menu-item', 'explanation' => 'Menu-item heeft override-label dat afwijkt van post-titel.', 'action' => 'Bevestig of bewust; eventueel post-titel aanpassen.' ],
+
+        // ── CSS ───────────────────────────────────────────────────────────
+        'unused_css_class' => [ 'label' => 'Ongebruikte CSS-class', 'explanation' => 'Class in custom CSS wordt nergens in templates/posts gebruikt.', 'action' => 'Verwijder of beoordeel.' ],
+        'wrong_css_prefix' => [ 'label' => 'CSS-class zonder ag_-prefix', 'explanation' => 'Custom class volgt niet ag_-conventie.', 'action' => 'Hernoem class met ag_-prefix.' ],
+        'css_forbidden' => [ 'label' => 'CSS-attribuut in shortcode', 'explanation' => 'Shortcode heeft inline css= attribuut; CSS hoort centraal.', 'action' => 'Verplaats naar CSS-bestand.' ],
+        'empty_style_attr' => [ 'label' => 'Lege style-attribuut', 'explanation' => 'Shortcode heeft style="" leeg.', 'action' => 'Verwijder lege attribuut.' ],
+
+        // ── WPBakery shortcode-conventies ─────────────────────────────────
+        'missing_color_link' => [ 'label' => 'Shortcode zonder color_link', 'explanation' => 'Element mist verplichte color_link parameter voor link-state.', 'action' => 'Voeg color_link toe.' ],
+        'missing_hide_empty' => [ 'label' => 'Veld zonder hide_empty', 'explanation' => 'us_post_custom_field zonder hide_empty="true"; toont placeholder bij leeg.', 'action' => 'Voeg hide_empty="true" toe.' ],
+        'missing_hide_with_empty_link' => [ 'label' => 'Element zonder hide_with_empty_link', 'explanation' => 'Element verbergt zich niet bij leeg ACF link-veld.', 'action' => 'Voeg attribuut toe.' ],
+        'missing_acf_link' => [ 'label' => 'Element zonder acf_link', 'explanation' => 'Verplichte acf_link parameter ontbreekt.', 'action' => 'Voeg acf_link toe.' ],
+        'wrong_link_field_prefix' => [ 'label' => 'Link-veld zonder juiste prefix', 'explanation' => 'Link-veldnaam volgt niet de conventie.', 'action' => 'Hernoem link-veld.' ],
+        'missing_el_class' => [ 'label' => 'Shortcode zonder el_class', 'explanation' => 'Geen el_class voor styling/scoping.', 'action' => 'Voeg el_class toe.' ],
+        'missing_remove_rows' => [ 'label' => 'Shortcode zonder remove_rows', 'explanation' => 'Element mist remove_rows attribuut voor lege rij-handling.', 'action' => 'Voeg remove_rows toe.' ],
+        'parent_row_with_siblings' => [ 'label' => 'Parent row met siblings', 'explanation' => 'Een vc_row met remove_rows heeft siblings; structuur klopt niet.', 'action' => 'Restructureer parent/child.' ],
+        'empty_btn_style' => [ 'label' => 'Button zonder stijl', 'explanation' => 'us_btn zonder style-attribuut.', 'action' => 'Voeg style-keuze toe.' ],
+        'empty_button_style' => [ 'label' => 'Form-button zonder stijl', 'explanation' => 'Submit-button zonder stijl.', 'action' => 'Definieer stijl in opt_forms.' ],
+        'scroll_effect_forbidden' => [ 'label' => 'Scroll-effect attribuut gebruikt', 'explanation' => 'Element heeft scroll_effect; voor performance UIT.', 'action' => 'Verwijder scroll_effect attribuut.' ],
+        'vc_video_wrong_attribute' => [ 'label' => 'vc_video met verkeerd attribuut', 'explanation' => 'Video gebruikt afgeschafte attribuut-naam.', 'action' => 'Pas naar huidige naming.' ],
+        'missing_columns_reverse' => [ 'label' => 'Row mist columns_reverse', 'explanation' => 'Two-column row mist columns_reverse voor mobile-stacking.', 'action' => 'Voeg columns_reverse toe.' ],
+        'unexpected_columns_reverse' => [ 'label' => 'Onverwachte columns_reverse', 'explanation' => 'columns_reverse op single-column row; betekenisloos.', 'action' => 'Verwijder attribuut.' ],
+        'animate_detected' => [ 'label' => 'Animate-attribuut gedetecteerd', 'explanation' => 'Element heeft animate-eigenschap; meestal performance-impact.', 'action' => 'Beoordeel of nodig; eventueel verwijderen.' ],
+        'responsive_hide_detected' => [ 'label' => 'Responsive-hide attribuut', 'explanation' => 'Element heeft responsive_hide_at_*; layout-keuze om expliciet te zijn.', 'action' => 'Bevestigen of bewust.' ],
+
+        // ── Grid (us_header / us_grid_layout) ─────────────────────────────
+        'image_lazy_loading_enabled' => [ 'label' => 'Header-image met lazy-loading', 'explanation' => 'Hero/header-image heeft lazy=true; eerste paint vertraagd.', 'action' => 'Zet lazy=false op header-image.' ],
+        'image_missing_homepage_link' => [ 'label' => 'Header-image zonder homepage-link', 'explanation' => 'Logo-image klikt niet naar home.', 'action' => 'Voeg homepage-link toe.' ],
+        'image_has_ratio' => [ 'label' => 'Header-image met ratio-attribuut', 'explanation' => 'Image-ratio is gezet; overschrijft natural ratio.', 'action' => 'Verwijder ratio.' ],
+        'image_has_style' => [ 'label' => 'Header-image met style-attribuut', 'explanation' => 'Image heeft inline style.', 'action' => 'Verwijder.' ],
+        'image_wrong_size' => [ 'label' => 'Header-image verkeerde grootte', 'explanation' => 'Image-size attribuut afwijkend van conventie.', 'action' => 'Pas size-attribuut aan.' ],
+
+        // ── Header config ─────────────────────────────────────────────────
+        'custom_breakpoint_invalid_order' => [ 'label' => 'Custom breakpoint volgorde ongeldig', 'explanation' => 'Header custom-breakpoint logischerwijs niet in volgorde.', 'action' => 'Header builder > breakpoints > pas volgorde aan.' ],
+        'custom_breakpoint_exceeds_content_width' => [ 'label' => 'Custom breakpoint groter dan content-width', 'explanation' => 'Custom breakpoint > site-content-width.', 'action' => 'Verlaag breakpoint.' ],
+        'custom_breakpoint_active' => [ 'label' => 'Custom breakpoint actief', 'explanation' => 'Header gebruikt custom breakpoint i.p.v. defaults.', 'action' => 'Bevestigen of bewust.' ],
+        'menu_mobile_always' => [ 'label' => 'Mobile menu altijd zichtbaar', 'explanation' => 'menu-element toont mobile-versie op alle breakpoints.', 'action' => 'Bevestigen.' ],
+        'menu_mobile_exceeds_content_width' => [ 'label' => 'Mobile menu boven content-width', 'explanation' => 'Mobile-menu actief boven site-content-width.', 'action' => 'Pas breakpoint aan.' ],
+        'menu_mobile_exceeds_breakpoints' => [ 'label' => 'Mobile menu boven theme-breakpoints', 'explanation' => 'Mobile-menu trigger boven theme tablet-breakpoint.', 'action' => 'Harmoniseer.' ],
+        'menu_mobile_behavior_not_label_and_arrow' => [ 'label' => 'Mobile menu-behavior afwijkend', 'explanation' => 'Behavior is niet "label and arrow".', 'action' => 'Header builder > Mobile menu > behavior > Label and arrow.' ],
+        'menu_mobile_icon_size_too_large' => [ 'label' => 'Mobile-menu-icon te groot', 'explanation' => 'Icon-size te groot voor het ontwerp.', 'action' => 'Verklein icon-size.' ],
+        'menu_mobile_icon_size_inconsistent' => [ 'label' => 'Mobile-menu-icon-sizes inconsistent', 'explanation' => 'Icon-sizes verschillen tussen breakpoints.', 'action' => 'Synchroniseer.' ],
+        'menu_align_edges_mismatch' => [ 'label' => 'Menu-uitlijning rand-mismatch', 'explanation' => 'Menu-edges-align niet conform.', 'action' => 'Header builder > pas align aan.' ],
+        'centering_missing' => [ 'label' => 'Element-centrering ontbreekt', 'explanation' => 'Verwacht centrering-instelling ontbreekt.', 'action' => 'Voeg toe in header builder.' ],
+        'centering_unexpected' => [ 'label' => 'Element-centrering onverwacht', 'explanation' => 'Centrering staat aan op element waar het niet hoort.', 'action' => 'Verwijder.' ],
+        'header_element_unused' => [ 'label' => 'Ongebruikt header-element', 'explanation' => 'Element bestaat maar wordt op geen breakpoint getoond.', 'action' => 'Verwijder.' ],
+        'scroll_breakpoint_inconsistent' => [ 'label' => 'Scroll-breakpoint inconsistent', 'explanation' => 'Scroll-breakpoint waarden inconsistent over header.', 'action' => 'Synchroniseer.' ],
+
+        // ── Forms (overig) ────────────────────────────────────────────────
+        'wrong_email_field_type' => [ 'label' => 'Email-veld verkeerd type', 'explanation' => 'Veld heeft type "text" i.p.v. "email".', 'action' => 'Pas veld-type aan.' ],
+        'empty_option_field' => [ 'label' => 'Lege opt_-option-field', 'explanation' => 'Een opt_forms-veld is leeg.', 'action' => 'Vul option page in.' ],
+        'missing_move_label' => [ 'label' => 'Form-veld zonder move-label', 'explanation' => 'Float-label-pattern ontbreekt.', 'action' => 'Voeg move_label="true" toe.' ],
+
+        // ── Misc ─────────────────────────────────────────────────────────
+        'wrong_option_syntax' => [ 'label' => 'Verkeerde opt_-syntax in shortcode', 'explanation' => 'opt_-veld wordt niet correct gerefereerd.', 'action' => 'Pas opt_field-syntax aan.' ],
+        'breakpoint_convention_deviation' => [ 'label' => 'Breakpoint wijkt van conventie af', 'explanation' => 'Niet-standaard breakpoint-waarde.', 'action' => 'Bevestigen of harmoniseren.' ],
+    ];
+    return $ctx;
+}
+
 function aspera_dashboard_widget_render(): void {
     $score    = get_option( 'aspera_audit_score',    null );
     $date_raw = get_option( 'aspera_audit_date',     null );
@@ -1526,7 +1757,7 @@ function aspera_dashboard_widget_render(): void {
         'critical'    => '#d63638',
         'error'       => '#d63638',
         'warning'     => '#dba617',
-        'observation' => '#2271b1',
+        'observation' => '#5856d6',
     ];
 
     $nonce = wp_create_nonce( 'aspera_refresh_nonce' );
@@ -1569,13 +1800,29 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page.is-filtering-warning     .aspera-viol-row.aspera-sev-warning     { display: flex !important; }
         #aspera-audit-page.is-filtering-observation .aspera-viol-row.aspera-sev-observation { display: flex !important; }
         #aspera-audit-page.is-filtering .aspera-cat-details.aspera-cat-empty { display: none; }
-        #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
-        #aspera-audit-page .aspera-fix-btn:hover { background:#135e96; }
-        #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 10px; }
-        #aspera-audit-page .aspera-bulk-fix-btn:hover { background:#135e96; }
+        #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#00a32a; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; font-weight:600; }
+        #aspera-audit-page .aspera-fix-btn:hover { background:#00831f; }
+        #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#00a32a; color:#fff; border:none; border-radius:3px; padding:2px 10px; font-weight:600; }
+        #aspera-audit-page .aspera-bulk-fix-btn:hover { background:#00831f; }
         #aspera-audit-toolbar { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; padding:8px 0 12px; border-bottom:1px solid #dcdcde; margin-bottom:12px; }
         #aspera-audit-sticky-bar { position:sticky; bottom:0; left:0; right:0; background:#f0f0f1; border-top:1px solid #c3c4c7; padding:10px 16px; margin:24px -20px 0; display:flex; align-items:center; justify-content:flex-end; gap:8px; box-shadow:0 -2px 6px rgba(0,0,0,0.04); z-index:50; }
         @media print { #aspera-audit-sticky-bar { display:none !important; } }
+        #aspera-hero { display:flex; align-items:center; gap:24px; padding:18px 22px; border-radius:6px; margin-bottom:14px; flex-wrap:wrap; }
+        #aspera-hero.is-green  { background:linear-gradient(135deg, #e6f6ea 0%, #f6fbf7 100%); border:1px solid #b7e0c2; }
+        #aspera-hero.is-yellow { background:linear-gradient(135deg, #fcf2d9 0%, #fdfaf0 100%); border:1px solid #ecd58a; }
+        #aspera-hero.is-red    { background:linear-gradient(135deg, #fbe5e6 0%, #fdf3f3 100%); border:1px solid #e8a5a7; }
+        #aspera-hero .aspera-hero-score { display:flex; align-items:baseline; gap:6px; flex-shrink:0; }
+        #aspera-hero .aspera-hero-num { font-size:3em; font-weight:800; line-height:1; }
+        #aspera-hero .aspera-hero-100 { font-size:1.1em; color:#72777c; font-weight:500; }
+        #aspera-hero .aspera-hero-label { display:inline-block; font-size:13px; font-weight:700; padding:4px 12px; border-radius:14px; }
+        #aspera-hero .aspera-hero-divider { width:1px; align-self:stretch; background:rgba(0,0,0,0.08); }
+        #aspera-hero .aspera-hero-meta { display:flex; flex-direction:column; gap:6px; flex:1; min-width:200px; }
+        #aspera-hero .aspera-hero-total { font-size:13px; color:#50575e; }
+        #aspera-hero .aspera-hero-total strong { color:#1d2327; font-size:15px; }
+        #aspera-hero .aspera-sev-grid { display:flex; gap:6px; flex-wrap:wrap; }
+        #aspera-audit-page .aspera-viol-action { margin-top:4px; padding:6px 9px; background:#f0f6fc; border-left:3px solid #2271b1; font-size:12px; color:#1d2327; border-radius:0 3px 3px 0; }
+        #aspera-audit-page .aspera-viol-action strong { color:#0073aa; }
+        #aspera-audit-page .aspera-viol-detail-tech { display:block; margin-top:3px; color:#72777c; font-size:11px; word-break:break-word; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1600,24 +1847,7 @@ function aspera_dashboard_widget_render(): void {
     $score_label_map = [ 'green' => 'Schoon', 'yellow' => 'Aandacht nodig', 'red' => 'Kritieke problemen' ];
     $score_label     = $score_label_map[ $traffic ] ?? '';
 
-    // ── Top toolbar: datum + Vernieuwen + PDF ──────────────────────────────────
-    echo '<div id="aspera-audit-toolbar">';
-    echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
-    echo '<span>';
-    echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
-    echo '</span>';
-    echo '</div>';
-    echo '<span id="aspera-refresh-status" style="display:block;margin-bottom:10px;font-size:12px;color:#72777c;min-height:16px;"></span>';
-
-    // ── Score header ───────────────────────────────────────────────────────────
-    echo '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">';
-    echo '<span style="font-size:2.2em;font-weight:800;color:' . esc_attr( $score_color ) . ';line-height:1;">' . $score_int . '</span>';
-    echo '<span style="font-size:1.1em;color:#72777c;font-weight:400;">/100</span>';
-    echo '<span style="font-size:13px;font-weight:700;color:' . esc_attr( $score_color ) . ';padding:3px 9px;background:' . esc_attr( $score_color ) . '22;border-radius:3px;">' . esc_html( $score_label ) . '</span>';
-    echo '</div>';
-
-    // ── Severity badges ────────────────────────────────────────────────────────
-    // Tel alleen exceptions die daadwerkelijk matchen met een violation in de huidige audit
+    // ── Tel exceptions die matchen met huidige violations ─────────────────────
     $ignored_total = 0;
     foreach ( $cats as $cat_data ) {
         foreach ( $cat_data['violations'] ?? [] as $_v ) {
@@ -1627,21 +1857,37 @@ function aspera_dashboard_widget_render(): void {
             }
         }
     }
-    echo '<div id="aspera-sev-bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
+    $stale_count = count( $exceptions_raw ) - $ignored_total;
+
+    // ── Top toolbar: datum + Vernieuwen + PDF ──────────────────────────────────
+    echo '<div id="aspera-audit-toolbar">';
+    echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
+    echo '<span>';
+    echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
+    echo '</span>';
+    echo '</div>';
+    echo '<span id="aspera-refresh-status" style="display:block;margin-bottom:10px;font-size:12px;color:#72777c;min-height:16px;"></span>';
+
+    // ── Hero: score + traffic-light + severity badges ─────────────────────────
+    echo '<div id="aspera-hero" class="is-' . esc_attr( $traffic ) . '">';
+    echo '<div class="aspera-hero-score">';
+    echo '<span class="aspera-hero-num" style="color:' . esc_attr( $score_color ) . ';">' . $score_int . '</span>';
+    echo '<span class="aspera-hero-100">/100</span>';
+    echo '</div>';
+    echo '<span class="aspera-hero-label" style="color:' . esc_attr( $score_color ) . ';background:' . esc_attr( $score_color ) . '22;">' . esc_html( $score_label ) . '</span>';
+    echo '<div class="aspera-hero-divider"></div>';
+    echo '<div class="aspera-hero-meta">';
+    echo '<div class="aspera-hero-total"><strong>' . (int) $total . '</strong> violations totaal' . ( $ignored_total > 0 ? ' &middot; ' . $ignored_total . ' genegeerd' : '' ) . ( $stale_count > 0 ? ' &middot; <button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;vertical-align:baseline;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>' : '' ) . '</div>';
+    echo '<div id="aspera-sev-bar" class="aspera-sev-grid">';
     foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
         $bg  = $cnt > 0 ? ( $sev_colors[ $sev ] ) : '#dcdcde';
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
         $cursor = $cnt > 0 ? 'pointer' : 'default';
-        echo '<button type="button" class="aspera-sev-filter-btn" data-sev="' . esc_attr( $sev ) . '" ' . ( $cnt === 0 ? 'disabled' : '' ) . ' style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border:none;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;cursor:' . $cursor . ';">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</button>';
+        echo '<button type="button" class="aspera-sev-filter-btn" data-sev="' . esc_attr( $sev ) . '" ' . ( $cnt === 0 ? 'disabled' : '' ) . ' style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $cursor . ';">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</button>';
     }
-    $stale_count = count( $exceptions_raw ) - $ignored_total;
-    if ( $ignored_total > 0 ) {
-        echo '<span style="background:#dcdcde;color:#50575e;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;margin-left:4px;">' . $ignored_total . '&nbsp;genegeerd</span>';
-    }
-    if ( $stale_count > 0 ) {
-        echo '<button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>';
-    }
+    echo '</div>';
+    echo '</div>';
     echo '</div>';
 
     // ── Per-categorie accordion ────────────────────────────────────────────────
@@ -1728,27 +1974,35 @@ function aspera_dashboard_widget_render(): void {
                 echo '<button class="aspera-bulk-fix-btn" data-nonce="' . esc_attr( $nonce ) . '" style="display:none;">Fix geselecteerde</button>';
                 echo '<span class="aspera-bulk-count" style="font-size:12px;color:#50575e;"></span>';
                 echo '</div>';
+                $rule_context = aspera_get_rule_context();
                 foreach ( $active_viols as $v ) {
                     $sev     = $v['severity'] ?? 'warning';
-                    $rule    = esc_html( $v['rule'] ?? '' );
+                    $rule_raw= (string) ( $v['rule'] ?? '' );
+                    $rule    = esc_html( $rule_raw );
                     $detail  = esc_html( $v['detail'] ?? '' );
                     $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
                     $dot_col = $sev_colors[ $sev ] ?? '#72777c';
                     $eid     = esc_attr( $v['_exc_id'] ?? '' );
                     $cat_key_attr = esc_attr( $key );
-                    $rule_attr    = esc_attr( $v['rule'] ?? '' );
+                    $rule_attr    = esc_attr( $rule_raw );
                     $pid_attr     = esc_attr( (string) ( $post_id ?? 0 ) );
+
+                    $rctx        = $rule_context[ $rule_raw ] ?? null;
+                    $rule_label  = $rctx['label']       ?? aspera_humanize_rule( $rule_raw );
+                    $rule_expl   = $rctx['explanation'] ?? '';
+                    $rule_action = $rctx['action']      ?? '';
 
                     $fix = $v['proposed_fix'] ?? null;
                     $has_fix = is_array( $fix ) && ( $fix['fixable'] ?? false );
                     $fix_json = $has_fix ? esc_attr( wp_json_encode( $fix ) ) : '';
 
-                    echo '<div class="aspera-viol-row aspera-sev-' . esc_attr( $sev ) . '" data-sev="' . esc_attr( $sev ) . '" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<div class="aspera-viol-row aspera-sev-' . esc_attr( $sev ) . '" data-sev="' . esc_attr( $sev ) . '" style="display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid #f0f0f0;">';
                     echo '<input type="checkbox" class="aspera-exc-cb" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '"' . ( $has_fix ? ' data-fix="' . $fix_json . '"' : '' ) . '>';
                     echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">&#x25CF;</span>';
                     echo '<div style="flex:1;min-width:0;">';
-                    echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:12px;">' . $rule . '</code>';
-                    echo '&ensp;<span style="font-size:11px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;">' . esc_html( $sev ) . '</span>';
+                    echo '<div style="font-weight:600;color:#1d2327;font-size:13px;margin-bottom:1px;">' . esc_html( $rule_label ) . '</div>';
+                    echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:11px;color:#50575e;">' . $rule . '</code>';
+                    echo '&ensp;<span style="font-size:10px;color:' . esc_attr( $dot_col ) . ';font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">' . esc_html( $sev ) . '</span>';
                     if ( $post_id ) {
                         $edit_url   = get_edit_post_link( $post_id );
                         $post_title = get_the_title( $post_id );
@@ -1759,8 +2013,14 @@ function aspera_dashboard_widget_render(): void {
                     if ( is_array( $loc ) && ! empty( $loc['breadcrumb'] ) ) {
                         echo ' &mdash; <span style="font-size:11px;color:#72777c;">' . esc_html( $loc['breadcrumb'] ) . '</span>';
                     }
+                    if ( $rule_expl ) {
+                        echo '<div style="margin-top:3px;font-size:12px;color:#50575e;line-height:1.4;">' . esc_html( $rule_expl ) . '</div>';
+                    }
+                    if ( $rule_action ) {
+                        echo '<div class="aspera-viol-action"><strong>Hoe op te lossen:</strong> ' . esc_html( $rule_action ) . '</div>';
+                    }
                     if ( $detail ) {
-                        echo '<br><span style="color:#50575e;font-size:12px;word-break:break-word;">' . $detail . '</span>';
+                        echo '<span class="aspera-viol-detail-tech">' . $detail . '</span>';
                     }
                     if ( $has_fix ) {
                         $fa = $fix['action'] ?? '';
