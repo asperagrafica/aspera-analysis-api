@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.74.0
+ * Version: 1.82.0
  * Author: Aspera
  */
 
@@ -6488,11 +6488,37 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // 4. Beheerder-rol: post types moeten disabled zijn (vc_access_rules_post_types === false)
+            $beheerder_role = null;
+            if ( function_exists( 'wp_roles' ) ) {
+                $all_roles = wp_roles()->roles ?? [];
+                foreach ( $all_roles as $slug => $data ) {
+                    $name = $data['name'] ?? '';
+                    if ( strtolower( $slug ) === 'beheerder' || strtolower( $name ) === 'beheerder' ) {
+                        $beheerder_role = [ 'slug' => $slug, 'name' => $name, 'capabilities' => $data['capabilities'] ?? [] ];
+                        break;
+                    }
+                }
+            }
+            if ( is_array( $beheerder_role ) ) {
+                $caps        = $beheerder_role['capabilities'];
+                $pt_setting  = array_key_exists( 'vc_access_rules_post_types', $caps ) ? $caps['vc_access_rules_post_types'] : null;
+                if ( $pt_setting !== false ) {
+                    $shown = is_string( $pt_setting ) ? '"' . $pt_setting . '"' : ( $pt_setting === true ? 'true' : ( $pt_setting === null ? 'ontbreekt' : var_export( $pt_setting, true ) ) );
+                    $violations[] = [
+                        'rule'   => 'beheerder_post_types_not_disabled',
+                        'role'   => $beheerder_role['slug'],
+                        'detail' => 'Beheerder-rol "' . $beheerder_role['slug'] . '" (' . $beheerder_role['name'] . '): vc_access_rules_post_types = ' . $shown . ' (verwacht: false)',
+                    ];
+                }
+            }
+
             return [
                 'status'          => empty( $violations ) ? 'ok' : 'issues_found',
                 'violations'      => $violations,
                 'active_modules'  => $active_modules,
                 'module_settings' => $modules,
+                'beheerder_role'  => $beheerder_role !== null ? [ 'slug' => $beheerder_role['slug'], 'name' => $beheerder_role['name'] ] : null,
             ];
         },
     ] );
@@ -6976,6 +7002,143 @@ add_action( 'rest_api_init', function () {
         },
     ] );
 
+    register_rest_route( 'aspera/v1', '/cache/validate', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            $violations = [];
+
+            if ( ! function_exists( 'is_plugin_active' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+            $plugin_active = is_plugin_active( 'wp-fastest-cache/wpFastestCache.php' );
+            if ( ! $plugin_active ) {
+                return [
+                    'violation_count' => 0,
+                    'violations'      => [],
+                    'config'          => [ 'plugin_active' => false ],
+                ];
+            }
+
+            $main_raw = get_option( 'WpFastestCache' );
+            $main = is_string( $main_raw ) ? json_decode( $main_raw, true ) : ( is_array( $main_raw ) ? $main_raw : [] );
+            if ( ! is_array( $main ) ) { $main = []; }
+
+            $on  = function ( $k ) use ( $main ) { return isset( $main[ $k ] ) && $main[ $k ] === 'on'; };
+            $off = function ( $k ) use ( $main ) { return ! isset( $main[ $k ] ) || $main[ $k ] !== 'on'; };
+
+            if ( $off( 'wpFastestCacheStatus' ) ) {
+                $violations[] = [ 'rule' => 'cache_disabled', 'detail' => 'wpFastestCacheStatus != "on"' ];
+            }
+
+            $preload_required = [
+                'wpFastestCachePreload'                 => 'cache_preload_disabled',
+                'wpFastestCachePreload_homepage'        => 'cache_preload_homepage_missing',
+                'wpFastestCachePreload_post'            => 'cache_preload_post_missing',
+                'wpFastestCachePreload_page'            => 'cache_preload_page_missing',
+                'wpFastestCachePreload_customposttypes' => 'cache_preload_cpt_missing',
+            ];
+            foreach ( $preload_required as $opt => $rule ) {
+                if ( $off( $opt ) ) {
+                    $violations[] = [ 'rule' => $rule, 'detail' => $opt . ' staat niet aan' ];
+                }
+            }
+            $threads = $main['wpFastestCachePreload_number'] ?? '';
+            if ( $threads === '' || $threads === null ) {
+                $violations[] = [ 'rule' => 'cache_preload_threads_missing', 'detail' => 'wpFastestCachePreload_number leeg' ];
+            }
+            if ( $off( 'wpFastestCachePreload_restart' ) ) {
+                $violations[] = [ 'rule' => 'cache_preload_restart_missing', 'detail' => 'Preload herstart na cache-clear staat uit' ];
+            }
+            if ( $off( 'wpFastestCacheNewPost' ) ) {
+                $violations[] = [ 'rule' => 'cache_purge_on_new_post_missing', 'detail' => 'Cache wordt niet gewist bij nieuwe post' ];
+            }
+            if ( $off( 'wpFastestCacheUpdatePost' ) ) {
+                $violations[] = [ 'rule' => 'cache_purge_on_update_post_missing', 'detail' => 'Cache wordt niet gewist bij update post' ];
+            }
+            if ( $off( 'wpFastestCacheMinifyHtml' ) ) { $violations[] = [ 'rule' => 'cache_minify_html_disabled',  'detail' => 'Minify HTML staat uit' ]; }
+            if ( $off( 'wpFastestCacheMinifyCss' )  ) { $violations[] = [ 'rule' => 'cache_minify_css_disabled',   'detail' => 'Minify CSS staat uit'  ]; }
+            if ( $off( 'wpFastestCacheCombineCss' ) ) { $violations[] = [ 'rule' => 'cache_combine_css_disabled',  'detail' => 'Combine CSS staat uit' ]; }
+            if ( $on( 'wpFastestCacheMinifyJs' )  ) { $violations[] = [ 'rule' => 'cache_minify_js_enabled',  'detail' => 'Minify JS staat aan, moet uit' ]; }
+            if ( $on( 'wpFastestCacheCombineJs' ) ) { $violations[] = [ 'rule' => 'cache_combine_js_enabled', 'detail' => 'Combine JS staat aan, moet uit' ]; }
+            if ( $off( 'wpFastestCacheGzip' ) ) { $violations[] = [ 'rule' => 'cache_gzip_disabled',             'detail' => 'Gzip staat uit' ]; }
+            if ( $off( 'wpFastestCacheLBC' )  ) { $violations[] = [ 'rule' => 'cache_browser_caching_disabled', 'detail' => 'Leverage Browser Caching staat uit' ]; }
+            if ( $on( 'wpFastestCacheDisableEmojis' ) === false ) {
+                $violations[] = [ 'rule' => 'cache_emojis_enabled', 'detail' => 'Disable Emojis staat uit (emojis worden geladen)' ];
+            }
+            if ( $on( 'wpFastestCacheMobileTheme' ) ) {
+                $violations[] = [ 'rule' => 'cache_mobile_theme_enabled', 'detail' => 'Aparte mobiele cache staat aan' ];
+            }
+            if ( $on( 'wpFastestCacheLoggedInUser' ) ) {
+                $violations[] = [ 'rule' => 'cache_logged_in_user_enabled', 'detail' => 'Cache voor ingelogde users staat aan' ];
+            }
+
+            // Cache timeout via WP cron
+            $cron = function_exists( '_get_cron_array' ) ? ( _get_cron_array() ?: [] ) : [];
+            $timeout_events = [];
+            foreach ( $cron as $ts => $hooks ) {
+                foreach ( $hooks as $hook => $payload ) {
+                    if ( strpos( $hook, 'wp_fastest_cache_' ) === 0 ) {
+                        foreach ( $payload as $sig => $event ) {
+                            $timeout_events[] = [
+                                'hook'     => $hook,
+                                'schedule' => $event['schedule'] ?? null,
+                                'interval' => $event['interval'] ?? null,
+                                'args'     => $event['args'] ?? [],
+                            ];
+                        }
+                    }
+                }
+            }
+            if ( empty( $timeout_events ) ) {
+                $violations[] = [ 'rule' => 'cache_timeout_missing', 'detail' => 'Geen wp_fastest_cache_* cron-event aanwezig' ];
+            } else {
+                $not_daily_details = [];
+                $scope_partial_details = [];
+                foreach ( $timeout_events as $ev ) {
+                    if ( $ev['schedule'] !== 'onceaday' || (int) $ev['interval'] !== 86400 ) {
+                        $not_daily_details[] = $ev['hook'] . ' (schedule=' . $ev['schedule'] . ', interval=' . $ev['interval'] . ')';
+                    }
+                    $args_json = $ev['args'][0] ?? null;
+                    $args_arr  = is_string( $args_json ) ? json_decode( $args_json, true ) : null;
+                    if ( is_array( $args_arr ) ) {
+                        if ( ( $args_arr['prefix'] ?? '' ) !== 'all' || ( $args_arr['content'] ?? '' ) !== 'all' ) {
+                            $scope_partial_details[] = $ev['hook'] . ' (prefix=' . ( $args_arr['prefix'] ?? '?' ) . ', content=' . ( $args_arr['content'] ?? '?' ) . ')';
+                        }
+                    }
+                }
+                if ( ! empty( $not_daily_details ) ) {
+                    $violations[] = [ 'rule' => 'cache_timeout_not_daily', 'detail' => 'Verwacht onceaday/86400. Afwijkend: ' . implode( '; ', $not_daily_details ) ];
+                }
+                if ( ! empty( $scope_partial_details ) ) {
+                    $violations[] = [ 'rule' => 'cache_timeout_scope_partial', 'detail' => 'Verwacht prefix=all en content=all. Afwijkend: ' . implode( '; ', $scope_partial_details ) ];
+                }
+            }
+
+            $lang = $main['wpFastestCacheLanguage'] ?? '';
+            if ( stripos( (string) $lang, 'en' ) !== 0 ) {
+                $violations[] = [ 'rule' => 'cache_language_not_english', 'detail' => 'wpFastestCacheLanguage="' . $lang . '" (verwacht: en_*)' ];
+            }
+
+            $toolbar_raw = get_option( 'WpFastestCacheToolbarSettings' );
+            $toolbar     = is_array( $toolbar_raw ) ? $toolbar_raw : ( is_string( $toolbar_raw ) ? maybe_unserialize( $toolbar_raw ) : [] );
+            if ( ! is_array( $toolbar ) || ( $toolbar['wpfc_toolbar_beheerder'] ?? '' ) !== '1' ) {
+                $violations[] = [ 'rule' => 'cache_toolbar_admin_only_missing', 'detail' => 'wpfc_toolbar_beheerder != "1"' ];
+            }
+
+            return [
+                'violation_count' => count( $violations ),
+                'violations'      => $violations,
+                'config'          => [
+                    'plugin_active'  => true,
+                    'cache_status'   => $main['wpFastestCacheStatus'] ?? null,
+                    'language'       => $lang,
+                    'timeout_events' => count( $timeout_events ),
+                ],
+            ];
+        },
+    ] );
+
     register_rest_route( 'aspera/v1', '/site/audit', [
         'methods'             => 'GET',
         'permission_callback' => 'aspera_check_key',
@@ -7095,6 +7258,7 @@ add_action( 'rest_api_init', function () {
                 // wpb/modules/validate
                 'wpb_post_custom_css'         => 'critical',
                 'wpb_post_custom_js'          => 'critical',
+                'beheerder_post_types_not_disabled' => 'critical',
 
                 // wpb/templates/validate
                 'wpb_saved_templates'         => 'warning',
@@ -7160,8 +7324,27 @@ add_action( 'rest_api_init', function () {
                 // theme/check
                 'wrong_active_theme'                     => 'critical',
                 'impreza_license_inactive'               => 'critical',
+                'unauthorized_installed_theme'           => 'warning',
+                'theme_recaptcha_site_key_missing'       => 'critical',
+                'theme_recaptcha_secret_key_missing'     => 'critical',
                 'search_engine_noindex'                  => 'critical',
                 'missing_favicon'                        => 'warning',
+                'permalink_structure_invalid'            => 'critical',
+                'posts_per_page_invalid'                 => 'warning',
+                'posts_per_rss_invalid'                  => 'warning',
+                'homepage_on_latest_posts'               => 'critical',
+                'homepage_missing'                       => 'critical',
+                'homepage_unexpected_title'              => 'observation',
+                'date_format_invalid'                    => 'warning',
+                'timezone_invalid'                       => 'warning',
+                'site_language_invalid'                  => 'warning',
+                'start_of_week_invalid'                  => 'warning',
+                'default_role_invalid'                   => 'warning',
+                'users_can_register_enabled'             => 'warning',
+                'admin_email_invalid'                    => 'warning',
+                'php_version_critical'                   => 'critical',
+                'php_version_outdated'                   => 'warning',
+                'php_memory_limit_low'                   => 'warning',
                 'scroll_breakpoint_not_1px'              => 'observation',
                 'scroll_breakpoint_inconsistent'         => 'observation',
                 'centering_missing'                      => 'warning',
@@ -7171,6 +7354,33 @@ add_action( 'rest_api_init', function () {
                 'menu_mobile_icon_size_too_large'        => 'warning',
                 'menu_mobile_icon_size_inconsistent'     => 'warning',
                 'menu_align_edges_mismatch'              => 'warning',
+
+                // cache/validate (WP Fastest Cache)
+                'cache_disabled'                         => 'critical',
+                'cache_preload_disabled'                 => 'warning',
+                'cache_preload_homepage_missing'         => 'warning',
+                'cache_preload_post_missing'             => 'warning',
+                'cache_preload_page_missing'             => 'warning',
+                'cache_preload_cpt_missing'              => 'warning',
+                'cache_preload_threads_missing'          => 'warning',
+                'cache_preload_restart_missing'          => 'critical',
+                'cache_purge_on_new_post_missing'        => 'critical',
+                'cache_purge_on_update_post_missing'     => 'critical',
+                'cache_minify_html_disabled'             => 'warning',
+                'cache_minify_css_disabled'              => 'warning',
+                'cache_combine_css_disabled'             => 'warning',
+                'cache_minify_js_enabled'                => 'critical',
+                'cache_combine_js_enabled'               => 'critical',
+                'cache_gzip_disabled'                    => 'warning',
+                'cache_browser_caching_disabled'         => 'critical',
+                'cache_emojis_enabled'                   => 'warning',
+                'cache_mobile_theme_enabled'             => 'warning',
+                'cache_logged_in_user_enabled'           => 'warning',
+                'cache_timeout_missing'                  => 'critical',
+                'cache_timeout_not_daily'                => 'warning',
+                'cache_timeout_scope_partial'            => 'warning',
+                'cache_language_not_english'             => 'warning',
+                'cache_toolbar_admin_only_missing'       => 'critical',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -7199,6 +7409,7 @@ add_action( 'rest_api_init', function () {
                 'acf_locations'    =>   5,
                 'theme_check'      =>   5,
                 'wp_settings'      =>  10,
+                'cache'            =>   5,
             ];
 
             $severity_points = [
@@ -7822,6 +8033,54 @@ add_action( 'rest_api_init', function () {
                     'detail'   => 'Impreza licentie is niet geactiveerd',
                 ];
             }
+            // Geinstalleerde thema's: alleen aspera/impreza toegestaan
+            $allowed_substrings = [ 'aspera', 'impreza' ];
+            foreach ( wp_get_themes() as $installed_slug => $theme_obj ) {
+                $installed_name = $theme_obj->get( 'Name' );
+                $is_allowed = false;
+                foreach ( $allowed_substrings as $needle ) {
+                    if ( stripos( $installed_slug, $needle ) !== false || stripos( $installed_name, $needle ) !== false ) {
+                        $is_allowed = true;
+                        break;
+                    }
+                }
+                if ( ! $is_allowed ) {
+                    $theme_violations[] = [
+                        'rule'     => 'unauthorized_installed_theme',
+                        'severity' => 'warning',
+                        'detail'   => 'Geinstalleerd thema "' . $installed_name . '" (' . $installed_slug . ') v' . $theme_obj->get( 'Version' ) . ' — niet toegestaan, verwijderen',
+                    ];
+                }
+            }
+            // reCAPTCHA-keys in Impreza theme — alleen checken als er een form met reCAPTCHA bestaat
+            global $wpdb;
+            $form_with_recaptcha_count = (int) $wpdb->get_var(
+                "SELECT COUNT(*) FROM {$wpdb->posts}
+                 WHERE post_status = 'publish'
+                   AND post_content LIKE '%us_cform%'
+                   AND post_content LIKE '%reCAPTCHA%'"
+            );
+            if ( $form_with_recaptcha_count > 0 ) {
+                $usof_raw     = get_option( 'usof_options_Impreza', [] );
+                $usof_options = is_array( $usof_raw ) ? $usof_raw : ( is_string( $usof_raw ) ? maybe_unserialize( $usof_raw ) : [] );
+                if ( ! is_array( $usof_options ) ) { $usof_options = []; }
+                $site_key   = trim( (string) ( $usof_options['reCAPTCHA_site_key']   ?? '' ) );
+                $secret_key = trim( (string) ( $usof_options['reCAPTCHA_secret_key'] ?? '' ) );
+                if ( $site_key === '' ) {
+                    $theme_violations[] = [
+                        'rule'     => 'theme_recaptcha_site_key_missing',
+                        'severity' => 'critical',
+                        'detail'   => 'reCAPTCHA_site_key leeg in Impreza theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
+                    ];
+                }
+                if ( $secret_key === '' ) {
+                    $theme_violations[] = [
+                        'rule'     => 'theme_recaptcha_secret_key_missing',
+                        'severity' => 'critical',
+                        'detail'   => 'reCAPTCHA_secret_key leeg in Impreza theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
+                    ];
+                }
+            }
             $categories['theme_check'] = [
                 'violation_count' => count( $theme_violations ),
                 'violations'      => $theme_violations,
@@ -7845,10 +8104,160 @@ add_action( 'rest_api_init', function () {
                     'detail'   => 'Geen favicon ingesteld (Settings > General > Site Icon)',
                 ];
             }
+            $permalink_structure = (string) get_option( 'permalink_structure', '' );
+            $allowed_permalinks  = [ '/%postname%/', '/%category%/%postname%/' ];
+            if ( ! in_array( $permalink_structure, $allowed_permalinks, true ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'permalink_structure_invalid',
+                    'severity' => 'critical',
+                    'detail'   => 'permalink_structure="' . $permalink_structure . '" (toegestaan: "/%postname%/" of "/%category%/%postname%/")',
+                ];
+            }
+            $posts_per_page = (int) get_option( 'posts_per_page', 0 );
+            if ( $posts_per_page !== 12 ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'posts_per_page_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'posts_per_page=' . $posts_per_page . ' (verwacht: 12)',
+                ];
+            }
+            $posts_per_rss = (int) get_option( 'posts_per_rss', 0 );
+            if ( $posts_per_rss !== 12 ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'posts_per_rss_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'posts_per_rss=' . $posts_per_rss . ' (verwacht: 12)',
+                ];
+            }
+            $date_format_val = (string) get_option( 'date_format', '' );
+            if ( $date_format_val !== 'j F Y' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'date_format_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'date_format="' . $date_format_val . '" (verwacht: "j F Y")',
+                ];
+            }
+            $timezone_val = (string) get_option( 'timezone_string', '' );
+            if ( $timezone_val !== 'Europe/Amsterdam' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'timezone_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'timezone_string="' . $timezone_val . '" (verwacht: "Europe/Amsterdam")',
+                ];
+            }
+            $locale_val = function_exists( 'get_locale' ) ? get_locale() : (string) get_option( 'WPLANG', '' );
+            if ( ! in_array( $locale_val, [ 'nl_NL', 'en_US', 'en_GB' ], true ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'site_language_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'site_language="' . $locale_val . '" (toegestaan: nl_NL, en_US, en_GB)',
+                ];
+            }
+            $start_of_week_val = (int) get_option( 'start_of_week', -1 );
+            if ( $start_of_week_val !== 1 ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'start_of_week_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'start_of_week=' . $start_of_week_val . ' (verwacht: 1 / maandag)',
+                ];
+            }
+            $default_role_val = (string) get_option( 'default_role', '' );
+            if ( $default_role_val !== 'subscriber' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'default_role_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'default_role="' . $default_role_val . '" (verwacht: "subscriber")',
+                ];
+            }
+            $users_can_register_val = (string) get_option( 'users_can_register', '0' );
+            if ( $users_can_register_val !== '0' && $users_can_register_val !== 0 ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'users_can_register_enabled',
+                    'severity' => 'warning',
+                    'detail'   => 'users_can_register="' . $users_can_register_val . '" (verwacht: 0 / membership uit)',
+                ];
+            }
+            $admin_email_val = (string) get_option( 'admin_email', '' );
+            if ( $admin_email_val !== 'wp@asperagrafica.nl' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'admin_email_invalid',
+                    'severity' => 'warning',
+                    'detail'   => 'admin_email="' . $admin_email_val . '" (verwacht: "wp@asperagrafica.nl")',
+                ];
+            }
+            $php_version = PHP_VERSION;
+            if ( version_compare( $php_version, '8.0', '<' ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'php_version_critical',
+                    'severity' => 'critical',
+                    'detail'   => 'PHP versie ' . $php_version . ' (minimaal 8.0 vereist, voorkeur 8.4)',
+                ];
+            } elseif ( version_compare( $php_version, '8.4', '<' ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'php_version_outdated',
+                    'severity' => 'warning',
+                    'detail'   => 'PHP versie ' . $php_version . ' (minimaal 8.4 aanbevolen)',
+                ];
+            }
+            $memory_limit_raw   = ini_get( 'memory_limit' );
+            $memory_limit_bytes = function_exists( 'wp_convert_hr_to_bytes' ) ? wp_convert_hr_to_bytes( $memory_limit_raw ) : (int) $memory_limit_raw;
+            if ( $memory_limit_bytes > 0 && $memory_limit_bytes < 128 * 1024 * 1024 ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'php_memory_limit_low',
+                    'severity' => 'warning',
+                    'detail'   => 'memory_limit=' . $memory_limit_raw . ' (minimaal 128M vereist)',
+                ];
+            }
+            $show_on_front  = (string) get_option( 'show_on_front', 'posts' );
+            $page_on_front  = (int) get_option( 'page_on_front', 0 );
+            if ( $show_on_front !== 'page' ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'homepage_on_latest_posts',
+                    'severity' => 'critical',
+                    'detail'   => 'show_on_front="' . $show_on_front . '" (verwacht: "page" / static homepage)',
+                ];
+            } else {
+                $front_post = $page_on_front > 0 ? get_post( $page_on_front ) : null;
+                if ( ! $front_post || $front_post->post_status !== 'publish' ) {
+                    $wp_settings_violations[] = [
+                        'rule'     => 'homepage_missing',
+                        'severity' => 'critical',
+                        'detail'   => 'show_on_front="page" maar page_on_front=' . $page_on_front . ( $front_post ? ' (status=' . $front_post->post_status . ')' : ' (pagina bestaat niet)' ),
+                    ];
+                } else {
+                    $title_lc = strtolower( trim( $front_post->post_title ) );
+                    if ( ! in_array( $title_lc, [ 'home', 'homepage' ], true ) ) {
+                        $wp_settings_violations[] = [
+                            'rule'     => 'homepage_unexpected_title',
+                            'severity' => 'observation',
+                            'detail'   => 'Homepage-pagina (ID ' . $page_on_front . ') heeft titel "' . $front_post->post_title . '" (verwacht: "Home" of "Homepage")',
+                        ];
+                    }
+                }
+            }
             $categories['wp_settings'] = [
                 'violation_count' => count( $wp_settings_violations ),
                 'violations'      => $wp_settings_violations,
                 'error'           => null,
+            ];
+
+            // ── Cache validate (WP Fastest Cache) ─────────────────────────
+            $cache = $call( 'cache/validate' );
+            $cache_violations = [];
+            if ( ! isset( $cache['_error'] ) ) {
+                foreach ( $cache['violations'] ?? [] as $v ) {
+                    $rule = $v['rule'] ?? 'unknown';
+                    $cache_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $severity_map[ $rule ] ?? 'warning',
+                        'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+            }
+            $categories['cache'] = [
+                'violation_count' => count( $cache_violations ),
+                'violations'      => $cache_violations,
+                'error'           => $cache['_error'] ?? null,
             ];
 
             // ── Uitzonderingen laden en markeren ─────────────────────────
