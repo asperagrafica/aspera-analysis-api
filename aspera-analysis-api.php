@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.87.0
+ * Version: 1.88.0
  * Author: Aspera
  */
 
@@ -1492,6 +1492,39 @@ function aspera_humanize_rule( string $rule ): string {
     return ucwords( str_replace( '_', ' ', $rule ) );
 }
 
+function aspera_get_rules_per_category(): array {
+    static $reg = null;
+    if ( $reg !== null ) return $reg;
+    $reg = [
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected' ],
+        'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
+        'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
+        'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','missing_move_label','empty_option_field' ],
+        'plugins' => [ 'extra_plugin' ],
+        'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover' ],
+        'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta' ],
+        'css' => [ 'unused_css_class','wrong_css_prefix' ],
+        'nav' => [ 'unused_nav_menu','broken_menu_reference','invalid_menu_name','mismatched_menu_placement','external_link_no_target_blank','page_not_in_menu','custom_menu_label' ],
+        'wpb_modules' => [ 'wpb_post_custom_css','wpb_post_custom_js','wpb_module_active','beheerder_post_types_not_disabled' ],
+        'theme_breakpoints' => [ 'breakpoint_mobile_group_mismatch','breakpoint_order_invalid','breakpoint_convention_deviation','breakpoint_exceeds_content_width','laptops_breakpoint_mismatch' ],
+        'widgets' => [ 'widgetised_sidebar_in_template','extra_widget_area','default_sidebar_not_empty','active_widget_text','active_widget_nav_menu','active_widget_other' ],
+        'wpb_templates' => [ 'wpb_saved_templates' ],
+        'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies' ],
+        'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_exceeds_breakpoints','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_mismatch','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
+        'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','wrong_group_name_prefix' ],
+        'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
+        'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates' ],
+        'options_orphaned' => [ 'orphaned_option' ],
+        'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
+        'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
+        'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
+        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing' ],
+        'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
+        'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
+    ];
+    return $reg;
+}
+
 function aspera_get_rule_context(): array {
     static $ctx = null;
     if ( $ctx !== null ) return $ctx;
@@ -1823,6 +1856,14 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-viol-action { margin-top:4px; padding:6px 9px; background:#f0f6fc; border-left:3px solid #2271b1; font-size:12px; color:#1d2327; border-radius:0 3px 3px 0; }
         #aspera-audit-page .aspera-viol-action strong { color:#0073aa; }
         #aspera-audit-page .aspera-viol-detail-tech { display:block; margin-top:3px; color:#72777c; font-size:11px; word-break:break-word; }
+        #aspera-audit-page .aspera-tab-bar { display:flex; gap:0; margin-top:4px; border-bottom:2px solid rgba(0,0,0,0.08); }
+        #aspera-audit-page .aspera-tab-btn { background:transparent; border:none; padding:6px 14px; font-size:13px; font-weight:600; color:#50575e; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; transition:color 0.15s, border-color 0.15s; }
+        #aspera-audit-page .aspera-tab-btn:hover { color:#1d2327; }
+        #aspera-audit-page .aspera-tab-btn.is-active { color:#1d2327; border-bottom-color:#1d2327; }
+        #aspera-audit-page .aspera-tab-count { display:inline-block; background:rgba(0,0,0,0.08); border-radius:10px; padding:0 7px; font-size:11px; margin-left:4px; min-width:18px; text-align:center; }
+        #aspera-audit-page .aspera-tab-btn.is-active .aspera-tab-count { background:#1d2327; color:#fff; }
+        #aspera-audit-page .aspera-tab-content[hidden] { display:none !important; }
+        #aspera-audit-page .aspera-cat-passed[open] .aspera-chevron { transform: rotate(90deg); }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1859,6 +1900,32 @@ function aspera_dashboard_widget_render(): void {
     }
     $stale_count = count( $exceptions_raw ) - $ignored_total;
 
+    // ── Bereken passed rules per categorie ────────────────────────────────────
+    $rules_registry = aspera_get_rules_per_category();
+    $passed_per_cat = [];
+    $passed_total   = 0;
+    foreach ( $cats as $cat_key => $cat_data ) {
+        $registry_rules = $rules_registry[ $cat_key ] ?? [];
+        if ( empty( $registry_rules ) ) continue;
+        $violation_rules = [];
+        foreach ( $cat_data['violations'] ?? [] as $_v ) {
+            $violation_rules[ $_v['rule'] ?? '' ] = true;
+        }
+        // Categorie niet-toepasselijk skip-conditie
+        $cache_inactive = ( $cat_key === 'cache' && empty( $cat_data['violations'] ) && empty( $cat_data['error'] ) );
+        if ( $cache_inactive ) continue;
+        $passed = [];
+        foreach ( $registry_rules as $r ) {
+            if ( ! isset( $violation_rules[ $r ] ) ) {
+                $passed[] = $r;
+            }
+        }
+        if ( ! empty( $passed ) ) {
+            $passed_per_cat[ $cat_key ] = $passed;
+            $passed_total += count( $passed );
+        }
+    }
+
     // ── Top toolbar: datum + Vernieuwen + PDF ──────────────────────────────────
     echo '<div id="aspera-audit-toolbar">';
     echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
@@ -1887,10 +1954,15 @@ function aspera_dashboard_widget_render(): void {
         echo '<button type="button" class="aspera-sev-filter-btn" data-sev="' . esc_attr( $sev ) . '" ' . ( $cnt === 0 ? 'disabled' : '' ) . ' style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $cursor . ';">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</button>';
     }
     echo '</div>';
+    echo '<div class="aspera-tab-bar">';
+    echo '<button type="button" class="aspera-tab-btn is-active" data-tab="issues">&#x26A0;&ensp;Issues <span class="aspera-tab-count">' . (int) $total . '</span></button>';
+    echo '<button type="button" class="aspera-tab-btn" data-tab="passed">&#x2713;&ensp;Passed <span class="aspera-tab-count">' . (int) $passed_total . '</span></button>';
+    echo '</div>';
     echo '</div>';
     echo '</div>';
 
-    // ── Per-categorie accordion ────────────────────────────────────────────────
+    // ── Per-categorie accordion (Issues tab) ──────────────────────────────────
+    echo '<div class="aspera-tab-content" data-tab-content="issues">';
     echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;margin-bottom:12px;">';
 
     foreach ( $cat_labels as $key => $label ) {
@@ -2084,7 +2156,47 @@ function aspera_dashboard_widget_render(): void {
         echo '</details>';
     }
 
-    echo '</div>';
+    echo '</div>'; // end accordion border-wrap
+    echo '</div>'; // end tab-content issues
+
+    // ── Per-categorie accordion (Passed tab) ──────────────────────────────────
+    echo '<div class="aspera-tab-content" data-tab-content="passed" hidden>';
+    if ( empty( $passed_per_cat ) ) {
+        echo '<p style="color:#72777c;margin:8px 0;">Geen passed checks om te tonen.</p>';
+    } else {
+        $rule_context = aspera_get_rule_context();
+        echo '<p style="color:#50575e;margin:0 0 10px;font-size:12px;">Deze checks zijn uitgevoerd en goedgekeurd. Categorieen die niet van toepassing zijn (bv. cache-plugin inactief) worden weggelaten.</p>';
+        echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;">';
+        foreach ( $cat_labels as $key => $label ) {
+            if ( empty( $passed_per_cat[ $key ] ) ) continue;
+            $passed_rules = $passed_per_cat[ $key ];
+            $count = count( $passed_rules );
+            echo '<details open class="aspera-cat-passed" style="border-bottom:1px solid #dcdcde;">';
+            echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:#f6fbf7;">';
+            echo '<span style="font-size:13px;font-weight:600;color:#1d2327;"><span class="aspera-chevron">&#x25B6;</span>' . esc_html( $label ) . '</span>';
+            echo '<span style="background:#00a32a;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $count . '</span>';
+            echo '</summary>';
+            echo '<div style="padding:8px 12px;background:#fff;font-size:13px;">';
+            foreach ( $passed_rules as $r ) {
+                $rctx       = $rule_context[ $r ] ?? null;
+                $rule_label = $rctx['label'] ?? aspera_humanize_rule( $r );
+                $rule_expl  = $rctx['explanation'] ?? '';
+                echo '<div style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                echo '<span style="color:#00a32a;font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">&#x2713;</span>';
+                echo '<div style="flex:1;min-width:0;">';
+                echo '<div style="font-weight:600;color:#1d2327;font-size:13px;">' . esc_html( $rule_label ) . '</div>';
+                echo '<code style="background:#f6f7f7;padding:1px 5px;border-radius:2px;font-size:11px;color:#50575e;">' . esc_html( $r ) . '</code>';
+                if ( $rule_expl ) {
+                    echo '<div style="margin-top:3px;font-size:11px;color:#72777c;line-height:1.4;">' . esc_html( $rule_expl ) . '</div>';
+                }
+                echo '</div></div>';
+            }
+            echo '</div>';
+            echo '</details>';
+        }
+        echo '</div>';
+    }
+    echo '</div>'; // end tab-content passed
 
     // ── Sticky bottom bar: tweede Vernieuwen-trigger ──────────────────────────
     echo '<div id="aspera-audit-sticky-bar">';
@@ -2143,6 +2255,23 @@ function aspera_dashboard_widget_script(): void {
                     var sev = btn.dataset.sev;
                     activeSev = (activeSev === sev) ? null : sev;
                     applyFilter(activeSev);
+                });
+            });
+
+            // ── Tab-switching (Issues / Passed) ──────────────────────────
+            var tabButtons = auditPage.querySelectorAll('.aspera-tab-btn');
+            var tabContents = auditPage.querySelectorAll('.aspera-tab-content');
+            tabButtons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var target = btn.dataset.tab;
+                    tabButtons.forEach(function (b) { b.classList.toggle('is-active', b === btn); });
+                    tabContents.forEach(function (c) {
+                        if (c.dataset.tabContent === target) {
+                            c.removeAttribute('hidden');
+                        } else {
+                            c.setAttribute('hidden', '');
+                        }
+                    });
                 });
             });
         }
