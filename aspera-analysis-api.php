@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.85.0
+ * Version: 1.85.1
  * Author: Aspera
  */
 
@@ -1185,8 +1185,8 @@ function aspera_user_is_administrator(): bool {
 add_action( 'admin_menu', function () {
     if ( ! aspera_user_is_administrator() ) return;
     add_management_page(
-        'Aspera Analysis API',
-        'Aspera Analysis API',
+        'AsperAi Site Tools',
+        'AsperAi Site Tools',
         'manage_options',
         'aspera-analysis-api',
         'aspera_admin_page_render'
@@ -1195,7 +1195,7 @@ add_action( 'admin_menu', function () {
 
 function aspera_admin_page_render(): void {
     echo '<div class="wrap" id="aspera-audit-page">';
-    echo '<h1>Aspera Analysis API</h1>';
+    echo '<h1>AsperAi Site Tools</h1>';
     aspera_dashboard_widget_render();
     aspera_admin_page_pdf_export();
     echo '</div>';
@@ -3998,7 +3998,7 @@ add_action( 'rest_api_init', function () {
                 'ai-engine-pro'                          => 'AI Engine (Pro)',
                 'mwai-content-parser'                    => 'Content Parser (AI Engine)',
                 'all-in-one-wp-security-and-firewall'    => 'All-In-One Security (AIOS)',
-                basename( dirname( __FILE__ ) )              => 'Aspera Analysis API',
+                basename( dirname( __FILE__ ) )              => 'AsperAi Site Tools',
                 'burst-pro'                              => 'Burst Pro',
                 'webp-converter-for-media'               => 'Converter for Media',
                 'disable-comments'                       => 'Disable Comments',
