@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.85.1
+ * Version: 1.86.0
  * Author: Aspera
  */
 
@@ -1130,6 +1130,7 @@ function aspera_site_health_test(): array {
         'db_tables'     => 'Database Tabellen',
         'theme_check'   => 'Thema Check',
         'wp_settings'   => 'WP Instellingen',
+        'cache'         => 'Cache',
     ];
 
     $rows = '';
@@ -1518,6 +1519,7 @@ function aspera_dashboard_widget_render(): void {
         'meta_orphaned'    => 'Orphaned ACF Meta',
         'theme_check'      => 'Thema Check',
         'wp_settings'      => 'WP Instellingen',
+        'cache'            => 'Cache',
     ];
 
     $sev_colors = [
@@ -1558,6 +1560,15 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-bulk-btn-ignored { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
         #aspera-audit-page .aspera-bulk-btn-ignored:hover { background:#e0e0e0; }
         #aspera-audit-page .aspera-ignored { opacity:0.45; }
+        #aspera-audit-page .aspera-sev-filter-btn { transition: opacity 0.15s, transform 0.1s; }
+        #aspera-audit-page .aspera-sev-filter-btn:not(:disabled):hover { opacity: 0.85; }
+        #aspera-audit-page .aspera-sev-filter-btn.is-active { box-shadow: 0 0 0 2px #1d2327; }
+        #aspera-audit-page.is-filtering .aspera-viol-row { display: none !important; }
+        #aspera-audit-page.is-filtering-critical    .aspera-viol-row.aspera-sev-critical    { display: flex !important; }
+        #aspera-audit-page.is-filtering-error       .aspera-viol-row.aspera-sev-error       { display: flex !important; }
+        #aspera-audit-page.is-filtering-warning     .aspera-viol-row.aspera-sev-warning     { display: flex !important; }
+        #aspera-audit-page.is-filtering-observation .aspera-viol-row.aspera-sev-observation { display: flex !important; }
+        #aspera-audit-page.is-filtering .aspera-cat-details.aspera-cat-empty { display: none; }
         #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; }
         #aspera-audit-page .aspera-fix-btn:hover { background:#135e96; }
         #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#2271b1; color:#fff; border:none; border-radius:3px; padding:2px 10px; }
@@ -1616,12 +1627,13 @@ function aspera_dashboard_widget_render(): void {
             }
         }
     }
-    echo '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
+    echo '<div id="aspera-sev-bar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
     foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
         $bg  = $cnt > 0 ? ( $sev_colors[ $sev ] ) : '#dcdcde';
         $fc  = $cnt > 0 ? '#fff' : '#50575e';
-        echo '<span style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</span>';
+        $cursor = $cnt > 0 ? 'pointer' : 'default';
+        echo '<button type="button" class="aspera-sev-filter-btn" data-sev="' . esc_attr( $sev ) . '" ' . ( $cnt === 0 ? 'disabled' : '' ) . ' style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border:none;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:700;cursor:' . $cursor . ';">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</button>';
     }
     $stale_count = count( $exceptions_raw ) - $ignored_total;
     if ( $ignored_total > 0 ) {
@@ -1682,7 +1694,7 @@ function aspera_dashboard_widget_render(): void {
         $row_bg   = ( $active_count > 0 && ! $obs_only ) ? '#fff8f8' : '#f6f7f7';
         $font_w   = ( $active_count > 0 && ! $obs_only ) ? '600' : '400';
 
-        echo '<details' . $is_open . ' style="border-bottom:1px solid #dcdcde;">';
+        echo '<details' . $is_open . ' class="aspera-cat-details" data-cat="' . esc_attr( $key ) . '" style="border-bottom:1px solid #dcdcde;">';
         echo '<summary style="display:flex;align-items:center;justify-content:space-between;padding:7px 12px;cursor:pointer;background:' . esc_attr( $row_bg ) . ';">';
         echo '<span style="font-size:13px;font-weight:' . $font_w . ';color:#1d2327;">';
         echo '<span class="aspera-chevron">▶</span>' . esc_html( $label );
@@ -1731,7 +1743,7 @@ function aspera_dashboard_widget_render(): void {
                     $has_fix = is_array( $fix ) && ( $fix['fixable'] ?? false );
                     $fix_json = $has_fix ? esc_attr( wp_json_encode( $fix ) ) : '';
 
-                    echo '<div class="aspera-viol-row" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<div class="aspera-viol-row aspera-sev-' . esc_attr( $sev ) . '" data-sev="' . esc_attr( $sev ) . '" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
                     echo '<input type="checkbox" class="aspera-exc-cb" data-exc-id="' . $eid . '" data-category="' . $cat_key_attr . '" data-rule="' . $rule_attr . '" data-post-id="' . $pid_attr . '"' . ( $has_fix ? ' data-fix="' . $fix_json . '"' : '' ) . '>';
                     echo '<span style="color:' . esc_attr( $dot_col ) . ';font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">&#x25CF;</span>';
                     echo '<div style="flex:1;min-width:0;">';
@@ -1786,7 +1798,7 @@ function aspera_dashboard_widget_render(): void {
                     $post_id = isset( $v['post_id'] ) ? (int) $v['post_id'] : null;
                     $eid     = esc_attr( $v['_exc_id'] ?? '' );
 
-                    echo '<div class="aspera-viol-row aspera-ignored" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
+                    echo '<div class="aspera-viol-row aspera-ignored aspera-sev-' . esc_attr( $sev ) . '" data-sev="' . esc_attr( $sev ) . '" style="display:flex;align-items:flex-start;gap:8px;padding:5px 0;border-bottom:1px solid #f0f0f0;">';
                     echo '<input type="checkbox" class="aspera-unexc-cb" data-exc-id="' . $eid . '">';
                     echo '<span style="color:#a7aaad;font-weight:700;flex-shrink:0;font-size:14px;margin-top:1px;">●</span>';
                     echo '<div style="flex:1;min-width:0;">';
@@ -1833,6 +1845,47 @@ function aspera_dashboard_widget_script(): void {
                 if (refreshBtn) refreshBtn.click();
             });
         });
+
+        // ── Severity-filter ──────────────────────────────────────────────
+        var auditPage = document.getElementById('aspera-audit-page');
+        if (auditPage) {
+            var sevButtons = auditPage.querySelectorAll('.aspera-sev-filter-btn');
+            var activeSev  = null;
+            function applyFilter(sev) {
+                ['critical','error','warning','observation'].forEach(function (s) {
+                    auditPage.classList.remove('is-filtering-' + s);
+                });
+                sevButtons.forEach(function (b) { b.classList.remove('is-active'); });
+                if (!sev) {
+                    auditPage.classList.remove('is-filtering');
+                    auditPage.querySelectorAll('.aspera-cat-details').forEach(function (d) {
+                        d.classList.remove('aspera-cat-empty');
+                    });
+                    return;
+                }
+                auditPage.classList.add('is-filtering');
+                auditPage.classList.add('is-filtering-' + sev);
+                var btn = auditPage.querySelector('.aspera-sev-filter-btn[data-sev="' + sev + '"]');
+                if (btn) btn.classList.add('is-active');
+                auditPage.querySelectorAll('.aspera-cat-details').forEach(function (d) {
+                    var has = d.querySelector('.aspera-viol-row.aspera-sev-' + sev);
+                    if (has) {
+                        d.classList.remove('aspera-cat-empty');
+                        d.setAttribute('open', '');
+                    } else {
+                        d.classList.add('aspera-cat-empty');
+                    }
+                });
+            }
+            sevButtons.forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    if (btn.disabled) return;
+                    var sev = btn.dataset.sev;
+                    activeSev = (activeSev === sev) ? null : sev;
+                    applyFilter(activeSev);
+                });
+            });
+        }
 
         function runAudit(statusMsg) {
             if (!refreshBtn) return;
@@ -7126,7 +7179,7 @@ add_action( 'rest_api_init', function () {
             $timeout_events = [];
             foreach ( $cron as $ts => $hooks ) {
                 foreach ( $hooks as $hook => $payload ) {
-                    if ( strpos( $hook, 'wp_fastest_cache_' ) === 0 ) {
+                    if ( preg_match( '/^wp_fastest_cache_\d+$/', $hook ) ) {
                         foreach ( $payload as $sig => $event ) {
                             $timeout_events[] = [
                                 'hook'     => $hook,
