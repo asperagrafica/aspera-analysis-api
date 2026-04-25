@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.89.1
+ * Version: 1.90.0
  * Author: Aspera
  */
 
@@ -24,6 +24,10 @@ $aspera_updater->setBranch( 'main' );
 register_activation_hook( __FILE__, 'aspera_ensure_secret_key' );
 add_action( 'admin_init', 'aspera_ensure_secret_key' );
 function aspera_ensure_secret_key(): void {
+    // Als ASPERA_SECRET_KEY constant in wp-config.php staat: geen DB-fallback nodig.
+    if ( defined( 'ASPERA_SECRET_KEY' ) && ASPERA_SECRET_KEY ) {
+        return;
+    }
     if ( ! get_option( 'aspera_secret_key' ) ) {
         update_option( 'aspera_secret_key', wp_generate_password( 48, false ), false );
     }
@@ -975,12 +979,67 @@ function aspera_scan_css_object_for_colors( array $data, string $element_key, st
 }
 
 /**
+ * Geheime sleutel ophalen — eerst constant in wp-config.php, anders DB-option.
+ * Constant zetten: define( 'ASPERA_SECRET_KEY', '...' ); in wp-config.php.
+ * Voorkomt dat een DB-leak directe API-toegang geeft.
+ */
+function aspera_get_secret_key(): string {
+    if ( defined( 'ASPERA_SECRET_KEY' ) && ASPERA_SECRET_KEY ) {
+        return (string) ASPERA_SECRET_KEY;
+    }
+    return (string) get_option( 'aspera_secret_key', '' );
+}
+
+/**
+ * Bereken delta tussen huidige summary en voorgaande snapshot.
+ * Returnt array met: prev_date, total_diff, severity_diffs, score_diff, category_diffs.
+ * Returnt null als er geen historie is.
+ */
+function aspera_get_audit_delta( array $current ): ?array {
+    $history = get_option( 'aspera_audit_history', [] );
+    if ( ! is_array( $history ) || empty( $history ) ) return null;
+    $last = end( $history );
+    if ( ! is_array( $last ) || empty( $last['summary'] ) ) return null;
+    $prev = json_decode( $last['summary'], true );
+    if ( ! is_array( $prev ) ) return null;
+
+    $cur_total = (int) ( $current['total_violations'] ?? 0 );
+    $pre_total = (int) ( $prev['total_violations'] ?? 0 );
+    $cur_score = (int) ( $current['score'] ?? 0 );
+    $pre_score = (int) ( $prev['score'] ?? 0 );
+
+    $sev_diffs = [];
+    foreach ( [ 'critical', 'error', 'warning', 'observation' ] as $s ) {
+        $sev_diffs[ $s ] = (int) ( $current['severity_counts'][ $s ] ?? 0 ) - (int) ( $prev['severity_counts'][ $s ] ?? 0 );
+    }
+
+    $cat_diffs = [];
+    $all_cats  = array_unique( array_merge(
+        array_keys( $current['category_scores'] ?? [] ),
+        array_keys( $prev['category_scores'] ?? [] )
+    ) );
+    foreach ( $all_cats as $c ) {
+        $cur_v = (int) ( $current['category_scores'][ $c ]['violations'] ?? 0 );
+        $pre_v = (int) ( $prev['category_scores'][ $c ]['violations'] ?? 0 );
+        $diff  = $cur_v - $pre_v;
+        if ( $diff !== 0 ) $cat_diffs[ $c ] = $diff;
+    }
+
+    return [
+        'prev_date'      => $last['date'] ?? null,
+        'total_diff'     => $cur_total - $pre_total,
+        'score_diff'     => $cur_score - $pre_score,
+        'severity_diffs' => $sev_diffs,
+        'category_diffs' => $cat_diffs,
+    ];
+}
+
+/**
  * Verifieert de geheime sleutel op elk REST-verzoek.
  * Sleutel wordt meegegeven als query-parameter: ?aspera_key=...
- * Opgeslagen in wp_options onder 'aspera_secret_key' (autoload: no).
  */
 function aspera_check_key( WP_REST_Request $req ): true|WP_Error {
-    $stored = get_option( 'aspera_secret_key', '' );
+    $stored = aspera_get_secret_key();
     if ( empty( $stored ) ) {
         return new WP_Error( 'no_key', 'Aspera secret key niet geconfigureerd.', [ 'status' => 500 ] );
     }
@@ -1290,9 +1349,9 @@ add_action( 'wp_ajax_aspera_refresh_audit', function () {
     }
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
 
-    $key = get_option( 'aspera_secret_key' );
+    $key = aspera_get_secret_key();
     if ( ! $key ) {
-        wp_send_json_error( 'aspera_secret_key niet gevonden in wp_options.' );
+        wp_send_json_error( 'Aspera secret key niet geconfigureerd (constant of option).' );
     }
 
     $request = new WP_REST_Request( 'GET', '/aspera/v1/site/audit' );
@@ -1852,6 +1911,13 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page.is-filtering-warning     .aspera-viol-row.aspera-sev-warning     { display: flex !important; }
         #aspera-audit-page.is-filtering-observation .aspera-viol-row.aspera-sev-observation { display: flex !important; }
         #aspera-audit-page.is-filtering .aspera-cat-details.aspera-cat-empty { display: none; }
+        #aspera-audit-page.is-searching .aspera-viol-row.aspera-no-search-match { display: none !important; }
+        #aspera-audit-page.is-searching .aspera-cat-details.aspera-cat-search-empty { display: none; }
+        #aspera-audit-page #aspera-search-input { width:240px; padding:4px 8px; font-size:13px; border:1px solid #c3c4c7; border-radius:3px; }
+        #aspera-audit-page #aspera-fixall-btn { font-size:12px; cursor:pointer; background:#00a32a; color:#fff; border:none; border-radius:3px; padding:4px 12px; font-weight:600; }
+        #aspera-audit-page #aspera-fixall-btn:disabled { background:#dcdcde; color:#50575e; cursor:default; }
+        #aspera-audit-page #aspera-fixall-btn:not(:disabled):hover { background:#00831f; }
+        #aspera-audit-page #aspera-fixall-status { font-size:12px; color:#50575e; margin-left:6px; }
         #aspera-audit-page .aspera-fix-btn { font-size:11px; cursor:pointer; background:#00a32a; color:#fff; border:none; border-radius:3px; padding:2px 8px; flex-shrink:0; margin-left:auto; font-weight:600; }
         #aspera-audit-page .aspera-fix-btn:hover { background:#00831f; }
         #aspera-audit-page .aspera-bulk-fix-btn { font-size:12px; cursor:pointer; background:#00a32a; color:#fff; border:none; border-radius:3px; padding:2px 10px; font-weight:600; }
@@ -1944,10 +2010,29 @@ function aspera_dashboard_widget_render(): void {
         }
     }
 
-    // ── Top toolbar: datum + Vernieuwen + PDF ──────────────────────────────────
+    // Tel hoeveel violations bulk-fixable zijn (alleen niet-destructieve actions)
+    $bulk_fixable_count = 0;
+    $bulk_safe_actions  = [ 'add_attribute', 'remove_attribute', 'replace_value' ];
+    foreach ( $cats as $_c ) {
+        foreach ( $_c['violations'] ?? [] as $_v ) {
+            $eid = $_v['exception_id'] ?? '';
+            if ( $eid && isset( $exc_index[ $eid ] ) ) continue;
+            $f = $_v['proposed_fix'] ?? null;
+            if ( is_array( $f ) && ( $f['fixable'] ?? false ) && in_array( $f['action'] ?? '', $bulk_safe_actions, true ) ) {
+                $bulk_fixable_count++;
+            }
+        }
+    }
+
+    // ── Top toolbar: datum + Search + Fix-all + Vernieuwen ─────────────────────
     echo '<div id="aspera-audit-toolbar">';
     echo '<small style="color:#72777c;">Laatste audit: ' . $date_fmt . '</small>';
-    echo '<span>';
+    echo '<span style="display:flex;align-items:center;gap:8px;">';
+    echo '<input type="search" id="aspera-search-input" placeholder="Zoek in violations..." />';
+    if ( $bulk_fixable_count > 0 ) {
+        echo '<button id="aspera-fixall-btn" data-nonce="' . esc_attr( $nonce ) . '" data-count="' . (int) $bulk_fixable_count . '" title="Voert alleen veilige shortcode-fixes uit (geen verwijderingen).">&#x2713;&nbsp;Fix alle ' . (int) $bulk_fixable_count . ' fixable</button>';
+        echo '<span id="aspera-fixall-status"></span>';
+    }
     echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
     echo '</span>';
     echo '</div>';
@@ -1962,7 +2047,28 @@ function aspera_dashboard_widget_render(): void {
     echo '<span class="aspera-hero-label" style="color:' . esc_attr( $score_color ) . ';background:' . esc_attr( $score_color ) . '22;">' . esc_html( $score_label ) . '</span>';
     echo '<div class="aspera-hero-divider"></div>';
     echo '<div class="aspera-hero-meta">';
-    echo '<div class="aspera-hero-total"><strong>' . (int) $total . '</strong> violations totaal' . ( $ignored_total > 0 ? ' &middot; ' . $ignored_total . ' genegeerd' : '' ) . ( $stale_count > 0 ? ' &middot; <button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;vertical-align:baseline;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>' : '' ) . '</div>';
+    // Delta vs vorige snapshot
+    $delta = aspera_get_audit_delta( is_array( $data ) ? $data : [] );
+    $delta_html = '';
+    if ( $delta && ( $delta['total_diff'] !== 0 || $delta['score_diff'] !== 0 ) ) {
+        $diff_total = $delta['total_diff'];
+        $diff_score = $delta['score_diff'];
+        $prev_ts    = $delta['prev_date'] ? strtotime( $delta['prev_date'] ) : false;
+        $prev_fmt   = $prev_ts ? date_i18n( 'd-m-Y H:i', $prev_ts ) : '?';
+        $parts = [];
+        if ( $diff_total !== 0 ) {
+            $sign = $diff_total > 0 ? '+' : '';
+            $col  = $diff_total > 0 ? '#d63638' : '#00a32a';
+            $parts[] = '<span style="color:' . $col . ';font-weight:700;">' . $sign . $diff_total . ' issues</span>';
+        }
+        if ( $diff_score !== 0 ) {
+            $sign = $diff_score > 0 ? '+' : '';
+            $col  = $diff_score > 0 ? '#00a32a' : '#d63638';
+            $parts[] = '<span style="color:' . $col . ';font-weight:700;">score ' . $sign . $diff_score . '</span>';
+        }
+        $delta_html = ' &middot; <span style="font-size:12px;color:#50575e;" title="vorige run: ' . esc_attr( $prev_fmt ) . '">sinds vorige run: ' . implode( ', ', $parts ) . '</span>';
+    }
+    echo '<div class="aspera-hero-total"><strong>' . (int) $total . '</strong> violations totaal' . ( $ignored_total > 0 ? ' &middot; ' . $ignored_total . ' genegeerd' : '' ) . ( $stale_count > 0 ? ' &middot; <button id="aspera-cleanup-btn" data-nonce="' . esc_attr( $nonce ) . '" style="font-size:11px;cursor:pointer;background:none;border:1px solid #c3c4c7;border-radius:3px;padding:1px 7px;color:#72777c;vertical-align:baseline;" title="' . esc_attr( $stale_count . ' opgeslagen uitzonderingen matchen geen huidige violation' ) . '">&#x1F9F9;&nbsp;' . $stale_count . '&nbsp;stale</button>' : '' ) . $delta_html . '</div>';
     echo '<div id="aspera-sev-bar" class="aspera-sev-grid">';
     foreach ( [ 'critical' => 'Critical', 'error' => 'Error', 'warning' => 'Warning', 'observation' => 'Obs.' ] as $sev => $blabel ) {
         $cnt = (int) ( $counts[ $sev ] ?? 0 );
@@ -2041,6 +2147,14 @@ function aspera_dashboard_widget_render(): void {
         echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $active_count . '</span>';
         if ( $ignored_count > 0 ) {
             echo '<span style="background:#dcdcde;color:#50575e;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;" title="Genegeerde violations">' . $ignored_count . ' &#x1F6AB;</span>';
+        }
+        // Delta-badge per categorie
+        if ( ! empty( $delta['category_diffs'][ $key ] ) ) {
+            $cd   = (int) $delta['category_diffs'][ $key ];
+            $sign = $cd > 0 ? '+' : '';
+            $bg   = $cd > 0 ? '#fde7e7' : '#e6f6ea';
+            $col  = $cd > 0 ? '#d63638' : '#00a32a';
+            echo '<span style="background:' . $bg . ';color:' . $col . ';border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;" title="Verschil sinds vorige run">' . $sign . $cd . '</span>';
         }
         echo '</span>';
         echo '</summary>';
@@ -2655,6 +2769,101 @@ function aspera_dashboard_widget_script(): void {
                 });
             });
         });
+
+        // ── Live search filter ────────────────────────────────────────────
+        var searchInput = document.getElementById('aspera-search-input');
+        if (searchInput) {
+            var page = document.getElementById('aspera-audit-page');
+            function applySearch() {
+                var q = (searchInput.value || '').trim().toLowerCase();
+                if (!q) {
+                    if (page) page.classList.remove('is-searching');
+                    document.querySelectorAll('.aspera-viol-row.aspera-no-search-match').forEach(function (r) { r.classList.remove('aspera-no-search-match'); });
+                    document.querySelectorAll('.aspera-cat-details.aspera-cat-search-empty').forEach(function (d) { d.classList.remove('aspera-cat-search-empty'); });
+                    return;
+                }
+                if (page) page.classList.add('is-searching');
+                document.querySelectorAll('.aspera-cat-details').forEach(function (det) {
+                    var anyMatch = false;
+                    det.querySelectorAll('.aspera-viol-row').forEach(function (row) {
+                        var txt = (row.textContent || '').toLowerCase();
+                        if (txt.indexOf(q) === -1) {
+                            row.classList.add('aspera-no-search-match');
+                        } else {
+                            row.classList.remove('aspera-no-search-match');
+                            anyMatch = true;
+                        }
+                    });
+                    if (anyMatch) {
+                        det.classList.remove('aspera-cat-search-empty');
+                        if (!det.open) det.open = true;
+                    } else {
+                        det.classList.add('aspera-cat-search-empty');
+                    }
+                });
+            }
+            var searchTimer;
+            searchInput.addEventListener('input', function () {
+                clearTimeout(searchTimer);
+                searchTimer = setTimeout(applySearch, 120);
+            });
+            searchInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') { searchInput.value = ''; applySearch(); }
+            });
+        }
+
+        // ── Fix-all fixable queue ─────────────────────────────────────────
+        var fixAllBtn = document.getElementById('aspera-fixall-btn');
+        if (fixAllBtn) {
+            fixAllBtn.addEventListener('click', function () {
+                var safeActions = ['add_attribute', 'remove_attribute', 'replace_value'];
+                var fixes = [];
+                document.querySelectorAll('.aspera-fix-btn').forEach(function (btn) {
+                    if (btn.disabled) return;
+                    try {
+                        var fix = JSON.parse(btn.dataset.fix);
+                        if (fix && safeActions.indexOf(fix.action) !== -1) {
+                            fixes.push({ btn: btn, fix: fix, postId: btn.dataset.postId, nonce: btn.dataset.nonce });
+                        }
+                    } catch (e) {}
+                });
+                if (!fixes.length) { alert('Geen fixable shortcode-violations gevonden.'); return; }
+                if (!confirm('Pas ' + fixes.length + ' shortcode-fixes toe? Verwijderingen (orphaned meta, scheduled actions) zijn uitgesloten en moeten individueel worden bevestigd.')) return;
+
+                fixAllBtn.disabled = true;
+                var status   = document.getElementById('aspera-fixall-status');
+                var done     = 0;
+                var failures = [];
+                var i        = 0;
+
+                function next() {
+                    if (i >= fixes.length) {
+                        var msg = 'Klaar: ' + done + '/' + fixes.length + ' toegepast';
+                        if (failures.length) msg += ', ' + failures.length + ' mislukt';
+                        if (status) status.textContent = msg;
+                        runAudit(msg + ' — audit wordt vernieuwd…');
+                        return;
+                    }
+                    var item = fixes[i++];
+                    if (status) status.textContent = i + '/' + fixes.length + '…';
+                    var body = 'action=aspera_apply_fix&nonce=' + encodeURIComponent(item.nonce)
+                        + '&fix_action=' + encodeURIComponent(item.fix.action)
+                        + '&post_id=' + encodeURIComponent(item.postId);
+                    if (item.fix.before) body += '&before=' + encodeURIComponent(item.fix.before);
+                    if (item.fix.after !== undefined) body += '&after=' + encodeURIComponent(item.fix.after);
+                    fetch(ajaxurl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+                        .then(function (r) { return r.json(); })
+                        .then(function (data) {
+                            if (data && data.success) { done++; item.btn.disabled = true; item.btn.textContent = '✓'; item.btn.style.background = '#00a32a'; }
+                            else { failures.push(item); }
+                            next();
+                        })
+                        .catch(function () { failures.push(item); next(); });
+                }
+                next();
+            });
+        }
+
     })();
     </script>
     <?php
@@ -7976,7 +8185,7 @@ add_action( 'rest_api_init', function () {
                     $request->set_param( $k, $v );
                 }
                 // Bypass auth — we zijn al geauthenticeerd
-                $request->set_param( 'aspera_key', get_option( 'aspera_secret_key' ) );
+                $request->set_param( 'aspera_key', aspera_get_secret_key() );
                 $response = rest_do_request( $request );
                 if ( $response->is_error() ) {
                     $error = $response->as_error();
@@ -8973,6 +9182,18 @@ add_action( 'rest_api_init', function () {
 
             // ── Snapshot opslaan ──────────────────────────────────────────
             $audit_date = gmdate( 'c' );
+
+            // Delta-engine: bewaar vorige summary in history voor we overschrijven (max 7 entries, FIFO).
+            $prev_summary_raw = get_option( 'aspera_audit_summary' );
+            if ( $prev_summary_raw ) {
+                $prev_date    = get_option( 'aspera_audit_date' );
+                $history      = get_option( 'aspera_audit_history', [] );
+                if ( ! is_array( $history ) ) $history = [];
+                $history[]    = [ 'date' => $prev_date, 'summary' => $prev_summary_raw ];
+                if ( count( $history ) > 7 ) $history = array_slice( $history, -7 );
+                update_option( 'aspera_audit_history', $history, false );
+            }
+
             update_option( 'aspera_audit_score', $health_score, false );
             update_option( 'aspera_audit_date', $audit_date, false );
             update_option( 'aspera_audit_summary', wp_json_encode( [
