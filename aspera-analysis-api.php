@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.73.0
+ * Version: 1.74.0
  * Author: Aspera
  */
 
@@ -3060,6 +3060,59 @@ add_action( 'rest_api_init', function () {
                     }
                 }
 
+                // ── Unused element checks ─────────────────────────────────
+                // Element wordt nergens daadwerkelijk gerenderd: in alle 4
+                // breakpoints staat het in `hidden`, OF in een gedeactiveerde
+                // top/bottom-zone, OF een combinatie daarvan. 0 actieve voorkomens.
+                if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
+                    foreach ( array_keys( $raw['data'] ) as $el_id ) {
+                        $active_placements = 0;
+                        $placement_states  = [];
+
+                        foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+                            $bp_layout  = $raw[ $bp ]['layout'] ?? null;
+                            $bp_options = $raw[ $bp ]['options'] ?? null;
+                            if ( ! is_array( $bp_layout ) ) continue;
+
+                            $hidden_arr = isset( $bp_layout['hidden'] ) && is_array( $bp_layout['hidden'] ) ? $bp_layout['hidden'] : [];
+                            if ( in_array( $el_id, $hidden_arr, true ) ) {
+                                $placement_states[] = $bp . ':hidden';
+                                continue;
+                            }
+
+                            foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
+                                foreach ( [ 'left', 'center', 'right' ] as $col ) {
+                                    $cell = $bp_layout[ $zone . '_' . $col ] ?? null;
+                                    if ( ! is_array( $cell ) ) continue;
+                                    if ( ! in_array( $el_id, $cell, true ) ) continue;
+
+                                    $zone_active = true;
+                                    if ( $zone !== 'middle' ) {
+                                        $show = (int) ( $bp_options[ $zone . '_show' ] ?? 1 );
+                                        $zone_active = ( $show === 1 );
+                                    }
+
+                                    if ( $zone_active ) {
+                                        $active_placements++;
+                                        $placement_states[] = $bp . ':' . $zone . '_' . $col;
+                                    } else {
+                                        $placement_states[] = $bp . ':' . $zone . '_' . $col . ' (zone uit)';
+                                    }
+                                }
+                            }
+                        }
+
+                        if ( $active_placements === 0 && ! empty( $placement_states ) ) {
+                            $observations[] = [
+                                'rule'     => 'header_element_unused',
+                                'severity' => 'observation',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': element ' . $el_id . ' nergens in een actieve zone gebruikt (' . implode( ', ', $placement_states ) . ')',
+                            ];
+                        }
+                    }
+                }
+
                 // ── Menu mobile_width checks ──────────────────────────────
                 if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
                     $highest_bp = 0;
@@ -3070,6 +3123,117 @@ add_action( 'rest_api_init', function () {
 
                     foreach ( $raw['data'] as $el_id => $el ) {
                         if ( strpos( $el_id, 'menu:' ) !== 0 ) continue;
+
+                        // mobile_behavior: "1" = label and arrow (gewenst).
+                        // "0" = arrow only, "2" = label only — beide ongewenst (UX).
+                        if ( isset( $el['mobile_behavior'] ) && (string) $el['mobile_behavior'] !== '1' ) {
+                            $violations[] = [
+                                'rule'     => 'menu_mobile_behavior_not_label_and_arrow',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_behavior = "' . $el['mobile_behavior'] . '" (verwacht "1" = label and arrow)',
+                            ];
+                        }
+
+                        // mobile_icon_size per breakpoint: max 50px, en niet-stijgend
+                        // van default → laptops → tablets → mobiles.
+                        $size_keys = [
+                            'default' => 'mobile_icon_size',
+                            'laptops' => 'mobile_icon_size_laptops',
+                            'tablets' => 'mobile_icon_size_tablets',
+                            'mobiles' => 'mobile_icon_size_mobiles',
+                        ];
+                        $size_values = [];
+                        foreach ( $size_keys as $bp_lbl => $key ) {
+                            if ( ! isset( $el[ $key ] ) || $el[ $key ] === '' ) continue;
+                            $px = (int) preg_replace( '/[^0-9-]/', '', (string) $el[ $key ] );
+                            $size_values[ $bp_lbl ] = [ 'raw' => $el[ $key ], 'px' => $px ];
+                        }
+
+                        $too_large = [];
+                        foreach ( $size_values as $bp_lbl => $sv ) {
+                            if ( $sv['px'] > 50 ) {
+                                $too_large[] = $bp_lbl . '=' . $sv['raw'];
+                            }
+                        }
+                        if ( ! empty( $too_large ) ) {
+                            $violations[] = [
+                                'rule'     => 'menu_mobile_icon_size_too_large',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_icon_size > 50px op ' . implode( ', ', $too_large ),
+                            ];
+                        }
+
+                        $bp_seq    = [ 'default', 'laptops', 'tablets', 'mobiles' ];
+                        $increases = [];
+                        $prev_lbl  = null;
+                        foreach ( $bp_seq as $bp_lbl ) {
+                            if ( ! isset( $size_values[ $bp_lbl ] ) ) continue;
+                            if ( $prev_lbl !== null && $size_values[ $bp_lbl ]['px'] > $size_values[ $prev_lbl ]['px'] ) {
+                                $increases[] = $prev_lbl . ' (' . $size_values[ $prev_lbl ]['raw'] . ') → ' . $bp_lbl . ' (' . $size_values[ $bp_lbl ]['raw'] . ')';
+                            }
+                            $prev_lbl = $bp_lbl;
+                        }
+                        if ( ! empty( $increases ) ) {
+                            $seq_str = [];
+                            foreach ( $bp_seq as $bp_lbl ) {
+                                if ( isset( $size_values[ $bp_lbl ] ) ) {
+                                    $seq_str[] = $bp_lbl . '=' . $size_values[ $bp_lbl ]['raw'];
+                                }
+                            }
+                            $violations[] = [
+                                'rule'     => 'menu_mobile_icon_size_inconsistent',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' mobile_icon_size sequentie [' . implode( ', ', $seq_str ) . '] stijgt op: ' . implode( ', ', $increases ),
+                            ];
+                        }
+
+                        // align_edges: per actieve plaatsing bepalen of de setting
+                        // klopt. Verwacht 1 als menu de header-rand raakt
+                        // (eerste in *_left, of laatste in *_right). Anders 0.
+                        if ( isset( $el['align_edges'] ) ) {
+                            $actual_ae = (int) $el['align_edges'];
+                            $ae_mismatches = [];
+                            foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+                                $bp_layout  = $raw[ $bp ]['layout'] ?? null;
+                                $bp_options = $raw[ $bp ]['options'] ?? null;
+                                if ( ! is_array( $bp_layout ) ) continue;
+
+                                foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
+                                    if ( $zone !== 'middle' ) {
+                                        $show = (int) ( $bp_options[ $zone . '_show' ] ?? 1 );
+                                        if ( $show === 0 ) continue;
+                                    }
+                                    foreach ( [ 'left', 'center', 'right' ] as $col ) {
+                                        $cell = $bp_layout[ $zone . '_' . $col ] ?? null;
+                                        if ( ! is_array( $cell ) || empty( $cell ) ) continue;
+                                        if ( ! in_array( $el_id, $cell, true ) ) continue;
+
+                                        $expected = 0;
+                                        if ( $col === 'left' && $cell[0] === $el_id ) {
+                                            $expected = 1;
+                                        } elseif ( $col === 'right' && end( $cell ) === $el_id ) {
+                                            $expected = 1;
+                                        }
+
+                                        if ( $expected !== $actual_ae ) {
+                                            $ae_mismatches[] = $bp . '/' . $zone . '_' . $col . ' (verwacht ' . $expected . ')';
+                                        }
+                                    }
+                                }
+                            }
+                            if ( ! empty( $ae_mismatches ) ) {
+                                $violations[] = [
+                                    'rule'     => 'menu_align_edges_mismatch',
+                                    'severity' => 'warning',
+                                    'post_id'  => $post->ID,
+                                    'detail'   => $title . ': ' . $el_id . ' align_edges = ' . $actual_ae . ' maar verkeerd op: ' . implode( ', ', $ae_mismatches ),
+                                ];
+                            }
+                        }
+
                         $mw = isset( $el['mobile_width'] ) ? (int) $el['mobile_width'] : null;
                         if ( $mw === null ) continue;
 
@@ -7002,6 +7166,11 @@ add_action( 'rest_api_init', function () {
                 'scroll_breakpoint_inconsistent'         => 'observation',
                 'centering_missing'                      => 'warning',
                 'centering_unexpected'                   => 'warning',
+                'header_element_unused'                  => 'observation',
+                'menu_mobile_behavior_not_label_and_arrow' => 'warning',
+                'menu_mobile_icon_size_too_large'        => 'warning',
+                'menu_mobile_icon_size_inconsistent'     => 'warning',
+                'menu_align_edges_mismatch'              => 'warning',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
