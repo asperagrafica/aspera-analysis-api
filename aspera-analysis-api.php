@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Aspera Analysis API
  * Description: Lichtgewicht REST endpoints voor server-side analyse van WPBakery templates, ACF field groups, us_header en us_grid_layout. Voorkomt token-overhead bij externe analyse.
- * Version: 1.72.0
+ * Version: 1.73.0
  * Author: Aspera
  */
 
@@ -1197,7 +1197,38 @@ function aspera_admin_page_render(): void {
     echo '<div class="wrap" id="aspera-audit-page">';
     echo '<h1>Aspera Analysis API</h1>';
     aspera_dashboard_widget_render();
+    aspera_admin_page_pdf_export();
     echo '</div>';
+}
+
+function aspera_admin_page_pdf_export(): void {
+    ?>
+    <style>
+        #aspera-pdf-btn { margin-right: 6px; }
+        @media print {
+            #adminmenumain, #adminmenuback, #wpadminbar, #wpfooter,
+            .update-nag, .notice, .update-message, #screen-meta, #screen-meta-links,
+            #aspera-refresh-btn, #aspera-pdf-btn, #aspera-refresh-status { display: none !important; }
+            html.wp-toolbar { padding-top: 0 !important; }
+            #wpcontent, #wpbody-content { margin-left: 0 !important; padding-left: 0 !important; padding-top: 0 !important; }
+            .wrap { margin: 0 !important; }
+            details { page-break-inside: avoid; }
+        }
+    </style>
+    <script>
+    (function () {
+        var refreshBtn = document.getElementById('aspera-refresh-btn');
+        if (!refreshBtn || document.getElementById('aspera-pdf-btn')) return;
+        var pdfBtn = document.createElement('button');
+        pdfBtn.type = 'button';
+        pdfBtn.id = 'aspera-pdf-btn';
+        pdfBtn.className = 'button button-secondary';
+        pdfBtn.innerHTML = '⤓&ensp;Exporteer als PDF';
+        pdfBtn.addEventListener('click', function () { window.print(); });
+        refreshBtn.parentNode.insertBefore(pdfBtn, refreshBtn);
+    })();
+    </script>
+    <?php
 }
 
 add_action( 'wp_dashboard_setup', function () {
@@ -2958,6 +2989,74 @@ add_action( 'rest_api_init', function () {
                             'post_id'  => $post->ID,
                             'detail'   => $title . ': ' . $bp . ' heeft vertical orientation — moet altijd horizontal zijn',
                         ];
+                    }
+                }
+
+                // ── Scroll breakpoint checks ──────────────────────────────
+                $sb_values = [];
+                foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+                    $sb = $raw[ $bp ]['options']['scroll_breakpoint'] ?? null;
+                    if ( $sb === null || $sb === '' ) continue;
+                    $sb_values[ $bp ] = $sb;
+                    if ( $sb !== '1px' ) {
+                        $observations[] = [
+                            'rule'     => 'scroll_breakpoint_not_1px',
+                            'severity' => 'observation',
+                            'post_id'  => $post->ID,
+                            'detail'   => $title . ': ' . $bp . ' scroll_breakpoint = ' . $sb . ' (verwacht 1px)',
+                        ];
+                    }
+                }
+                if ( count( $sb_values ) > 1 && count( array_unique( $sb_values ) ) > 1 ) {
+                    $parts = [];
+                    foreach ( $sb_values as $bp => $v ) {
+                        $parts[] = $bp . ': ' . $v;
+                    }
+                    $observations[] = [
+                        'rule'     => 'scroll_breakpoint_inconsistent',
+                        'severity' => 'observation',
+                        'post_id'  => $post->ID,
+                        'detail'   => $title . ': scroll_breakpoint inconsistent over breakpoints — ' . implode( ', ', $parts ),
+                    ];
+                }
+
+                // ── Centering checks per zone per breakpoint ──────────────
+                // Regel: centering=1 is alleen correct als center gevuld is EN
+                // (left OF right gevuld). Bij elke andere staat moet centering=0.
+                foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
+                    $bp_layout  = $raw[ $bp ]['layout'] ?? null;
+                    $bp_options = $raw[ $bp ]['options'] ?? null;
+                    if ( ! is_array( $bp_layout ) || ! is_array( $bp_options ) ) continue;
+
+                    foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
+                        // Skip uitgeschakelde zones (middle is altijd actief)
+                        if ( $zone !== 'middle' ) {
+                            $show = (int) ( $bp_options[ $zone . '_show' ] ?? 1 );
+                            if ( $show === 0 ) continue;
+                        }
+
+                        $left   = ! empty( $bp_layout[ $zone . '_left' ] );
+                        $center = ! empty( $bp_layout[ $zone . '_center' ] );
+                        $right  = ! empty( $bp_layout[ $zone . '_right' ] );
+                        $cent   = (int) ( $bp_options[ $zone . '_centering' ] ?? 0 );
+
+                        $needed = $center && ( $left || $right );
+
+                        if ( ! $cent && $needed ) {
+                            $violations[] = [
+                                'rule'     => 'centering_missing',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $bp . '/' . $zone . ' heeft center + randkolom gevuld maar centering staat uit',
+                            ];
+                        } elseif ( $cent && ! $needed ) {
+                            $violations[] = [
+                                'rule'     => 'centering_unexpected',
+                                'severity' => 'warning',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $bp . '/' . $zone . ' heeft centering aan maar center+randkolom voorwaarde niet vervuld',
+                            ];
+                        }
                     }
                 }
 
@@ -6898,6 +6997,11 @@ add_action( 'rest_api_init', function () {
                 'wrong_active_theme'                     => 'critical',
                 'impreza_license_inactive'               => 'critical',
                 'search_engine_noindex'                  => 'critical',
+                'missing_favicon'                        => 'warning',
+                'scroll_breakpoint_not_1px'              => 'observation',
+                'scroll_breakpoint_inconsistent'         => 'observation',
+                'centering_missing'                      => 'warning',
+                'centering_unexpected'                   => 'warning',
             ];
 
             // ── Per-categorie caps ────────────────────────────────────────
@@ -7562,6 +7666,14 @@ add_action( 'rest_api_init', function () {
                     'rule'     => 'search_engine_noindex',
                     'severity' => 'critical',
                     'detail'   => 'Search engine visibility staat uit (Settings > Reading) — de site wordt niet geindexeerd door Google',
+                ];
+            }
+            $site_icon_id = (int) get_option( 'site_icon', 0 );
+            if ( $site_icon_id <= 0 || ! wp_attachment_is_image( $site_icon_id ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'missing_favicon',
+                    'severity' => 'warning',
+                    'detail'   => 'Geen favicon ingesteld (Settings > General > Site Icon)',
                 ];
             }
             $categories['wp_settings'] = [
