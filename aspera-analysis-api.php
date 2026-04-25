@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.88.0
+ * Version: 1.89.0
  * Author: Aspera
  */
 
@@ -1856,14 +1856,13 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-viol-action { margin-top:4px; padding:6px 9px; background:#f0f6fc; border-left:3px solid #2271b1; font-size:12px; color:#1d2327; border-radius:0 3px 3px 0; }
         #aspera-audit-page .aspera-viol-action strong { color:#0073aa; }
         #aspera-audit-page .aspera-viol-detail-tech { display:block; margin-top:3px; color:#72777c; font-size:11px; word-break:break-word; }
-        #aspera-audit-page .aspera-tab-bar { display:flex; gap:0; margin-top:4px; border-bottom:2px solid rgba(0,0,0,0.08); }
-        #aspera-audit-page .aspera-tab-btn { background:transparent; border:none; padding:6px 14px; font-size:13px; font-weight:600; color:#50575e; cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; transition:color 0.15s, border-color 0.15s; }
-        #aspera-audit-page .aspera-tab-btn:hover { color:#1d2327; }
-        #aspera-audit-page .aspera-tab-btn.is-active { color:#1d2327; border-bottom-color:#1d2327; }
-        #aspera-audit-page .aspera-tab-count { display:inline-block; background:rgba(0,0,0,0.08); border-radius:10px; padding:0 7px; font-size:11px; margin-left:4px; min-width:18px; text-align:center; }
-        #aspera-audit-page .aspera-tab-btn.is-active .aspera-tab-count { background:#1d2327; color:#fff; }
         #aspera-audit-page .aspera-tab-content[hidden] { display:none !important; }
         #aspera-audit-page .aspera-cat-passed[open] .aspera-chevron { transform: rotate(90deg); }
+        #aspera-audit-page .aspera-passed-toggle-btn.is-active { box-shadow: 0 0 0 2px #1d2327; }
+        #aspera-audit-page .aspera-passed-toggle-btn:not(:disabled):hover { opacity: 0.85; }
+        #aspera-audit-page .aspera-toggle-all-bar { display:flex; justify-content:flex-end; margin:0 0 8px; }
+        #aspera-audit-page .aspera-toggle-all-btn { background:none; border:1px solid #c3c4c7; border-radius:3px; padding:3px 9px; font-size:12px; color:#50575e; cursor:pointer; }
+        #aspera-audit-page .aspera-toggle-all-btn:hover { background:#f0f0f1; color:#1d2327; }
     </style>';
 
     // ── Nog geen audit ─────────────────────────────────────────────────────────
@@ -1953,16 +1952,18 @@ function aspera_dashboard_widget_render(): void {
         $cursor = $cnt > 0 ? 'pointer' : 'default';
         echo '<button type="button" class="aspera-sev-filter-btn" data-sev="' . esc_attr( $sev ) . '" ' . ( $cnt === 0 ? 'disabled' : '' ) . ' style="background:' . esc_attr( $bg ) . ';color:' . esc_attr( $fc ) . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $cursor . ';">' . $cnt . '&nbsp;' . esc_html( $blabel ) . '</button>';
     }
-    echo '</div>';
-    echo '<div class="aspera-tab-bar">';
-    echo '<button type="button" class="aspera-tab-btn is-active" data-tab="issues">&#x26A0;&ensp;Issues <span class="aspera-tab-count">' . (int) $total . '</span></button>';
-    echo '<button type="button" class="aspera-tab-btn" data-tab="passed">&#x2713;&ensp;Passed <span class="aspera-tab-count">' . (int) $passed_total . '</span></button>';
+    $passed_disabled = $passed_total === 0;
+    $passed_bg = $passed_disabled ? '#dcdcde' : '#00a32a';
+    $passed_fc = $passed_disabled ? '#50575e' : '#fff';
+    $passed_cursor = $passed_disabled ? 'default' : 'pointer';
+    echo '<button type="button" class="aspera-passed-toggle-btn" ' . ( $passed_disabled ? 'disabled' : '' ) . ' style="background:' . $passed_bg . ';color:' . $passed_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $passed_cursor . ';">&#x2713;&nbsp;' . (int) $passed_total . '&nbsp;Passed</button>';
     echo '</div>';
     echo '</div>';
     echo '</div>';
 
     // ── Per-categorie accordion (Issues tab) ──────────────────────────────────
     echo '<div class="aspera-tab-content" data-tab-content="issues">';
+    echo '<div class="aspera-toggle-all-bar"><button type="button" class="aspera-toggle-all-btn" data-state="mixed">&#x2195;&nbsp;Alles uit-/inklappen</button></div>';
     echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;margin-bottom:12px;">';
 
     foreach ( $cat_labels as $key => $label ) {
@@ -2165,7 +2166,10 @@ function aspera_dashboard_widget_render(): void {
         echo '<p style="color:#72777c;margin:8px 0;">Geen passed checks om te tonen.</p>';
     } else {
         $rule_context = aspera_get_rule_context();
-        echo '<p style="color:#50575e;margin:0 0 10px;font-size:12px;">Deze checks zijn uitgevoerd en goedgekeurd. Categorieen die niet van toepassing zijn (bv. cache-plugin inactief) worden weggelaten.</p>';
+        echo '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 10px;flex-wrap:wrap;">';
+        echo '<p style="color:#50575e;margin:0;font-size:12px;flex:1;min-width:200px;">Deze checks zijn uitgevoerd en goedgekeurd. Categorieen die niet van toepassing zijn (bv. cache-plugin inactief) worden weggelaten.</p>';
+        echo '<button type="button" class="aspera-toggle-all-btn" data-state="mixed">&#x2195;&nbsp;Alles uit-/inklappen</button>';
+        echo '</div>';
         echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;">';
         foreach ( $cat_labels as $key => $label ) {
             if ( empty( $passed_per_cat[ $key ] ) ) continue;
@@ -2258,19 +2262,55 @@ function aspera_dashboard_widget_script(): void {
                 });
             });
 
-            // ── Tab-switching (Issues / Passed) ──────────────────────────
-            var tabButtons = auditPage.querySelectorAll('.aspera-tab-btn');
+            // ── Passed-toggle (mode switch) ──────────────────────────────
+            var passedBtn   = auditPage.querySelector('.aspera-passed-toggle-btn');
             var tabContents = auditPage.querySelectorAll('.aspera-tab-content');
-            tabButtons.forEach(function (btn) {
+            function showTab(name) {
+                tabContents.forEach(function (c) {
+                    if (c.dataset.tabContent === name) {
+                        c.removeAttribute('hidden');
+                    } else {
+                        c.setAttribute('hidden', '');
+                    }
+                });
+            }
+            var passedActive = false;
+            if (passedBtn) {
+                passedBtn.addEventListener('click', function () {
+                    if (passedBtn.disabled) return;
+                    passedActive = !passedActive;
+                    if (passedActive) {
+                        passedBtn.classList.add('is-active');
+                        // Severity-filter uitzetten als die actief was
+                        if (activeSev) { activeSev = null; applyFilter(null); }
+                        showTab('passed');
+                    } else {
+                        passedBtn.classList.remove('is-active');
+                        showTab('issues');
+                    }
+                });
+            }
+            // Wanneer een severity-filter wordt aangezet en passed is actief, switch naar issues
+            sevButtons.forEach(function (btn) {
                 btn.addEventListener('click', function () {
-                    var target = btn.dataset.tab;
-                    tabButtons.forEach(function (b) { b.classList.toggle('is-active', b === btn); });
-                    tabContents.forEach(function (c) {
-                        if (c.dataset.tabContent === target) {
-                            c.removeAttribute('hidden');
-                        } else {
-                            c.setAttribute('hidden', '');
-                        }
+                    if (passedActive && passedBtn) {
+                        passedActive = false;
+                        passedBtn.classList.remove('is-active');
+                        showTab('issues');
+                    }
+                });
+            });
+
+            // ── Toggle alle accordions in zichtbare tab ──────────────────
+            auditPage.querySelectorAll('.aspera-toggle-all-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    var visibleTab = Array.prototype.find.call(tabContents, function (c) { return !c.hasAttribute('hidden'); });
+                    if (!visibleTab) return;
+                    var details = visibleTab.querySelectorAll('details');
+                    var allOpen = Array.prototype.every.call(details, function (d) { return d.hasAttribute('open'); });
+                    details.forEach(function (d) {
+                        if (allOpen) { d.removeAttribute('open'); }
+                        else         { d.setAttribute('open', ''); }
                     });
                 });
             });
