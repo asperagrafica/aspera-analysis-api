@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.95.1
+ * Version: 1.96.0
  * Author: Aspera
  */
 
@@ -1642,7 +1642,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
     $post_id = intval( $_POST['post_id'] ?? 0 );
 
-    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_wpforms_scheduled_actions' ];
+    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table' ];
     if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
@@ -1739,6 +1739,39 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             $new_content = str_replace( $before, $after, $post->post_content );
             wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_content ] );
             wp_send_json_success( [ 'message' => 'Shortcode bijgewerkt in post #' . $post_id . '.' ] );
+            break;
+
+        case 'drop_orphaned_table':
+            global $wpdb;
+            $table       = sanitize_key( $_POST['table'] ?? '' );
+            $plugin_slug = sanitize_key( $_POST['plugin_slug'] ?? '' );
+
+            if ( ! $table ) {
+                wp_send_json_error( 'Tabelnaam ontbreekt.' );
+            }
+            // Prefix-check: tabel moet bij deze WP-installatie horen.
+            if ( strpos( $table, $wpdb->prefix ) !== 0 ) {
+                wp_send_json_error( 'Tabel buiten huidige wp-prefix — geweigerd.' );
+            }
+            // Re-verify: bijbehorende plugin mag niet (weer) actief zijn.
+            if ( $plugin_slug ) {
+                $active = (array) get_option( 'active_plugins', [] );
+                foreach ( $active as $p ) {
+                    if ( stripos( $p, $plugin_slug ) !== false ) {
+                        wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — tabel "' . $table . '" wordt niet gedropt.' );
+                    }
+                }
+            }
+            // Tabel-bestaan
+            $exists = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table ) );
+            if ( ! $exists ) {
+                wp_send_json_error( 'Tabel "' . $table . '" bestaat niet (al opgeruimd?).' );
+            }
+            $dropped = $wpdb->query( "DROP TABLE `" . esc_sql( $table ) . "`" );
+            if ( $dropped === false ) {
+                wp_send_json_error( 'DROP TABLE mislukt: ' . $wpdb->last_error );
+            }
+            wp_send_json_success( [ 'message' => 'Tabel "' . $table . '" gedropt.' ] );
             break;
 
         default:
@@ -2593,6 +2626,8 @@ function aspera_dashboard_widget_render(): void {
                                 echo 'meta key <code>' . esc_html( $fix['meta_key'] ?? '' ) . '</code> verwijderen (' . (int) ( $fix['rows'] ?? 0 ) . ' rijen)';
                             } elseif ( $fa === 'delete_wpforms_scheduled_actions' ) {
                                 echo (int) ( $fix['count'] ?? 0 ) . ' WPForms scheduled action(s) verwijderen';
+                            } elseif ( $fa === 'drop_orphaned_table' ) {
+                                echo 'tabel <code>' . esc_html( $fix['table'] ?? '' ) . '</code> droppen (DROP TABLE)';
                             } else {
                                 $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
                                 $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
@@ -3099,6 +3134,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Meta key "' + fix.meta_key + '" verwijderen (' + fix.rows + ' rijen + referenties).';
                 } else if (fix.action === 'delete_wpforms_scheduled_actions') {
                     msg += fix.count + ' WPForms scheduled action(s) en bijbehorende logs verwijderen uit actionscheduler tabellen.';
+                } else if (fix.action === 'drop_orphaned_table') {
+                    msg += 'Tabel "' + fix.table + '" wordt onomkeerbaar gedropt (DROP TABLE).\n\nPlugin: ' + (fix.plugin_slug || 'onbekend') + '\n\nDeze actie is NIET terug te draaien.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -3111,6 +3148,8 @@ function aspera_dashboard_widget_script(): void {
                 if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
+                if (fix.table) body += '&table=' + encodeURIComponent(fix.table);
+                if (fix.plugin_slug) body += '&plugin_slug=' + encodeURIComponent(fix.plugin_slug);
 
                 btn.disabled    = true;
                 btn.textContent = '...';
@@ -5723,6 +5762,12 @@ add_action( 'rest_api_init', function () {
                                 'plugin'        => $info['plugin'],
                                 'plugin_active' => false,
                                 'advies'        => 'verwijderen na akkoord',
+                                'proposed_fix'  => [
+                                    'fixable'     => true,
+                                    'action'      => 'drop_orphaned_table',
+                                    'table'       => $table,
+                                    'plugin_slug' => $info['slug'],
+                                ],
                             ];
                         }
                         break;
@@ -7784,9 +7829,8 @@ add_action( 'rest_api_init', function () {
             if ( function_exists( 'wp_roles' ) ) {
                 $all_roles = wp_roles()->roles ?? [];
                 foreach ( $all_roles as $slug => $data ) {
-                    $name = $data['name'] ?? '';
-                    if ( strtolower( $slug ) === 'beheerder' || strtolower( $name ) === 'beheerder' ) {
-                        $beheerder_role = [ 'slug' => $slug, 'name' => $name, 'capabilities' => $data['capabilities'] ?? [] ];
+                    if ( strtolower( $slug ) === 'beheerder' ) {
+                        $beheerder_role = [ 'slug' => $slug, 'name' => $data['name'] ?? '', 'capabilities' => $data['capabilities'] ?? [] ];
                         break;
                     }
                 }
