@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.93.1
+ * Version: 1.93.2
  * Author: Aspera
  */
 
@@ -246,14 +246,46 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             return preg_match( '/\b' . $name . '="([^"]*)"/', $attrs, $v ) ? $v[1] : null;
         };
 
+        // ─── Universele css= check (alle shortcodes) ─────────────────
+        // Twee mogelijke vormen:
+        //  - URL-encoded JSON `%7B%22default%22%3A%7B...%7D%7D` (Impreza Design-tab)
+        //  - Legacy WPBakery `.vc_custom_xxx{...}` string
+        $css_raw = $attr( 'css' );
+        if ( $css_raw !== null && $css_raw !== '' ) {
+            $css_decoded = json_decode( urldecode( $css_raw ), true );
+            if ( is_array( $css_decoded ) ) {
+                $design_props = [];
+                $anim_props   = [];
+                foreach ( $css_decoded as $bp => $bp_props ) {
+                    if ( ! is_array( $bp_props ) ) continue;
+                    foreach ( $bp_props as $prop => $val ) {
+                        if ( $prop === 'aspect-ratio' ) continue;
+                        if ( strpos( (string) $prop, 'animation' ) === 0 ) {
+                            $anim_props[] = $bp . '.' . $prop;
+                            continue;
+                        }
+                        $design_props[] = $bp . '.' . $prop;
+                    }
+                }
+                if ( ! empty( $design_props ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'design_css_forbidden',
+                        'detail' => 'Design-tab CSS overrides: ' . implode( ', ', $design_props ),
+                        'snippet' => $snippet, 'location' => $current_location ];
+                }
+                if ( ! empty( $anim_props ) ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'animate_detected',
+                        'detail' => 'animation-properties in Design-tab: ' . implode( ', ', $anim_props ),
+                        'snippet' => $snippet, 'location' => $current_location ];
+                }
+            } else {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'css_forbidden',
+                    'detail' => 'css= attribuut aanwezig (legacy WPBakery CSS-string)',
+                    'snippet' => $snippet, 'location' => $current_location ];
+            }
+        }
+
         // ─── vc_row / vc_column ───────────────────────────────────────
         if ( in_array( $tag, [ 'vc_row', 'vc_column' ], true ) ) {
-
-            if ( preg_match( '/\bcss="/', $attrs ) ) {
-                $violations[] = [ 'tag' => $tag, 'rule' => 'css_forbidden',
-                    'detail' => 'css= attribuut aanwezig', 'snippet' => $snippet,
-                    'location' => $current_location ];
-            }
 
             if ( $tag === 'vc_row' ) {
 
@@ -284,12 +316,6 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         // ─── us_post_custom_field ─────────────────────────────────────
         if ( $tag === 'us_post_custom_field' ) {
             $key = $attr( 'key' ) ?? '';
-
-            if ( preg_match( '/\bcss="/', $attrs ) ) {
-                $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'css_forbidden',
-                    'detail' => 'css= attribuut aanwezig',
-                    'location' => $current_location ];
-            }
 
             if ( $attr( 'hide_empty' ) !== '1' ) {
                 $violations[] = [ 'tag' => $tag, 'key' => $key, 'rule' => 'missing_hide_empty',
