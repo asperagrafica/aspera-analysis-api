@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.93.0
+ * Version: 1.93.1
  * Author: Aspera
  */
 
@@ -833,6 +833,9 @@ function aspera_find_color_violations_in_json( array $data, WP_Post $post, array
         $current_path = $path !== '' ? $path . '.' . $key : (string) $key;
 
         if ( is_array( $value ) ) {
+            // Skip element.css objecten — Design-tab CSS valt onder design_css_forbidden,
+            // niet onder hardcoded_hex_color (zou anders dubbele meldingen geven).
+            if ( $key === 'css' ) continue;
             aspera_find_color_violations_in_json( $value, $post, $violations, $observations, $whitelist, $hex_map, $current_path );
             continue;
         }
@@ -884,26 +887,10 @@ function aspera_find_color_violations_in_json( array $data, WP_Post $post, array
 function aspera_scan_grid_extended_colors( array $data, WP_Post $post, array &$violations, array &$observations, array $whitelist, array $hex_map ): void {
 
     // ── 1. Element-level css objecten ────────────────────────────────────────
-    if ( ! empty( $data['data'] ) && is_array( $data['data'] ) ) {
-        foreach ( $data['data'] as $element_key => $element ) {
-            if ( ! is_array( $element ) ) continue;
-
-            $css_raw = $element['css'] ?? null;
-            if ( $css_raw === null || $css_raw === '' ) continue;
-
-            // css kan een geparsde array zijn of een URL-encoded JSON string
-            $css_data = is_array( $css_raw )
-                ? $css_raw
-                : ( is_string( $css_raw ) ? json_decode( urldecode( $css_raw ), true ) : null );
-
-            if ( ! is_array( $css_data ) ) continue;
-
-            aspera_scan_css_object_for_colors(
-                $css_data, (string) $element_key, 'css',
-                $post, $violations, $observations, $whitelist, $hex_map
-            );
-        }
-    }
+    // Bewust overgeslagen: kleuren binnen element.css.{breakpoint}.* vallen onder
+    // design_css_forbidden (severity error op het hele Design-tab CSS-blok).
+    // Apart rapporteren als hardcoded_hex_color zou dubbele meldingen produceren
+    // voor wat conceptueel één probleem is.
 
     // ── 2. Tegel-level default.options.color_* ───────────────────────────────
     $options = $data['default']['options'] ?? null;
