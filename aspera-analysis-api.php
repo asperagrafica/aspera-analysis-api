@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.97.1
+ * Version: 1.98.0
  * Author: Aspera
  */
 
@@ -10317,6 +10317,257 @@ add_action( 'rest_api_init', function () {
                 'field_count'   => count( $saved_fields ),
                 'fields'        => $saved_fields,
             ];
+        },
+    ] );
+
+    /**
+     * POST /wp-json/aspera/v1/acf/fields/migrate
+     * Hernoemt een ACF-veld én migreert alle bestaande verwijzingen:
+     * field-definitie, postmeta-keys, wp_options-names, post_content,
+     * us_grid_layout post_excerpt, en serialized blobs in usof_options_* / theme_mods_*.
+     *
+     * Body JSON:
+     * {
+     *   "field_key": "field_abc123",
+     *   "new_name":  "still_cpt_collabs_1",
+     *   "scope":     ["field_def","postmeta","options","post_content","post_excerpt","serialized_options"],
+     *   "dry_run":   true
+     * }
+     *
+     * Vervangingen gebruiken word-boundary (`\b`) zodat `link_social_1` niet matcht binnen `link_social_10`.
+     * Mutaties draaien in een SQL-transactie; bij Throwable rollback.
+     */
+    register_rest_route( 'aspera/v1', '/acf/fields/migrate', [
+        'methods'             => 'POST',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function ( WP_REST_Request $req ) {
+            global $wpdb;
+
+            if ( ! function_exists( 'acf_get_field' ) || ! function_exists( 'acf_update_field' ) ) {
+                return new WP_Error( 'acf_missing', 'ACF is niet actief.', [ 'status' => 500 ] );
+            }
+
+            $body      = $req->get_json_params();
+            $field_key = (string) ( $body['field_key'] ?? '' );
+            $new_name  = (string) ( $body['new_name']  ?? '' );
+            $dry_run   = isset( $body['dry_run'] ) ? (bool) $body['dry_run'] : true;
+            $scope     = (array) ( $body['scope'] ?? [ 'field_def', 'postmeta', 'options', 'post_content', 'post_excerpt', 'serialized_options' ] );
+
+            if ( ! $field_key || ! $new_name ) {
+                return new WP_Error( 'missing_params', 'field_key en new_name zijn verplicht.', [ 'status' => 400 ] );
+            }
+            if ( ! preg_match( '/^[a-z0-9_]+$/i', $new_name ) ) {
+                return new WP_Error( 'invalid_name', 'new_name mag alleen letters, cijfers en underscores bevatten.', [ 'status' => 400 ] );
+            }
+
+            $field = acf_get_field( $field_key );
+            if ( ! $field ) {
+                return new WP_Error( 'not_found', 'Veld niet gevonden voor field_key.', [ 'status' => 404 ] );
+            }
+            $old_name = (string) $field['name'];
+            if ( $old_name === $new_name ) {
+                return [ 'noop' => true, 'reason' => 'old_name == new_name' ];
+            }
+
+            @set_time_limit( 0 );
+            @ignore_user_abort( true );
+
+            $pm = $wpdb->postmeta;
+            $op = $wpdb->options;
+            $ps = $wpdb->posts;
+            $report = [
+                'dry_run'   => $dry_run,
+                'field_key' => $field_key,
+                'old_name'  => $old_name,
+                'new_name'  => $new_name,
+                'affected'  => [],
+                'warnings'  => [],
+                'errors'    => [],
+            ];
+
+            // Conflict-check: postmeta, options en bestaand ACF-veld met new_name
+            $conflict_pm = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM $pm WHERE meta_key IN (%s, %s)",
+                $new_name, '_' . $new_name
+            ) );
+            $conflict_op = (int) $wpdb->get_var( $wpdb->prepare(
+                "SELECT COUNT(*) FROM $op WHERE option_name IN (%s, %s)",
+                'options_' . $new_name, '_options_' . $new_name
+            ) );
+            $conflict_acf = acf_get_field( $new_name );
+            if ( $conflict_pm + $conflict_op > 0 || $conflict_acf ) {
+                $report['errors'][] = sprintf(
+                    'Conflict: new_name bestaat al (postmeta=%d, options=%d, acf_field=%s).',
+                    $conflict_pm,
+                    $conflict_op,
+                    $conflict_acf ? 'ja' : 'nee'
+                );
+                return $report;
+            }
+
+            // Word-boundary regex voor str/array replacement
+            $pattern = '/\b' . preg_quote( $old_name, '/' ) . '\b/';
+
+            // Recursieve walker — vervangt zowel keys als string-values, met word-boundary
+            $rename = function ( $data, &$changed ) use ( &$rename, $pattern, $new_name ) {
+                if ( is_string( $data ) ) {
+                    $new = preg_replace( $pattern, $new_name, $data );
+                    if ( $new !== $data ) { $changed = true; }
+                    return $new;
+                }
+                if ( is_array( $data ) ) {
+                    $out = [];
+                    foreach ( $data as $k => $v ) {
+                        $new_k = $k;
+                        if ( is_string( $k ) ) {
+                            $rk = preg_replace( $pattern, $new_name, $k );
+                            if ( $rk !== $k ) { $new_k = $rk; $changed = true; }
+                        }
+                        $out[ $new_k ] = $rename( $v, $changed );
+                    }
+                    return $out;
+                }
+                return $data;
+            };
+
+            $used_tx = false;
+            if ( ! $dry_run ) {
+                $wpdb->query( 'START TRANSACTION' );
+                $used_tx = true;
+            }
+
+            try {
+                // 1. field_def
+                if ( in_array( 'field_def', $scope, true ) ) {
+                    if ( ! $dry_run ) {
+                        $field['name'] = $new_name;
+                        acf_update_field( $field );
+                    }
+                    $report['affected']['field_def'] = 1;
+                }
+
+                // 2. postmeta keys (plain text, exact match)
+                if ( in_array( 'postmeta', $scope, true ) ) {
+                    $cnt_main = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $pm WHERE meta_key = %s", $old_name ) );
+                    $cnt_ref  = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $pm WHERE meta_key = %s", '_' . $old_name ) );
+                    if ( ! $dry_run ) {
+                        $wpdb->update( $pm, [ 'meta_key' => $new_name ],       [ 'meta_key' => $old_name ] );
+                        $wpdb->update( $pm, [ 'meta_key' => '_' . $new_name ], [ 'meta_key' => '_' . $old_name ] );
+                    }
+                    $report['affected']['postmeta']     = $cnt_main;
+                    $report['affected']['postmeta_ref'] = $cnt_ref;
+                }
+
+                // 3. wp_options names (exact options_OLD en _options_OLD)
+                if ( in_array( 'options', $scope, true ) ) {
+                    $opt_main = 'options_' . $old_name;
+                    $opt_ref  = '_options_' . $old_name;
+                    $cnt_om = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $op WHERE option_name = %s", $opt_main ) );
+                    $cnt_or = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM $op WHERE option_name = %s", $opt_ref ) );
+                    if ( ! $dry_run ) {
+                        $wpdb->update( $op, [ 'option_name' => 'options_' . $new_name ],  [ 'option_name' => $opt_main ] );
+                        $wpdb->update( $op, [ 'option_name' => '_options_' . $new_name ], [ 'option_name' => $opt_ref ] );
+                    }
+                    $report['affected']['options']     = $cnt_om;
+                    $report['affected']['options_ref'] = $cnt_or;
+                }
+
+                // 4. post_content — PHP-side preg_replace per row (word-boundary)
+                if ( in_array( 'post_content', $scope, true ) ) {
+                    $types = [ 'us_header', 'us_content_template', 'us_page_block', 'us_grid_layout', 'page' ];
+                    $cpts  = get_post_types( [ '_builtin' => false, 'public' => true ], 'names' );
+                    foreach ( $cpts as $t ) {
+                        if ( ! in_array( $t, $types, true ) && strpos( $t, 'us_' ) !== 0 && strpos( $t, 'acf-' ) !== 0 ) {
+                            $types[] = $t;
+                        }
+                    }
+                    $by_type = [];
+                    foreach ( $types as $t ) {
+                        $rows = $wpdb->get_results( $wpdb->prepare(
+                            "SELECT ID, post_content FROM $ps WHERE post_status='publish' AND post_type=%s AND post_content LIKE %s",
+                            $t, '%' . $wpdb->esc_like( $old_name ) . '%'
+                        ) );
+                        $cnt = 0;
+                        foreach ( $rows as $r ) {
+                            $new_content = preg_replace( $pattern, $new_name, $r->post_content );
+                            if ( $new_content !== $r->post_content ) {
+                                $cnt++;
+                                if ( ! $dry_run ) {
+                                    $wpdb->update( $ps, [ 'post_content' => $new_content ], [ 'ID' => (int) $r->ID ] );
+                                }
+                            }
+                        }
+                        if ( $cnt > 0 ) {
+                            $by_type[ $t ] = $cnt;
+                        }
+                    }
+                    $report['affected']['post_content'] = $by_type;
+                }
+
+                // 5. post_excerpt op us_grid_layout — PHP-side preg_replace
+                if ( in_array( 'post_excerpt', $scope, true ) ) {
+                    $rows = $wpdb->get_results( $wpdb->prepare(
+                        "SELECT ID, post_excerpt FROM $ps WHERE post_status='publish' AND post_type='us_grid_layout' AND post_excerpt LIKE %s",
+                        '%' . $wpdb->esc_like( $old_name ) . '%'
+                    ) );
+                    $cnt = 0;
+                    foreach ( $rows as $r ) {
+                        $new_excerpt = preg_replace( $pattern, $new_name, $r->post_excerpt );
+                        if ( $new_excerpt !== $r->post_excerpt ) {
+                            $cnt++;
+                            if ( ! $dry_run ) {
+                                $wpdb->update( $ps, [ 'post_excerpt' => $new_excerpt ], [ 'ID' => (int) $r->ID ] );
+                            }
+                        }
+                    }
+                    $report['affected']['post_excerpt'] = $cnt;
+                }
+
+                // 6. Serialized blobs — usof_options_* en theme_mods_*
+                if ( in_array( 'serialized_options', $scope, true ) ) {
+                    $candidates = $wpdb->get_results( $wpdb->prepare(
+                        "SELECT option_name FROM $op WHERE (option_name LIKE 'usof_options_%' OR option_name LIKE 'theme_mods_%') AND option_value LIKE %s",
+                        '%' . $wpdb->esc_like( $old_name ) . '%'
+                    ) );
+                    $modified = [];
+                    foreach ( $candidates as $row ) {
+                        $name  = $row->option_name;
+                        $value = get_option( $name );
+                        if ( ! is_array( $value ) && ! is_object( $value ) ) {
+                            continue;
+                        }
+                        $changed   = false;
+                        $new_value = $rename( $value, $changed );
+                        if ( $changed ) {
+                            if ( ! $dry_run ) {
+                                update_option( $name, $new_value );
+                            }
+                            $modified[] = $name;
+                        }
+                    }
+                    $report['affected']['serialized_options'] = $modified;
+                }
+
+                if ( $used_tx ) {
+                    $wpdb->query( 'COMMIT' );
+                }
+
+                if ( ! $dry_run ) {
+                    wp_cache_flush();
+                    if ( function_exists( 'acf_flush_value_cache' ) ) {
+                        acf_flush_value_cache();
+                    }
+                }
+
+                return $report;
+
+            } catch ( Throwable $e ) {
+                if ( $used_tx ) {
+                    $wpdb->query( 'ROLLBACK' );
+                }
+                $report['errors'][] = 'Migratie afgebroken: ' . $e->getMessage();
+                return new WP_REST_Response( $report, 500 );
+            }
         },
     ] );
 
