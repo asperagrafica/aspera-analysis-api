@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.98.0
+ * Version: 1.99.0
  * Author: Aspera
  */
 
@@ -10405,13 +10405,22 @@ add_action( 'rest_api_init', function () {
                 return $report;
             }
 
-            // Word-boundary regex voor str/array replacement
-            $pattern = '/\b' . preg_quote( $old_name, '/' ) . '\b/';
+            // Word-boundary regex voor plain text contexts
+            $pat_plain = '/\b' . preg_quote( $old_name, '/' ) . '\b/';
+            // URL-encoded slash-prefix (e.g. `option%2FSLUG` in WPBakery button URLs).
+            // \b matcht hier niet omdat F en l beide word chars zijn, dus expliciet vangen.
+            $pat_urlenc = '/(%2[Ff])' . preg_quote( $old_name, '/' ) . '(?![A-Za-z0-9_])/';
 
-            // Recursieve walker — vervangt zowel keys als string-values, met word-boundary
-            $rename = function ( $data, &$changed ) use ( &$rename, $pattern, $new_name ) {
+            $apply_rename = function ( $s ) use ( $pat_plain, $pat_urlenc, $new_name ) {
+                $s = preg_replace( $pat_plain,  $new_name,           $s );
+                $s = preg_replace( $pat_urlenc, '${1}' . $new_name,  $s );
+                return $s;
+            };
+
+            // Recursieve walker — vervangt zowel keys als string-values
+            $rename = function ( $data, &$changed ) use ( &$rename, $apply_rename ) {
                 if ( is_string( $data ) ) {
-                    $new = preg_replace( $pattern, $new_name, $data );
+                    $new = $apply_rename( $data );
                     if ( $new !== $data ) { $changed = true; }
                     return $new;
                 }
@@ -10420,7 +10429,7 @@ add_action( 'rest_api_init', function () {
                     foreach ( $data as $k => $v ) {
                         $new_k = $k;
                         if ( is_string( $k ) ) {
-                            $rk = preg_replace( $pattern, $new_name, $k );
+                            $rk = $apply_rename( $k );
                             if ( $rk !== $k ) { $new_k = $rk; $changed = true; }
                         }
                         $out[ $new_k ] = $rename( $v, $changed );
@@ -10489,7 +10498,7 @@ add_action( 'rest_api_init', function () {
                         ) );
                         $cnt = 0;
                         foreach ( $rows as $r ) {
-                            $new_content = preg_replace( $pattern, $new_name, $r->post_content );
+                            $new_content = $apply_rename( $r->post_content );
                             if ( $new_content !== $r->post_content ) {
                                 $cnt++;
                                 if ( ! $dry_run ) {
@@ -10512,7 +10521,7 @@ add_action( 'rest_api_init', function () {
                     ) );
                     $cnt = 0;
                     foreach ( $rows as $r ) {
-                        $new_excerpt = preg_replace( $pattern, $new_name, $r->post_excerpt );
+                        $new_excerpt = $apply_rename( $r->post_excerpt );
                         if ( $new_excerpt !== $r->post_excerpt ) {
                             $cnt++;
                             if ( ! $dry_run ) {
