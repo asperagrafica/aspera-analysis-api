@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.93.2
+ * Version: 1.94.0
  * Author: Aspera
  */
 
@@ -1065,6 +1065,85 @@ function aspera_walk_for_violation( $data, string $rule, $target_post_id, $conte
  * Returnt array met: prev_date, total_diff, severity_diffs, score_diff, category_diffs.
  * Returnt null als er geen historie is.
  */
+/**
+ * Vertaalt een health-score (0-100) naar een level met titel, kleur, narratief
+ * en risico-regel. Wordt zowel in de admin-UI als in de PDF-export gebruikt.
+ *
+ * Levels:
+ *   100        — Perfect          (groen donker)
+ *   80–99      — Bijna perfect    (groen)
+ *   55–79      — Okay             (geel)
+ *   40–54      — Dringend         (oranje)
+ *   30–39      — Kritiek          (rood)
+ *   0–29       — Zeer kritiek     (donkerrood)
+ */
+function aspera_score_level( int $score ): array {
+    if ( $score >= 100 ) {
+        return [
+            'key'       => 'perfect',
+            'title'     => 'Perfect',
+            'color'     => '#0a5d22',
+            'bg'        => '#dff5e6',
+            'border'    => '#7dc89a',
+            'narrative' => 'Deze website is volledig opgebouwd volgens de huidige standaarden van WordPress en het framework.',
+            'risk'      => 'Lage onderhoudslast; klaar voor toekomstige WordPress-updates.',
+        ];
+    }
+    if ( $score >= 80 ) {
+        return [
+            'key'       => 'almost-perfect',
+            'title'     => 'Bijna perfect',
+            'color'     => '#1f7a36',
+            'bg'        => '#eaf7ee',
+            'border'    => '#a7d8b3',
+            'narrative' => 'Deze website voldoet goed aan de huidige standaarden van WordPress en het framework, maar er is ruimte voor verbetering.',
+            'risk'      => 'Lage onderhoudslast; klaar voor toekomstige WordPress-updates.',
+        ];
+    }
+    if ( $score >= 55 ) {
+        return [
+            'key'       => 'okay',
+            'title'     => 'Okay',
+            'color'     => '#7a5a00',
+            'bg'        => '#fcf2d9',
+            'border'    => '#ecd58a',
+            'narrative' => 'De website kan stabiel draaien, maar is kandidaat voor een overhaul.',
+            'risk'      => 'Verhoogd risico op visuele afwijkingen bij thema- of plugin-updates.',
+        ];
+    }
+    if ( $score >= 40 ) {
+        return [
+            'key'       => 'urgent',
+            'title'     => 'Dringend',
+            'color'     => '#9c4a00',
+            'bg'        => '#fdebd3',
+            'border'    => '#f0b878',
+            'narrative' => 'De website is dringend toe aan een overhaul om de werking te blijven garanderen.',
+            'risk'      => 'Reëel risico op uitval bij eerstvolgende grote update.',
+        ];
+    }
+    if ( $score >= 30 ) {
+        return [
+            'key'       => 'critical',
+            'title'     => 'Kritiek',
+            'color'     => '#a31c1f',
+            'bg'        => '#fbe5e6',
+            'border'    => '#e8a5a7',
+            'narrative' => 'De website is in kritieke toestand. Een update is onmiddellijk noodzakelijk.',
+            'risk'      => 'Acute kans op stuk-gaande functionaliteit; updates worden onveilig.',
+        ];
+    }
+    return [
+        'key'       => 'severe',
+        'title'     => 'Zeer kritiek',
+        'color'     => '#660607',
+        'bg'        => '#f5cfd1',
+        'border'    => '#c98083',
+        'narrative' => 'De website is in zeer kritieke toestand. Onmiddellijk actie ondernemen.',
+        'risk'      => 'Acute kans op stuk-gaande functionaliteit; updates worden onveilig.',
+    ];
+}
+
 function aspera_get_audit_delta( array $current ): ?array {
     $history = get_option( 'aspera_audit_history', [] );
     if ( ! is_array( $history ) || empty( $history ) ) return null;
@@ -2318,6 +2397,22 @@ function aspera_dashboard_widget_render(): void {
     echo '<button type="button" class="aspera-passed-toggle-btn" ' . ( $passed_disabled ? 'disabled' : '' ) . ' style="background:' . $passed_bg . ';color:' . $passed_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $passed_cursor . ';">' . (int) $passed_total . '&nbsp;Geslaagd</button>';
     echo '</div>';
     echo '</div>';
+    echo '</div>';
+
+    // ── Level-box (score-range): titel, narratief, risico-regel ───────────────
+    $level = aspera_score_level( $score_int );
+    $delta_in_box = '';
+    if ( $delta && $delta['score_diff'] !== 0 ) {
+        $ds = $delta['score_diff'];
+        $sign = $ds > 0 ? '+' : '';
+        $col  = $ds > 0 ? '#00a32a' : '#d63638';
+        $prev_score = $score_int - $ds;
+        $delta_in_box = ' <span style="font-size:13px;font-weight:400;color:#50575e;">(vorige meting: ' . (int) $prev_score . ', <span style="color:' . $col . ';font-weight:700;">' . $sign . $ds . '</span>)</span>';
+    }
+    echo '<div id="aspera-level-box" style="margin:0 0 14px 0;padding:14px 18px;border-radius:6px;background:' . esc_attr( $level['bg'] ) . ';border:1px solid ' . esc_attr( $level['border'] ) . ';color:' . esc_attr( $level['color'] ) . ';-webkit-print-color-adjust:exact;print-color-adjust:exact;">';
+    echo '<div style="font-size:15px;font-weight:800;margin-bottom:4px;">' . esc_html( $level['title'] ) . ' &middot; ' . (int) $score_int . '/100' . $delta_in_box . '</div>';
+    echo '<div style="font-size:13px;line-height:1.5;color:#1d2327;">' . esc_html( $level['narrative'] ) . '</div>';
+    echo '<div style="font-size:12px;line-height:1.5;margin-top:6px;color:#50575e;font-style:italic;"><strong>Risico:</strong> ' . esc_html( $level['risk'] ) . '</div>';
     echo '</div>';
 
     // ── Per-categorie accordion (Issues tab) ──────────────────────────────────
