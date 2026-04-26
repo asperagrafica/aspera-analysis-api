@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.91.0
+ * Version: 1.92.0
  * Author: Aspera
  */
 
@@ -1658,6 +1658,110 @@ function aspera_humanize_rule( string $rule ): string {
     return ucwords( str_replace( '_', ' ', $rule ) );
 }
 
+/**
+ * Bepaal admin-deeplink voor het oogje per violation.
+ * Retourneert null wanneer er geen logische bestemming is.
+ *
+ * @return array{url:string,title:string}|null
+ */
+function aspera_get_violation_admin_link( string $category, string $rule, $post_id, string $detail = '' ) {
+    // Eerst: post_id leidend voor categorieën die altijd een post bewerken
+    $pid = (int) $post_id;
+    if ( $pid > 0 ) {
+        switch ( $category ) {
+            case 'wpb':
+            case 'grid':
+            case 'forms':
+            case 'colors':
+            case 'naming':
+            case 'header_config':
+            case 'wpb_modules':
+            case 'wpb_templates':
+                $url = get_edit_post_link( $pid, 'raw' );
+                if ( $url ) return [ 'url' => $url, 'title' => 'Open bewerk-pagina' ];
+                break;
+            case 'acf_fields':
+            case 'acf_locations':
+                $url = get_edit_post_link( $pid, 'raw' );
+                if ( $url ) return [ 'url' => $url, 'title' => 'Open field group' ];
+                break;
+            case 'cpt':
+                $url = get_edit_post_link( $pid, 'raw' );
+                if ( $url ) return [ 'url' => $url, 'title' => 'Open post type' ];
+                break;
+        }
+    }
+
+    switch ( $category ) {
+        case 'cpt':
+            return [ 'url' => admin_url( 'edit.php?post_type=acf-post-type' ), 'title' => 'ACF Post Types' ];
+
+        case 'taxonomy':
+            return [ 'url' => admin_url( 'edit.php?post_type=acf-taxonomy' ), 'title' => 'ACF Taxonomies' ];
+
+        case 'nav':
+            return [ 'url' => admin_url( 'nav-menus.php' ), 'title' => "Menu's" ];
+
+        case 'widgets':
+            return [ 'url' => admin_url( 'widgets.php' ), 'title' => 'Widgets' ];
+
+        case 'colors':
+            return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=colors' ), 'title' => 'Impreza colors' ];
+
+        case 'cache':
+            return [ 'url' => admin_url( 'options-general.php?page=wpfastestcacheoptions' ), 'title' => 'WP Fastest Cache' ];
+
+        case 'theme_check':
+            switch ( $rule ) {
+                case 'impreza_license_inactive':
+                    return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Impreza license' ];
+                case 'theme_recaptcha_site_key_missing':
+                case 'theme_recaptcha_secret_key_missing':
+                    return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Impreza theme options' ];
+                default:
+                    return [ 'url' => admin_url( 'themes.php' ), 'title' => 'Themes' ];
+            }
+
+        case 'wpb_modules':
+            if ( $rule === 'beheerder_post_types_not_disabled' ) {
+                return [ 'url' => admin_url( 'admin.php?page=vc-roles' ), 'title' => 'WPBakery Role Manager' ];
+            }
+            return null;
+
+        case 'wp_settings':
+            switch ( $rule ) {
+                case 'search_engine_noindex':
+                case 'posts_per_page_invalid':
+                case 'posts_per_rss_invalid':
+                case 'homepage_on_latest_posts':
+                case 'homepage_missing':
+                case 'homepage_unexpected_title':
+                    return [ 'url' => admin_url( 'options-reading.php' ), 'title' => 'Reading settings' ];
+                case 'permalink_structure_invalid':
+                    return [ 'url' => admin_url( 'options-permalink.php' ), 'title' => 'Permalinks' ];
+                case 'date_format_invalid':
+                case 'timezone_invalid':
+                case 'site_language_invalid':
+                case 'start_of_week_invalid':
+                case 'default_role_invalid':
+                case 'users_can_register_enabled':
+                case 'admin_email_invalid':
+                    return [ 'url' => admin_url( 'options-general.php' ), 'title' => 'General settings' ];
+                case 'missing_favicon':
+                    return [ 'url' => admin_url( 'customize.php?autofocus[section]=title_tagline' ), 'title' => 'Site identity' ];
+                case 'php_version_critical':
+                case 'php_version_outdated':
+                case 'php_memory_limit_low':
+                    return [ 'url' => admin_url( 'site-health.php?tab=debug' ), 'title' => 'Site Health' ];
+                case 'orphaned_wpforms_scheduled_actions':
+                    return [ 'url' => admin_url( 'tools.php?page=action-scheduler' ), 'title' => 'Action Scheduler' ];
+            }
+            return null;
+    }
+
+    return null;
+}
+
 function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
@@ -2007,7 +2111,8 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page #aspera-fixall-btn:not(:disabled):hover { background:#00831f; }
         #aspera-audit-page #aspera-fixall-status { font-size:12px; color:#50575e; margin-left:6px; }
         #aspera-audit-page .aspera-row-tools { display:flex; gap:4px; align-items:center; flex-shrink:0; margin-left:auto; }
-        #aspera-audit-page .aspera-row-tool { font-size:11px; cursor:pointer; background:#f0f0f0; color:#50575e; border:1px solid #c3c4c7; border-radius:3px; padding:2px 7px; }
+        #aspera-audit-page .aspera-row-tool { font-size:11px; cursor:pointer; background:#f0f0f0; color:#50575e; border:1px solid #c3c4c7; border-radius:3px; padding:2px 7px; line-height:1.4; }
+        #aspera-audit-page a.aspera-row-tool { text-decoration:none; display:inline-block; }
         #aspera-audit-page .aspera-row-tool:hover { background:#e0e0e0; }
         #aspera-audit-page .aspera-row-tool.is-flash { background:#00a32a; color:#fff; border-color:#00a32a; }
         #aspera-audit-page .aspera-viol-row.is-resolved { background:#e6f6ea; transition:opacity 0.4s, max-height 0.4s, padding 0.4s; }
@@ -2041,9 +2146,20 @@ function aspera_dashboard_widget_render(): void {
         #aspera-hero .aspera-hero-total { font-size:13px; color:#50575e; }
         #aspera-hero .aspera-hero-total strong { color:#1d2327; font-size:15px; }
         #aspera-hero .aspera-sev-grid { display:flex; gap:6px; flex-wrap:wrap; }
-        #aspera-audit-page .aspera-viol-action { margin-top:4px; padding:6px 9px; background:#f0f6fc; border-left:3px solid #2271b1; font-size:12px; color:#1d2327; border-radius:0 3px 3px 0; }
-        #aspera-audit-page .aspera-viol-action strong { color:#0073aa; }
-        #aspera-audit-page .aspera-viol-detail-tech { display:block; margin-top:3px; color:#72777c; font-size:11px; word-break:break-word; }
+        #aspera-audit-page .aspera-viol-panel { margin-top:6px; padding:6px 9px; border-radius:0 3px 3px 0; font-size:12px; line-height:1.4; color:#1d2327; }
+        #aspera-audit-page .aspera-viol-panel-label { display:block; font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:2px; }
+        #aspera-audit-page .aspera-viol-panel-problem  { background:#f6f7f7; border-left:3px solid #646970; }
+        #aspera-audit-page .aspera-viol-panel-problem  .aspera-viol-panel-label { color:#646970; }
+        #aspera-audit-page .aspera-viol-panel-location { background:#fcf9e8; border-left:3px solid #dba617; }
+        #aspera-audit-page .aspera-viol-panel-location .aspera-viol-panel-label { color:#996800; }
+        #aspera-audit-page .aspera-viol-panel-location code { background:rgba(255,255,255,0.6); padding:1px 4px; border-radius:2px; font-size:11px; color:#1d2327; }
+        #aspera-audit-page .aspera-viol-panel-solution { background:#f0f6fc; border-left:3px solid #2271b1; }
+        #aspera-audit-page .aspera-viol-panel-solution .aspera-viol-panel-label { color:#0073aa; }
+        #aspera-audit-page .aspera-viol-fix-preview { display:block; margin-top:4px; padding-top:4px; border-top:1px dashed #c5d9ed; font-size:11px; color:#50575e; }
+        #aspera-audit-page .aspera-viol-fix-preview code { font-size:11px; }
+        @media print {
+            #aspera-audit-page .aspera-viol-panel { background:transparent !important; }
+        }
         #aspera-audit-page .aspera-tab-content[hidden] { display:none !important; }
         #aspera-audit-page .aspera-cat-passed[open] .aspera-chevron { transform: rotate(90deg); }
         #aspera-audit-page .aspera-passed-toggle-btn.is-active { box-shadow: 0 0 0 2px #1d2327; }
@@ -2331,32 +2447,52 @@ function aspera_dashboard_widget_render(): void {
                     if ( is_array( $loc ) && ! empty( $loc['breadcrumb'] ) ) {
                         echo ' &mdash; <span style="font-size:11px;color:#72777c;">' . esc_html( $loc['breadcrumb'] ) . '</span>';
                     }
+                    // ── Paneel 1: Probleem ───────────────────────────────
                     if ( $rule_expl ) {
-                        echo '<div style="margin-top:3px;font-size:12px;color:#50575e;line-height:1.4;">' . esc_html( $rule_expl ) . '</div>';
+                        echo '<div class="aspera-viol-panel aspera-viol-panel-problem">';
+                        echo '<span class="aspera-viol-panel-label">Probleem</span>';
+                        echo esc_html( $rule_expl );
+                        echo '</div>';
                     }
-                    if ( $rule_action ) {
-                        echo '<div class="aspera-viol-action"><strong>Hoe op te lossen:</strong> ' . esc_html( $rule_action ) . '</div>';
-                    }
+                    // ── Paneel 2: Locatie ────────────────────────────────
                     if ( $detail ) {
-                        echo '<span class="aspera-viol-detail-tech">' . $detail . '</span>';
+                        echo '<div class="aspera-viol-panel aspera-viol-panel-location">';
+                        echo '<span class="aspera-viol-panel-label">Locatie</span>';
+                        echo $detail; // detail is reeds esc_html op regel 2293
+                        echo '</div>';
                     }
-                    if ( $has_fix ) {
-                        $fa = $fix['action'] ?? '';
-                        if ( $fa === 'delete_field_group' ) {
-                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: field group naar prullenbak</span>';
-                        } elseif ( $fa === 'delete_orphaned_meta' ) {
-                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: meta key <code style="font-size:11px;">' . esc_html( $fix['meta_key'] ?? '' ) . '</code> verwijderen (' . (int) ( $fix['rows'] ?? 0 ) . ' rijen)</span>';
-                        } elseif ( $fa === 'delete_wpforms_scheduled_actions' ) {
-                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: ' . (int) ( $fix['count'] ?? 0 ) . ' WPForms scheduled action(s) verwijderen</span>';
-                        } else {
-                            $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
-                            $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
-                            echo '<br><span style="font-size:11px;color:#72777c;">Fix: <code style="font-size:11px;text-decoration:line-through;color:#d63638;">' . $before_short . '</code> &rarr; <code style="font-size:11px;color:#00a32a;">' . $after_short . '</code></span>';
+                    // ── Paneel 3: Oplossing (actie + fix-preview) ────────
+                    if ( $rule_action || $has_fix ) {
+                        echo '<div class="aspera-viol-panel aspera-viol-panel-solution">';
+                        echo '<span class="aspera-viol-panel-label">Oplossing</span>';
+                        if ( $rule_action ) {
+                            echo esc_html( $rule_action );
                         }
+                        if ( $has_fix ) {
+                            $fa = $fix['action'] ?? '';
+                            echo '<span class="aspera-viol-fix-preview"><strong>Fix-preview:</strong> ';
+                            if ( $fa === 'delete_field_group' ) {
+                                echo 'field group naar prullenbak';
+                            } elseif ( $fa === 'delete_orphaned_meta' ) {
+                                echo 'meta key <code>' . esc_html( $fix['meta_key'] ?? '' ) . '</code> verwijderen (' . (int) ( $fix['rows'] ?? 0 ) . ' rijen)';
+                            } elseif ( $fa === 'delete_wpforms_scheduled_actions' ) {
+                                echo (int) ( $fix['count'] ?? 0 ) . ' WPForms scheduled action(s) verwijderen';
+                            } else {
+                                $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
+                                $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
+                                echo '<code style="text-decoration:line-through;color:#d63638;">' . $before_short . '</code> &rarr; <code style="color:#00a32a;">' . $after_short . '</code>';
+                            }
+                            echo '</span>';
+                        }
+                        echo '</div>';
                     }
                     echo '</div>';
-                    // Tools cluster: clipboard + recheck + fix
+                    // Tools cluster: locatie + clipboard + recheck + fix
                     echo '<div class="aspera-row-tools">';
+                    $eye = aspera_get_violation_admin_link( $key, $rule_raw, $post_id, (string) ( $v['detail'] ?? '' ) );
+                    if ( $eye ) {
+                        echo '<a href="' . esc_url( $eye['url'] ) . '" target="_blank" class="aspera-row-tool aspera-eye-btn" title="' . esc_attr( $eye['title'] ) . '">&#x1F441;</a>';
+                    }
                     if ( $search_str !== '' ) {
                         echo '<button type="button" class="aspera-row-tool aspera-clip-btn" title="Kopieer zoekstring naar klembord">&#x1F4CB;</button>';
                     }
