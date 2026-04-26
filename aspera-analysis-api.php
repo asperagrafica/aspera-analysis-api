@@ -2,14 +2,14 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.1.1
+ * Version: 2.1.2
  * Author: Aspera
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.1.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.1.2' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2528,6 +2528,7 @@ function aspera_dashboard_widget_render(): void {
 
         // Badge kleur op basis van ergste severity in actieve violations
         $sev_prio = [ 'critical' => 0, 'error' => 1, 'warning' => 2, 'observation' => 3 ];
+        $sev_breakdown = [ 'critical' => 0, 'error' => 0, 'warning' => 0, 'observation' => 0 ];
         if ( $active_count === 0 ) {
             $badge_bg = '#00a32a';
             $worst    = null;
@@ -2535,6 +2536,7 @@ function aspera_dashboard_widget_render(): void {
             $worst = 'observation';
             foreach ( $active_viols as $_v ) {
                 $_s = $_v['severity'] ?? 'observation';
+                if ( isset( $sev_breakdown[ $_s ] ) ) $sev_breakdown[ $_s ]++;
                 if ( ( $sev_prio[ $_s ] ?? 3 ) < ( $sev_prio[ $worst ] ?? 3 ) ) {
                     $worst = $_s;
                 }
@@ -2555,7 +2557,17 @@ function aspera_dashboard_widget_render(): void {
         echo '<span class="aspera-chevron">▶</span>' . esc_html( $label );
         echo '</span>';
         echo '<span style="display:flex;align-items:center;gap:5px;">';
-        echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $active_count . '</span>';
+        if ( $active_count === 0 ) {
+            echo '<span style="background:' . esc_attr( $badge_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">0</span>';
+        } else {
+            $sev_titles = [ 'critical' => 'Kritiek', 'error' => 'Fout', 'warning' => 'Waarschuwing', 'observation' => 'Opmerking' ];
+            foreach ( [ 'critical', 'error', 'warning', 'observation' ] as $_sev ) {
+                $_n = $sev_breakdown[ $_sev ] ?? 0;
+                if ( $_n === 0 ) continue;
+                $_bg = $sev_colors[ $_sev ] ?? '#72777c';
+                echo '<span title="' . esc_attr( $_n . ' ' . ( $sev_titles[ $_sev ] ?? $_sev ) ) . '" style="background:' . esc_attr( $_bg ) . ';color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;min-width:20px;text-align:center;">' . $_n . '</span>';
+            }
+        }
         if ( $ignored_count > 0 ) {
             echo '<span style="background:#dcdcde;color:#50575e;border-radius:10px;padding:1px 7px;font-size:11px;font-weight:700;" title="Genegeerde violations">' . $ignored_count . ' &#x1F6AB;</span>';
         }
