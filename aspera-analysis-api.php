@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.94.2
+ * Version: 1.95.0
  * Author: Aspera
  */
 
@@ -1327,8 +1327,8 @@ function aspera_site_health_test(): array {
 
     // Categorie-overzicht opbouwen
     $cat_labels = [
-        'wpb'       => 'WPBakery Templates',
-        'grid'      => 'Grid Layouts & Headers',
+        'wpb'       => 'Structuur',
+        'grid'      => 'Grid- & header-elementen',
         'colors'    => 'Kleuren',
         'acf_slugs'     => 'ACF Slugs',
         'acf_locations' => 'ACF Locatieregels',
@@ -1336,8 +1336,8 @@ function aspera_site_health_test(): array {
         'plugins'       => 'Plugins',
         'cpt'           => 'Custom Post Types',
         'db_tables'     => 'Database Tabellen',
-        'theme_check'   => 'Thema Check',
-        'wp_settings'   => 'WP Instellingen',
+        'theme_check'   => 'Framework configuratie',
+        'wp_settings'   => 'WP Core configuratie',
         'cache'         => 'Cache',
     ];
 
@@ -2125,8 +2125,8 @@ function aspera_dashboard_widget_render(): void {
     $cats = is_string( $snapshot ) ? json_decode( $snapshot, true ) : [];
 
     $cat_labels = [
-        'wpb'              => 'WPBakery Templates',
-        'grid'             => 'Grid Layouts & Headers',
+        'wpb'              => 'Structuur',
+        'grid'             => 'Grid- & header-elementen',
         'colors'           => 'Kleuren',
         'acf_slugs'        => 'ACF Slugs',
         'acf_locations'    => 'ACF Locatieregels',
@@ -2136,16 +2136,16 @@ function aspera_dashboard_widget_render(): void {
         'db_tables'        => 'Database Tabellen',
         'css'              => 'Ongebruikte CSS',
         'nav'              => 'Navigatiemenu\'s',
-        'wpb_modules'      => 'WPBakery Modules',
-        'theme_breakpoints'=> 'Thema Breakpoints',
+        'wpb_modules'      => 'Structuur — modules',
+        'theme_breakpoints'=> 'Responsive breakpoints',
         'widgets'          => 'Widgets',
-        'wpb_templates'    => 'Opgeslagen WPBakery Templates',
+        'wpb_templates'    => 'Structuur — opgeslagen templates',
         'taxonomy'         => 'Taxonomieën',
-        'header_config'    => 'Header Configuratie',
+        'header_config'    => 'Header-configuratie',
         'acf_fields'       => 'ACF Field Groups',
         'meta_orphaned'    => 'Orphaned ACF Meta',
-        'theme_check'      => 'Thema Check',
-        'wp_settings'      => 'WP Instellingen',
+        'theme_check'      => 'Framework configuratie',
+        'wp_settings'      => 'WP Core configuratie',
         'cache'            => 'Cache',
     ];
 
