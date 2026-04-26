@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.95.0
+ * Version: 1.95.1
  * Author: Aspera
  */
 
@@ -380,7 +380,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             if ( $style !== null && $style === '' ) {
                 $violations[] = [ 'tag' => $tag, 'label' => $label,
                     'rule'   => 'empty_btn_style',
-                    'detail' => 'style="" — stijl was ingesteld maar het button-stijlobject bestaat niet meer in Impreza',
+                    'detail' => 'style="" — stijl was ingesteld maar het button-stijlobject bestaat niet meer in het framework',
                     'location' => $current_location ];
             }
 
@@ -467,7 +467,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 foreach ( $style_m[1] as $style_attr ) {
                     if ( $tag === 'us_btn' && $style_attr === 'style' ) continue;
                     $violations[] = [ 'tag' => $tag, 'rule' => 'empty_style_attr',
-                        'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza',
+                        'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in het framework',
                         'location' => $current_location,
                         'proposed_fix' => [
                             'fixable'   => true,
@@ -579,7 +579,7 @@ function aspera_sequence_similarity( array $a, array $b ): float {
 }
 
 /**
- * Whitelist van geldige Impreza CSS var-namen.
+ * Whitelist van geldige framework CSS var-namen.
  * Formaat: naam zonder --color- prefix, hyphens vervangen door underscores.
  * In shortcodes/JSON opgeslagen als _varnaam; in CSS als var(--color-varnaam).
  * Leest dynamisch de actieve Impreza kleurenschema-waarden uit de database.
@@ -757,7 +757,7 @@ function aspera_validate_acf_group( int $group_id ): array {
  * Toegestaan:
  * - Leeg, transparent, inherit, initial, unset
  * - #fff, #ffffff, #000, #000000 (hardcoded wit/zwart)
- * - _varnaam die overeenkomt met een Impreza CSS var (whitelist)
+ * - _varnaam die overeenkomt met een framework CSS var (whitelist)
  *
  * Fout:
  * - _bd795c — hex-code als var-naam (deprecated_hex_var)
@@ -783,7 +783,7 @@ function aspera_validate_color_value( string $value, string $attr_name, array $w
     if ( preg_match( '/^rgba?\s*\(/i', $value ) || preg_match( '/^hsla?\s*\(/i', $value ) ) {
         return [
             'rule'     => 'rgba_color',
-            'detail'   => $attr_name . '="' . $value . '" — rgba/hsla waarde; mogelijk vervangbaar door een Impreza CSS var',
+            'detail'   => $attr_name . '="' . $value . '" — rgba/hsla waarde; mogelijk vervangbaar door een framework CSS var',
             'severity' => 'observation',
         ];
     }
@@ -797,7 +797,7 @@ function aspera_validate_color_value( string $value, string $attr_name, array $w
         $suggestions = isset( $hex_map[ $hex_key ] ) ? array_map( fn( $n ) => '_' . $n, $hex_map[ $hex_key ] ) : [];
         $result      = [
             'rule'     => 'hardcoded_hex_color',
-            'detail'   => $attr_name . '="' . $value . '" — hardcoded hex kleur; gebruik een Impreza CSS var',
+            'detail'   => $attr_name . '="' . $value . '" — hardcoded hex kleur; gebruik een framework CSS var',
             'severity' => 'error',
         ];
         if ( ! empty( $suggestions ) ) {
@@ -822,7 +822,7 @@ function aspera_validate_color_value( string $value, string $attr_name, array $w
             $suggestions = isset( $hex_map[ $hex_key ] ) ? array_map( fn( $n ) => '_' . $n, $hex_map[ $hex_key ] ) : [];
             $result      = [
                 'rule'     => 'deprecated_hex_var',
-                'detail'   => $attr_name . '="' . $value . '" — hex-code als CSS var; vervang door bijpassende Impreza CSS var',
+                'detail'   => $attr_name . '="' . $value . '" — hex-code als CSS var; vervang door bijpassende framework CSS var',
                 'severity' => 'error',
             ];
             if ( ! empty( $suggestions ) ) {
@@ -834,7 +834,7 @@ function aspera_validate_color_value( string $value, string $attr_name, array $w
         // Onbekende custom var: _cc1, _rood, _primair, etc.
         return [
             'rule'     => 'deprecated_custom_var',
-            'detail'   => $attr_name . '="' . $value . '" — onbekende custom CSS var; vervang door een Impreza CSS var',
+            'detail'   => $attr_name . '="' . $value . '" — onbekende custom CSS var; vervang door een framework CSS var',
             'severity' => 'error',
         ];
     }
@@ -1798,7 +1798,7 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
             return [ 'url' => admin_url( 'widgets.php' ), 'title' => 'Widgets' ];
 
         case 'colors':
-            return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=colors' ), 'title' => 'Impreza colors' ];
+            return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=colors' ), 'title' => 'Framework colors' ];
 
         case 'cache':
             return [ 'url' => admin_url( 'options-general.php?page=wpfastestcacheoptions' ), 'title' => 'WP Fastest Cache' ];
@@ -1806,10 +1806,10 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
         case 'theme_check':
             switch ( $rule ) {
                 case 'impreza_license_inactive':
-                    return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Impreza license' ];
+                    return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Framework license' ];
                 case 'theme_recaptcha_site_key_missing':
                 case 'theme_recaptcha_secret_key_missing':
-                    return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Impreza theme options' ];
+                    return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Framework theme options' ];
                 default:
                     return [ 'url' => admin_url( 'themes.php' ), 'title' => 'Themes' ];
             }
@@ -1973,12 +1973,12 @@ function aspera_get_rule_context(): array {
 
         // ── WPBakery / Modules / Widgets ──────────────────────────────────
         'wpb_module_active' => [ 'label' => 'WPBakery module actief', 'explanation' => 'Een WPBakery Module Manager module is aan; alle modules horen uit op Aspera-sites.', 'action' => 'WPBakery > Role Manager > Module Manager > schakel alle modules uit.' ],
-        'wpb_post_custom_css' => [ 'label' => 'WPBakery Custom CSS op post', 'explanation' => 'Per-post Custom CSS is gedefinieerd; CSS hoort centraal in theme/Custom Code.', 'action' => 'Verplaats CSS naar theme of Impreza Custom CSS.' ],
+        'wpb_post_custom_css' => [ 'label' => 'WPBakery Custom CSS op post', 'explanation' => 'Per-post Custom CSS is gedefinieerd; CSS hoort centraal in theme/Custom Code.', 'action' => 'Verplaats CSS naar theme of framework Custom CSS.' ],
         'wpb_post_custom_js' => [ 'label' => 'WPBakery Custom JS op post', 'explanation' => 'Per-post Custom JS gedefinieerd; JS hoort centraal.', 'action' => 'Verplaats JS naar theme of header/footer template.' ],
         'wpb_saved_templates' => [ 'label' => 'Opgeslagen WPBakery templates aanwezig', 'explanation' => 'Templates in WPBakery template library; meestal niet meer nodig.', 'action' => 'WPBakery > My Templates > opruimen.' ],
         'beheerder_post_types_not_disabled' => [ 'label' => 'Beheerder-rol heeft post types niet disabled', 'explanation' => 'Voor WPBakery Role Manager moet de "beheerder"-rol post types op disabled hebben (vc_access_rules_post_types=false).', 'action' => 'WPBakery > Role Manager > Beheerder > Post Types > zet op "None".' ],
         'default_sidebar_not_empty' => [ 'label' => 'Default sidebar bevat widgets', 'explanation' => 'WordPress default sidebar heeft widgets; widgets horen niet gebruikt te worden.', 'action' => 'Appearance > Widgets > leeg de default sidebar.' ],
-        'extra_widget_area' => [ 'label' => 'Extra widget area gedefinieerd', 'explanation' => 'Een extra (Impreza) widget area is gedefinieerd; widgets niet toegestaan.', 'action' => 'Verwijder de extra widget area.' ],
+        'extra_widget_area' => [ 'label' => 'Extra widget area gedefinieerd', 'explanation' => 'Een extra (framework) widget area is gedefinieerd; widgets niet toegestaan.', 'action' => 'Verwijder de extra widget area.' ],
         'active_widget_text' => [ 'label' => 'Actieve text-widget', 'explanation' => 'Tekstwidget in een sidebar.', 'action' => 'Verwijder of migreer inhoud naar opt_widgets.' ],
         'active_widget_nav_menu' => [ 'label' => 'Actieve nav-menu-widget', 'explanation' => 'Menu-widget in sidebar.', 'action' => 'Verwijder; navigatie hoort in header/footer-template.' ],
         'active_widget_other' => [ 'label' => 'Andere actieve widget', 'explanation' => 'Niet-text/menu widget actief.', 'action' => 'Verwijder.' ],
@@ -1986,10 +1986,10 @@ function aspera_get_rule_context(): array {
 
         // ── Theme / Header / Permalinks / Settings ────────────────────────
         'wrong_active_theme' => [ 'label' => 'Verkeerd actief thema', 'explanation' => 'Actief thema is niet Aspera (Child); alleen Aspera mag actief zijn.', 'action' => 'Appearance > Themes > activeer Aspera Child.' ],
-        'impreza_license_inactive' => [ 'label' => 'Impreza licentie niet geactiveerd', 'explanation' => 'us_license_activated option staat niet op 1; theme-updates en addons werken niet.', 'action' => 'Impreza > Licentie activeren met purchase-code.' ],
-        'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera/Impreza-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
-        'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Impreza theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Impreza > Theme Options > reCAPTCHA > vul site_key in.' ],
-        'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Impreza theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Impreza > Theme Options > reCAPTCHA > vul secret_key in.' ],
+        'impreza_license_inactive' => [ 'label' => 'Framework licentie niet geactiveerd', 'explanation' => 'us_license_activated option staat niet op 1; theme-updates en addons werken niet.', 'action' => 'Framework > Licentie activeren met purchase-code.' ],
+        'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
+        'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Het framework theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul site_key in.' ],
+        'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
         'permalink_structure_invalid' => [ 'label' => 'Permalink-structuur niet conform', 'explanation' => 'Permalink-structure is iets anders dan /%postname%/ of /%category%/%postname%/.', 'action' => 'Settings > Permalinks > kies "Post name".' ],
         'posts_per_page_invalid' => [ 'label' => 'Posts per pagina afwijkend', 'explanation' => 'Settings > Reading > Blog pages show at most ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
         'posts_per_rss_invalid' => [ 'label' => 'Syndication feed-aantal afwijkend', 'explanation' => 'Syndication feeds show ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
@@ -2010,7 +2010,7 @@ function aspera_get_rule_context(): array {
         'missing_favicon' => [ 'label' => 'Favicon ontbreekt', 'explanation' => 'Site Icon is niet ingesteld.', 'action' => 'Settings > General > Site Icon > upload.' ],
 
         // ── Header / Breakpoints ──────────────────────────────────────────
-        'breakpoint_mobile_group_mismatch' => [ 'label' => 'Mobile-groep breakpoints onjuist', 'explanation' => 'Theme- en grid-mobile breakpoints kloppen niet met elkaar.', 'action' => 'Impreza > Theme Options > breakpoints harmoniseren.' ],
+        'breakpoint_mobile_group_mismatch' => [ 'label' => 'Mobile-groep breakpoints onjuist', 'explanation' => 'Theme- en grid-mobile breakpoints kloppen niet met elkaar.', 'action' => 'Framework > Theme Options > breakpoints harmoniseren.' ],
         'breakpoint_order_invalid' => [ 'label' => 'Breakpoints in verkeerde volgorde', 'explanation' => 'Mobile > tablet > laptop volgorde klopt niet.', 'action' => 'Pas breakpoint-waarden aan.' ],
         'breakpoint_exceeds_content_width' => [ 'label' => 'Breakpoint groter dan content-width', 'explanation' => 'Een breakpoint is groter dan de site-content-width; layout-bug.', 'action' => 'Verlaag breakpoint of verhoog content-width.' ],
         'laptops_breakpoint_mismatch' => [ 'label' => 'Laptops-breakpoint inconsistent', 'explanation' => 'Laptops-breakpoint matcht niet de theme-conventie.', 'action' => 'Theme Options > stel laptops_breakpoint in op 1400px.' ],
@@ -2059,7 +2059,7 @@ function aspera_get_rule_context(): array {
         'unused_css_class' => [ 'label' => 'Ongebruikte CSS-class', 'explanation' => 'Class in custom CSS wordt nergens in templates/posts gebruikt.', 'action' => 'Verwijder of beoordeel.' ],
         'wrong_css_prefix' => [ 'label' => 'CSS-class zonder ag_-prefix', 'explanation' => 'Custom class volgt niet ag_-conventie.', 'action' => 'Hernoem class met ag_-prefix.' ],
         'css_forbidden' => [ 'label' => 'CSS-attribuut in shortcode', 'explanation' => 'Shortcode heeft inline css= attribuut; CSS hoort centraal.', 'action' => 'Verplaats naar CSS-bestand.' ],
-        'design_css_forbidden' => [ 'label' => 'Design-tab CSS overrides op grid-element', 'explanation' => 'Element heeft inline CSS via Design-tab (kleur/typo/spacing/border/positie/shadow/transform); buiten Impreza stijlsysteem. Aspect-ratio en animation-* zijn uitgesloten.', 'action' => 'Verwijder Design-tab overrides en gebruik centrale stijlen of theme-classes.' ],
+        'design_css_forbidden' => [ 'label' => 'Design-tab CSS overrides op grid-element', 'explanation' => 'Element heeft inline CSS via Design-tab (kleur/typo/spacing/border/positie/shadow/transform); buiten het framework-stijlsysteem. Aspect-ratio en animation-* zijn uitgesloten.', 'action' => 'Verwijder Design-tab overrides en gebruik centrale stijlen of theme-classes.' ],
         'empty_style_attr' => [ 'label' => 'Lege style-attribuut', 'explanation' => 'Shortcode heeft style="" leeg.', 'action' => 'Verwijder lege attribuut.' ],
 
         // ── WPBakery shortcode-conventies ─────────────────────────────────
@@ -5962,7 +5962,7 @@ add_action( 'rest_api_init', function () {
 
                 // ─── empty_button_style: button_style="" aanwezig ──────────
                 if ( isset( $attrs['button_style'] ) && $attrs['button_style'] === '' ) {
-                    $violations[] = [ 'rule' => 'empty_button_style', 'detail' => 'button_style="" — submit-button stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza' ];
+                    $violations[] = [ 'rule' => 'empty_button_style', 'detail' => 'button_style="" — submit-button stijl was ingesteld maar het stijlobject bestaat niet meer in het framework' ];
                 }
 
                 // ─── success_message ───────────────────────────────────────
@@ -6109,7 +6109,7 @@ add_action( 'rest_api_init', function () {
                     'post_id'    => (int) $wp->ID,
                     'post_type'  => $wp->post_type,
                     'post_title' => $wp->post_title,
-                    'notice'     => 'deprecated: vervang [wpforms] door us_cform (Impreza formuliersysteem)',
+                    'notice'     => 'deprecated: vervang [wpforms] door us_cform (framework formuliersysteem)',
                 ];
             }
 
@@ -6129,7 +6129,7 @@ add_action( 'rest_api_init', function () {
                         'post_id'    => (int) $wp->ID,
                         'post_type'  => $wp->post_type,
                         'post_title' => $wp->post_title,
-                        'notice'     => 'deprecated (custom field): vervang [wpforms] door us_cform (Impreza formuliersysteem)',
+                        'notice'     => 'deprecated (custom field): vervang [wpforms] door us_cform (framework formuliersysteem)',
                     ];
                 }
             }
@@ -6213,7 +6213,7 @@ add_action( 'rest_api_init', function () {
                                 $violations[] = [
                                     'element' => $element_key,
                                     'rule'    => 'empty_style_attr',
-                                    'detail'  => $attr_key . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in Impreza',
+                                    'detail'  => $attr_key . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in het framework',
                                 ];
                             }
                         }
@@ -6234,7 +6234,7 @@ add_action( 'rest_api_init', function () {
                         $violations[] = [
                             'element' => $element_key,
                             'rule'    => 'css_forbidden',
-                            'detail'  => 'css property aanwezig (legacy string) — custom inline CSS buiten Impreza stijlsysteem',
+                            'detail'  => 'css property aanwezig (legacy string) — custom inline CSS buiten het framework-stijlsysteem',
                         ];
                     } elseif ( is_array( $element_css ) && ! empty( $element_css ) ) {
                         $design_props = [];
@@ -6625,7 +6625,7 @@ add_action( 'rest_api_init', function () {
                             'line'     => $line_idx + 1,
                             'var'      => 'var(--color-' . $var_raw . ')',
                             'rule'     => $rule,
-                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': var(--color-' . $var_raw . ') is geen geldige Impreza CSS var',
+                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': var(--color-' . $var_raw . ') is geen geldige framework CSS var',
                             'severity' => 'error',
                         ];
                     }
@@ -6644,7 +6644,7 @@ add_action( 'rest_api_init', function () {
                             'line'     => $line_idx + 1,
                             'var'      => $hex_raw,
                             'rule'     => 'hardcoded_hex_color',
-                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': hardcoded hex ' . $hex_raw . '; gebruik een Impreza CSS var',
+                            'detail'   => $css_file . ' regel ' . ( $line_idx + 1 ) . ': hardcoded hex ' . $hex_raw . '; gebruik een framework CSS var',
                             'severity' => 'error',
                         ];
                         if ( ! empty( $suggestions ) ) {
@@ -9323,7 +9323,7 @@ add_action( 'rest_api_init', function () {
                 $theme_violations[] = [
                     'rule'     => 'impreza_license_inactive',
                     'severity' => 'critical',
-                    'detail'   => 'Impreza licentie is niet geactiveerd',
+                    'detail'   => 'Framework licentie is niet geactiveerd',
                 ];
             }
             // Geinstalleerde thema's: alleen aspera/impreza toegestaan
@@ -9363,14 +9363,14 @@ add_action( 'rest_api_init', function () {
                     $theme_violations[] = [
                         'rule'     => 'theme_recaptcha_site_key_missing',
                         'severity' => 'critical',
-                        'detail'   => 'reCAPTCHA_site_key leeg in Impreza theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
+                        'detail'   => 'reCAPTCHA_site_key leeg in framework theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
                     ];
                 }
                 if ( $secret_key === '' ) {
                     $theme_violations[] = [
                         'rule'     => 'theme_recaptcha_secret_key_missing',
                         'severity' => 'critical',
-                        'detail'   => 'reCAPTCHA_secret_key leeg in Impreza theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
+                        'detail'   => 'reCAPTCHA_secret_key leeg in framework theme options (Theme Options > reCAPTCHA), terwijl ' . $form_with_recaptcha_count . ' formulier(en) reCAPTCHA gebruiken',
                     ];
                 }
             }
