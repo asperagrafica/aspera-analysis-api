@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.0.0
+ * Version: 2.1.0
  * Author: Aspera
  */
 
@@ -50,6 +50,34 @@ function aspera_strip_empty( array $data ): array {
         $result[ $key ] = $value;
     }
     return $result;
+}
+
+/**
+ * Detecteert of de huidige site op een subdomein draait (bv. dev.test.nl, staging.test.nl).
+ * Strip leading "www." en houdt rekening met multi-part TLDs zoals co.uk en com.br
+ * zodat example.co.uk niet onterecht als subdomein wordt aangemerkt.
+ */
+function aspera_host_is_subdomain(): bool {
+    $host = wp_parse_url( home_url(), PHP_URL_HOST );
+    if ( ! $host ) return false;
+    $host = strtolower( $host );
+    if ( strpos( $host, 'www.' ) === 0 ) {
+        $host = substr( $host, 4 );
+    }
+    if ( filter_var( $host, FILTER_VALIDATE_IP ) || strpos( $host, '.' ) === false ) {
+        return false;
+    }
+    $multi_part_tlds = [
+        'co.uk', 'org.uk', 'ac.uk', 'gov.uk',
+        'co.nz', 'co.za', 'co.jp', 'co.kr',
+        'com.br', 'com.au', 'com.mx', 'com.ar', 'com.tr',
+    ];
+    foreach ( $multi_part_tlds as $tld ) {
+        if ( substr( $host, -strlen( '.' . $tld ) ) === '.' . $tld ) {
+            return substr_count( $host, '.' ) > 2;
+        }
+    }
+    return substr_count( $host, '.' ) > 1;
 }
 
 /**
@@ -2040,7 +2068,7 @@ function aspera_get_rule_context(): array {
         'php_version_critical' => [ 'label' => 'PHP-versie kritiek verouderd', 'explanation' => 'PHP < 8.0; security-risico en compatibiliteitsproblemen.', 'action' => 'Hosting > PHP-versie naar 8.4.' ],
         'php_version_outdated' => [ 'label' => 'PHP-versie verouderd', 'explanation' => 'PHP < 8.4 (aanbevolen).', 'action' => 'Hosting > PHP-versie naar 8.4.' ],
         'php_memory_limit_low' => [ 'label' => 'PHP memory limit te laag', 'explanation' => 'memory_limit < 128M; complexe pagina\'s kunnen crashen.', 'action' => 'Hosting > verhoog memory_limit naar 256M.' ],
-        'search_engine_noindex' => [ 'label' => 'Site geblokkeerd voor zoekmachines', 'explanation' => 'blog_public=0; site indexeert niet.', 'action' => 'Settings > Reading > "Discourage search engines" uitvinken.' ],
+        'search_engine_noindex' => [ 'label' => 'Site geblokkeerd voor zoekmachines', 'explanation' => 'blog_public=0; site indexeert niet. Severity is critical op hoofddomein en warning op subdomein (subdomeinen worden vaak voor dev/test ingezet).', 'action' => 'Settings > Reading > "Discourage search engines" uitvinken.' ],
         'missing_favicon' => [ 'label' => 'Favicon ontbreekt', 'explanation' => 'Site Icon is niet ingesteld.', 'action' => 'Settings > General > Site Icon > upload.' ],
 
         // ── Header / Breakpoints ──────────────────────────────────────────
@@ -8708,7 +8736,7 @@ add_action( 'rest_api_init', function () {
                 'unauthorized_installed_theme'           => 'warning',
                 'theme_recaptcha_site_key_missing'       => 'critical',
                 'theme_recaptcha_secret_key_missing'     => 'critical',
-                'search_engine_noindex'                  => 'critical',
+                'search_engine_noindex'                  => aspera_host_is_subdomain() ? 'warning' : 'critical',
                 'missing_favicon'                        => 'warning',
                 'permalink_structure_invalid'            => 'critical',
                 'posts_per_page_invalid'                 => 'warning',
@@ -9472,10 +9500,12 @@ add_action( 'rest_api_init', function () {
             // ── 25. WP Settings ──────────────────────────────────────────
             $wp_settings_violations = [];
             if ( get_option( 'blog_public' ) === '0' ) {
+                $is_subdomain = aspera_host_is_subdomain();
                 $wp_settings_violations[] = [
                     'rule'     => 'search_engine_noindex',
-                    'severity' => 'critical',
-                    'detail'   => 'Search engine visibility staat uit (Settings > Reading) — de site wordt niet geindexeerd door Google',
+                    'severity' => $is_subdomain ? 'warning' : 'critical',
+                    'detail'   => 'Search engine visibility staat uit (Settings > Reading) — de site wordt niet geindexeerd door Google'
+                                  . ( $is_subdomain ? ' (subdomein gedetecteerd: severity verlaagd naar warning omdat subdomeinen vaak voor dev/test worden gebruikt)' : '' ),
                 ];
             }
             $site_icon_id = (int) get_option( 'site_icon', 0 );
