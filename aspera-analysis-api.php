@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.97.0
+ * Version: 1.97.1
  * Author: Aspera
  */
 
@@ -7181,11 +7181,14 @@ add_action( 'rest_api_init', function () {
                 'hidden',       // Impreza visibility
                 'style_',       // Impreza style modifier
                 'size_',        // Impreza size modifier
+                'vc_',          // WPBakery: vc_column_container, vc_column-inner, vc_row_inner
+                'via_',          // Impreza grid via-modifier: via_grid, via_flex
+                'iconpos_',     // Impreza iconbox modifier: iconpos_left, iconpos_right
+                'owl-',         // OWL Carousel: owl-stage-outer, owl-dot, owl-item
             ];
 
             // Exact-match klassen die volledig genegeerd worden (framework/3rd-party)
             $framework_exact = [
-                'owl-dot',       // OWL Carousel
                 'has_text_color', // WordPress block editor
             ];
 
