@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.92.0
+ * Version: 1.93.0
  * Author: Aspera
  */
 
@@ -1766,7 +1766,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','missing_move_label','empty_option_field' ],
@@ -1967,6 +1967,7 @@ function aspera_get_rule_context(): array {
         'unused_css_class' => [ 'label' => 'Ongebruikte CSS-class', 'explanation' => 'Class in custom CSS wordt nergens in templates/posts gebruikt.', 'action' => 'Verwijder of beoordeel.' ],
         'wrong_css_prefix' => [ 'label' => 'CSS-class zonder ag_-prefix', 'explanation' => 'Custom class volgt niet ag_-conventie.', 'action' => 'Hernoem class met ag_-prefix.' ],
         'css_forbidden' => [ 'label' => 'CSS-attribuut in shortcode', 'explanation' => 'Shortcode heeft inline css= attribuut; CSS hoort centraal.', 'action' => 'Verplaats naar CSS-bestand.' ],
+        'design_css_forbidden' => [ 'label' => 'Design-tab CSS overrides op grid-element', 'explanation' => 'Element heeft inline CSS via Design-tab (kleur/typo/spacing/border/positie/shadow/transform); buiten Impreza stijlsysteem. Aspect-ratio en animation-* zijn uitgesloten.', 'action' => 'Verwijder Design-tab overrides en gebruik centrale stijlen of theme-classes.' ],
         'empty_style_attr' => [ 'label' => 'Lege style-attribuut', 'explanation' => 'Shortcode heeft style="" leeg.', 'action' => 'Verwijder lege attribuut.' ],
 
         // ── WPBakery shortcode-conventies ─────────────────────────────────
@@ -6103,13 +6104,55 @@ add_action( 'rest_api_init', function () {
                         }
                     }
 
-                    // ─── css_forbidden ───────────────────────────────────────
-                    if ( isset( $element['css'] ) && $element['css'] !== '' ) {
+                    // ─── css_forbidden / design_css_forbidden / animate_detected (css-object) ──
+                    // element.css kan zijn:
+                    //  - leeg string ""
+                    //  - legacy string (oude format)
+                    //  - object { breakpoint: { property: value } } (Design-tab, nieuw format)
+                    // Beleid:
+                    //  - aspect-ratio: toegestaan (Impreza heeft de control hierheen verplaatst)
+                    //  - animation-*: doorgeven aan animate_detected (severity observation)
+                    //  - alle overige properties: design_css_forbidden (severity error)
+                    $element_css = $element['css'] ?? null;
+
+                    if ( is_string( $element_css ) && $element_css !== '' ) {
                         $violations[] = [
                             'element' => $element_key,
                             'rule'    => 'css_forbidden',
-                            'detail'  => 'css property aanwezig — custom inline CSS buiten Impreza stijlsysteem',
+                            'detail'  => 'css property aanwezig (legacy string) — custom inline CSS buiten Impreza stijlsysteem',
                         ];
+                    } elseif ( is_array( $element_css ) && ! empty( $element_css ) ) {
+                        $design_props = [];
+                        $anim_props   = [];
+
+                        foreach ( $element_css as $bp => $bp_props ) {
+                            if ( ! is_array( $bp_props ) ) continue;
+                            foreach ( $bp_props as $prop => $val ) {
+                                if ( $prop === 'aspect-ratio' ) {
+                                    continue; // toegestaan
+                                }
+                                if ( strpos( (string) $prop, 'animation' ) === 0 ) {
+                                    $anim_props[] = $bp . '.' . $prop;
+                                    continue;
+                                }
+                                $design_props[] = $bp . '.' . $prop;
+                            }
+                        }
+
+                        if ( ! empty( $design_props ) ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'design_css_forbidden',
+                                'detail'  => 'Design-tab CSS overrides: ' . implode( ', ', $design_props ),
+                            ];
+                        }
+                        if ( ! empty( $anim_props ) ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'animate_detected',
+                                'detail'  => 'animation-properties in Design-tab: ' . implode( ', ', $anim_props ),
+                            ];
+                        }
                     }
 
                     // ─── wrong_option_syntax ─────────────────────────────────
@@ -8288,6 +8331,7 @@ add_action( 'rest_api_init', function () {
                 'missing_color_link'          => 'warning',
                 'missing_hide_with_empty_link'=> 'warning',
                 'css_forbidden'               => 'warning',
+                'design_css_forbidden'        => 'error',
                 'wrong_option_syntax'         => 'critical',
                 'missing_acf_link'            => 'error',
                 'wrong_link_field_prefix'     => 'critical',
