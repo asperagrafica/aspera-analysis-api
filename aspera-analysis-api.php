@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.94.0
+ * Version: 1.94.1
  * Author: Aspera
  */
 
@@ -2252,6 +2252,12 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-viol-fix-preview code { font-size:11px; }
         @media print {
             #aspera-audit-page .aspera-viol-panel { background:transparent !important; }
+            #aspera-audit-toolbar,
+            #aspera-audit-sticky-bar,
+            .aspera-toggle-all-bar,
+            .aspera-fix-btn,
+            #aspera-fixall-status,
+            #aspera-refresh-status { display:none !important; }
         }
         #aspera-audit-page .aspera-tab-content[hidden] { display:none !important; }
         #aspera-audit-page .aspera-cat-passed[open] .aspera-chevron { transform: rotate(90deg); }
