@@ -2,11 +2,15 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.1.0
+ * Version: 2.1.1
  * Author: Aspera
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
+
+if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.1.1' );
+}
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
 require_once plugin_dir_path( __FILE__ ) . 'plugin-update-checker/plugin-update-checker.php';
@@ -68,9 +72,10 @@ function aspera_host_is_subdomain(): bool {
         return false;
     }
     $multi_part_tlds = [
-        'co.uk', 'org.uk', 'ac.uk', 'gov.uk',
-        'co.nz', 'co.za', 'co.jp', 'co.kr',
-        'com.br', 'com.au', 'com.mx', 'com.ar', 'com.tr',
+        'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk', 'net.uk',
+        'co.nz', 'co.za', 'co.jp', 'co.kr', 'co.in', 'co.il',
+        'com.br', 'com.au', 'com.mx', 'com.ar', 'com.tr', 'com.sg', 'com.hk',
+        'id.au', 'net.au', 'org.au',
     ];
     foreach ( $multi_part_tlds as $tld ) {
         if ( substr( $host, -strlen( '.' . $tld ) ) === '.' . $tld ) {
@@ -80,7 +85,6 @@ function aspera_host_is_subdomain(): bool {
     return substr_count( $host, '.' ) > 1;
 }
 
-/**
 /**
  * Geeft het ACF veldtype terug voor een gegeven veldslug.
  * Bouwt eenmalig per request een slug→type map op basis van acf-field posts.
