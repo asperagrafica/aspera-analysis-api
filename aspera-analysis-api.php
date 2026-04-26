@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.96.0
+ * Version: 1.97.0
  * Author: Aspera
  */
 
@@ -76,7 +76,8 @@ function aspera_acf_field_type( string $slug ): ?string {
             }
         }
     }
-    return $map[ $slug ] ?? null;
+    $key = preg_replace( '#^option\|#', '', $slug );
+    return $map[ $key ] ?? null;
 }
 
 /**
@@ -2228,6 +2229,7 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page.is-filtering-error       .aspera-viol-row.aspera-sev-error       { display: flex !important; }
         #aspera-audit-page.is-filtering-warning     .aspera-viol-row.aspera-sev-warning     { display: flex !important; }
         #aspera-audit-page.is-filtering-observation .aspera-viol-row.aspera-sev-observation { display: flex !important; }
+        #aspera-audit-page.is-filtering-ignored     .aspera-viol-row.aspera-ignored         { display: flex !important; }
         #aspera-audit-page.is-filtering .aspera-cat-details.aspera-cat-empty { display: none; }
         #aspera-audit-page.is-searching .aspera-viol-row.aspera-no-search-match { display: none !important; }
         #aspera-audit-page.is-searching .aspera-cat-details.aspera-cat-search-empty { display: none; }
@@ -2297,6 +2299,8 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-cat-passed[open] .aspera-chevron { transform: rotate(90deg); }
         #aspera-audit-page .aspera-passed-toggle-btn.is-active { box-shadow: 0 0 0 2px #1d2327; }
         #aspera-audit-page .aspera-passed-toggle-btn:not(:disabled):hover { opacity: 0.85; }
+        #aspera-audit-page .aspera-ignored-toggle-btn.is-active { box-shadow: 0 0 0 2px #1d2327; }
+        #aspera-audit-page .aspera-ignored-toggle-btn:not(:disabled):hover { opacity: 0.85; }
         #aspera-audit-page .aspera-toggle-all-bar { display:flex; justify-content:flex-end; margin:0 0 8px; }
         #aspera-audit-page .aspera-toggle-all-btn { background:none; border:1px solid #c3c4c7; border-radius:3px; padding:3px 9px; font-size:12px; color:#50575e; cursor:pointer; }
         #aspera-audit-page .aspera-toggle-all-btn:hover { background:#f0f0f1; color:#1d2327; }
@@ -2435,6 +2439,11 @@ function aspera_dashboard_widget_render(): void {
     $passed_fc = $passed_disabled ? '#50575e' : '#fff';
     $passed_cursor = $passed_disabled ? 'default' : 'pointer';
     echo '<button type="button" class="aspera-passed-toggle-btn" ' . ( $passed_disabled ? 'disabled' : '' ) . ' style="background:' . $passed_bg . ';color:' . $passed_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $passed_cursor . ';">' . (int) $passed_total . '&nbsp;Geslaagd</button>';
+    $ignored_disabled = $ignored_total === 0;
+    $ignored_bg = $ignored_disabled ? '#dcdcde' : '#646970';
+    $ignored_fc = $ignored_disabled ? '#50575e' : '#fff';
+    $ignored_cursor = $ignored_disabled ? 'default' : 'pointer';
+    echo '<button type="button" class="aspera-ignored-toggle-btn" ' . ( $ignored_disabled ? 'disabled' : '' ) . ' style="background:' . $ignored_bg . ';color:' . $ignored_fc . ';border:none;border-radius:3px;padding:4px 10px;font-size:12px;font-weight:700;cursor:' . $ignored_cursor . ';">' . (int) $ignored_total . '&nbsp;Genegeerd</button>';
     echo '</div>';
     echo '</div>';
     echo '</div>';
@@ -2764,13 +2773,16 @@ function aspera_dashboard_widget_script(): void {
         // ── Severity-filter ──────────────────────────────────────────────
         var auditPage = document.getElementById('aspera-audit-page');
         if (auditPage) {
-            var sevButtons = auditPage.querySelectorAll('.aspera-sev-filter-btn');
-            var activeSev  = null;
+            var sevButtons   = auditPage.querySelectorAll('.aspera-sev-filter-btn');
+            var ignoredBtn   = auditPage.querySelector('.aspera-ignored-toggle-btn');
+            var activeSev    = null;
+            var ignoredActive = false;
             function applyFilter(sev) {
-                ['critical','error','warning','observation'].forEach(function (s) {
+                ['critical','error','warning','observation','ignored'].forEach(function (s) {
                     auditPage.classList.remove('is-filtering-' + s);
                 });
                 sevButtons.forEach(function (b) { b.classList.remove('is-active'); });
+                if (ignoredBtn) ignoredBtn.classList.remove('is-active');
                 if (!sev) {
                     auditPage.classList.remove('is-filtering');
                     auditPage.querySelectorAll('.aspera-cat-details').forEach(function (d) {
@@ -2780,10 +2792,17 @@ function aspera_dashboard_widget_script(): void {
                 }
                 auditPage.classList.add('is-filtering');
                 auditPage.classList.add('is-filtering-' + sev);
-                var btn = auditPage.querySelector('.aspera-sev-filter-btn[data-sev="' + sev + '"]');
-                if (btn) btn.classList.add('is-active');
+                if (sev === 'ignored') {
+                    if (ignoredBtn) ignoredBtn.classList.add('is-active');
+                } else {
+                    var btn = auditPage.querySelector('.aspera-sev-filter-btn[data-sev="' + sev + '"]');
+                    if (btn) btn.classList.add('is-active');
+                }
+                var rowSelector = (sev === 'ignored')
+                    ? '.aspera-viol-row.aspera-ignored'
+                    : '.aspera-viol-row.aspera-sev-' + sev;
                 auditPage.querySelectorAll('.aspera-cat-details').forEach(function (d) {
-                    var has = d.querySelector('.aspera-viol-row.aspera-sev-' + sev);
+                    var has = d.querySelector(rowSelector);
                     if (has) {
                         d.classList.remove('aspera-cat-empty');
                         d.setAttribute('open', '');
@@ -2796,10 +2815,19 @@ function aspera_dashboard_widget_script(): void {
                 btn.addEventListener('click', function () {
                     if (btn.disabled) return;
                     var sev = btn.dataset.sev;
-                    activeSev = (activeSev === sev) ? null : sev;
+                    activeSev    = (activeSev === sev) ? null : sev;
+                    ignoredActive = false;
                     applyFilter(activeSev);
                 });
             });
+            if (ignoredBtn) {
+                ignoredBtn.addEventListener('click', function () {
+                    if (ignoredBtn.disabled) return;
+                    ignoredActive = !ignoredActive;
+                    activeSev = null;
+                    applyFilter(ignoredActive ? 'ignored' : null);
+                });
+            }
 
             // ── Passed-toggle (mode switch) ──────────────────────────────
             var passedBtn   = auditPage.querySelector('.aspera-passed-toggle-btn');
@@ -2820,8 +2848,12 @@ function aspera_dashboard_widget_script(): void {
                     passedActive = !passedActive;
                     if (passedActive) {
                         passedBtn.classList.add('is-active');
-                        // Severity-filter uitzetten als die actief was
-                        if (activeSev) { activeSev = null; applyFilter(null); }
+                        // Severity- of ignored-filter uitzetten als die actief was
+                        if (activeSev || ignoredActive) {
+                            activeSev = null;
+                            ignoredActive = false;
+                            applyFilter(null);
+                        }
                         showTab('passed');
                     } else {
                         passedBtn.classList.remove('is-active');
@@ -2839,6 +2871,16 @@ function aspera_dashboard_widget_script(): void {
                     }
                 });
             });
+            // Wanneer ignored-filter wordt aangezet en passed is actief, switch naar issues
+            if (ignoredBtn) {
+                ignoredBtn.addEventListener('click', function () {
+                    if (passedActive && passedBtn) {
+                        passedActive = false;
+                        passedBtn.classList.remove('is-active');
+                        showTab('issues');
+                    }
+                });
+            }
 
             // ── Toggle alle accordions in zichtbare tab ──────────────────
             auditPage.querySelectorAll('.aspera-toggle-all-btn').forEach(function (btn) {
