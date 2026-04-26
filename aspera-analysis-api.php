@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 1.99.0
+ * Version: 2.0.0
  * Author: Aspera
  */
 
@@ -10622,9 +10622,14 @@ add_action( 'rest_api_init', function () {
 
             // Bouw hex → thema-kleurrol mapping uit bestaande color_* top-level keys
             // Prioriteit: content_ rollen eerst, dan alt_content_, dan footer_, dan header_
-            $role_map = [];
+            // Edge case: bij sites zonder directe hex-anchor verwijzen rollen onderling naar custom slugs.
+            // We voegen daarom óók hex-keyed entries toe via slug_map cascade (v2.0.0).
+            $role_map     = [];
+            $role_keying  = 'hex';
             if ( $prefer_roles ) {
-                $priority = [ 'color_content_', 'color_alt_content_', 'color_footer_', 'color_header_' ];
+                $priority   = [ 'color_content_', 'color_alt_content_', 'color_footer_', 'color_header_' ];
+                $slug_count = 0;
+                $hex_count  = 0;
                 foreach ( $priority as $prefix ) {
                     foreach ( $raw as $key => $value ) {
                         if ( strpos( $key, $prefix ) !== 0 ) continue;
@@ -10633,8 +10638,19 @@ add_action( 'rest_api_init', function () {
                         if ( ! isset( $role_map[ $value ] ) ) {
                             $role_map[ $value ] = $role;
                         }
+                        // Auto-bootstrap: ook hex-entry toevoegen als waarde een custom slug is
+                        if ( isset( $slug_map[ $value ] ) ) {
+                            $slug_count++;
+                            $hex = $slug_map[ $value ];
+                            if ( ! isset( $role_map[ $hex ] ) ) {
+                                $role_map[ $hex ] = $role;
+                            }
+                        } else {
+                            $hex_count++;
+                        }
                     }
                 }
+                $role_keying = ( $slug_count > $hex_count ) ? 'slug' : 'hex';
             }
 
             // Resolve functie: vervangt slugs door directe waarden
@@ -10789,6 +10805,174 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // ===== v2.0.0 scope-uitbreiding =====
+            // Optionele scopes: post_content, post_excerpt, postmeta, child_css
+            // Default: alleen theme_options/buttons/input_fields/style_schemes (backwards compatible)
+            $scope_param = $req->get_param( 'scope' );
+            if ( is_string( $scope_param ) && $scope_param !== '' ) {
+                $scope_param = array_map( 'trim', explode( ',', $scope_param ) );
+            }
+            if ( ! is_array( $scope_param ) ) $scope_param = [];
+            $scope_all       = in_array( 'all', $scope_param, true );
+            $do_post_content = $scope_all || in_array( 'post_content', $scope_param, true );
+            $do_post_excerpt = $scope_all || in_array( 'post_excerpt', $scope_param, true );
+            $do_postmeta     = $scope_all || in_array( 'postmeta',     $scope_param, true );
+            $do_child_css    = $scope_all || in_array( 'child_css',    $scope_param, true );
+
+            $post_content_changes = [];
+            $post_excerpt_changes = [];
+            $postmeta_changes     = [];
+            $postmeta_serialized  = [];
+            $child_css_changes    = [];
+
+            if ( $do_post_content || $do_post_excerpt || $do_postmeta || $do_child_css ) {
+                global $wpdb;
+
+                // slug → doelwaarde (rol bij prefer_roles, anders hex)
+                $target_for = [];
+                foreach ( $slug_map as $slug => $hex ) {
+                    if ( $prefer_roles && isset( $role_map[ $slug ] ) ) {
+                        $target_for[ $slug ] = $role_map[ $slug ];
+                    } elseif ( $prefer_roles && isset( $role_map[ $hex ] ) ) {
+                        $target_for[ $slug ] = $role_map[ $hex ];
+                    } else {
+                        $target_for[ $slug ] = $hex;
+                    }
+                }
+                // Lange slugs eerst (voorkomt _cc1 partial-match in _cc10)
+                uksort( $target_for, function ( $a, $b ) { return strlen( $b ) - strlen( $a ); } );
+
+                if ( $do_post_content ) {
+                    foreach ( $target_for as $slug => $target ) {
+                        $like = '%' . $wpdb->esc_like( $slug ) . '%';
+                        $rows = $wpdb->get_results( $wpdb->prepare(
+                            "SELECT post_type, COUNT(*) AS c FROM {$wpdb->posts}
+                             WHERE post_status='publish' AND post_content LIKE %s
+                             GROUP BY post_type", $like
+                        ) );
+                        $byType = [];
+                        foreach ( (array) $rows as $r ) $byType[ $r->post_type ] = (int) $r->c;
+                        if ( ! empty( $byType ) ) {
+                            $post_content_changes[] = [
+                                'slug'   => $slug,
+                                'target' => $target,
+                                'counts' => $byType,
+                            ];
+                            if ( ! $dry_run ) {
+                                $wpdb->query( $wpdb->prepare(
+                                    "UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)
+                                     WHERE post_status='publish' AND post_content LIKE %s",
+                                    $slug, $target, $like
+                                ) );
+                                if ( strpos( $slug, '#_' ) === 0 ) {
+                                    $enc_slug = '%23' . substr( $slug, 1 );
+                                    $wpdb->query( $wpdb->prepare(
+                                        "UPDATE {$wpdb->posts} SET post_content = REPLACE(post_content, %s, %s)
+                                         WHERE post_status='publish' AND post_content LIKE %s",
+                                        $enc_slug, $target, '%' . $wpdb->esc_like( $enc_slug ) . '%'
+                                    ) );
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if ( $do_post_excerpt ) {
+                    foreach ( $target_for as $slug => $target ) {
+                        $like  = '%' . $wpdb->esc_like( $slug ) . '%';
+                        $count = (int) $wpdb->get_var( $wpdb->prepare(
+                            "SELECT COUNT(*) FROM {$wpdb->posts}
+                             WHERE post_status='publish' AND post_excerpt LIKE %s", $like
+                        ) );
+                        if ( $count > 0 ) {
+                            $post_excerpt_changes[] = [
+                                'slug'   => $slug,
+                                'target' => $target,
+                                'count'  => $count,
+                            ];
+                            if ( ! $dry_run ) {
+                                $wpdb->query( $wpdb->prepare(
+                                    "UPDATE {$wpdb->posts} SET post_excerpt = REPLACE(post_excerpt, %s, %s)
+                                     WHERE post_status='publish' AND post_excerpt LIKE %s",
+                                    $slug, $target, $like
+                                ) );
+                            }
+                        }
+                    }
+                }
+
+                if ( $do_postmeta ) {
+                    foreach ( $target_for as $slug => $target ) {
+                        $like = '%' . $wpdb->esc_like( $slug ) . '%';
+                        $rows = $wpdb->get_results( $wpdb->prepare(
+                            "SELECT meta_id, meta_value FROM {$wpdb->postmeta} WHERE meta_value LIKE %s LIMIT 500",
+                            $like
+                        ) );
+                        $plain = []; $skipped = [];
+                        $sig   = '/(s:\d+:"|a:\d+:\{)/';
+                        foreach ( (array) $rows as $r ) {
+                            if ( preg_match( $sig, (string) $r->meta_value ) ) {
+                                $skipped[] = (int) $r->meta_id;
+                            } else {
+                                $plain[] = (int) $r->meta_id;
+                            }
+                        }
+                        if ( $plain ) {
+                            $postmeta_changes[] = [
+                                'slug'   => $slug,
+                                'target' => $target,
+                                'count'  => count( $plain ),
+                            ];
+                            if ( ! $dry_run ) {
+                                $ids = implode( ',', array_map( 'intval', $plain ) );
+                                $wpdb->query( $wpdb->prepare(
+                                    "UPDATE {$wpdb->postmeta} SET meta_value = REPLACE(meta_value, %s, %s)
+                                     WHERE meta_id IN ($ids)",
+                                    $slug, $target
+                                ) );
+                            }
+                        }
+                        if ( $skipped ) {
+                            $postmeta_serialized[] = [
+                                'slug'     => $slug,
+                                'meta_ids' => $skipped,
+                            ];
+                        }
+                    }
+                }
+
+                if ( $do_child_css ) {
+                    $theme_dir = get_stylesheet_directory();
+                    foreach ( [ 'style.css', 'custom.css' ] as $file ) {
+                        $path = $theme_dir . '/' . $file;
+                        if ( ! file_exists( $path ) ) continue;
+                        $content  = (string) file_get_contents( $path );
+                        $original = $content;
+                        $hits_for_file = [];
+                        foreach ( $target_for as $slug => $target ) {
+                            $old_var = 'var(--color-' . ltrim( $slug, '_' ) . ')';
+                            $new_var = 'var(--color-' . ltrim( $target, '_' ) . ')';
+                            $count   = substr_count( $content, $old_var );
+                            if ( $count > 0 ) {
+                                $hits_for_file[] = [
+                                    'slug'   => $slug,
+                                    'target' => $target,
+                                    'count'  => $count,
+                                ];
+                                $content = str_replace( $old_var, $new_var, $content );
+                            }
+                        }
+                        if ( $hits_for_file ) {
+                            $child_css_changes[ $file ] = $hits_for_file;
+                            if ( ! $dry_run && $content !== $original && is_writable( $path ) ) {
+                                file_put_contents( $path, $content );
+                            }
+                        }
+                    }
+                }
+            }
+            // ===== /v2.0.0 scope-uitbreiding =====
+
             // Verwijder custom_colors array als alle referenties zijn gemigreerd
             $remove_colors  = filter_var( $req->get_param( 'remove_custom_colors' ), FILTER_VALIDATE_BOOLEAN );
             $colors_removed = false;
@@ -10882,21 +11066,217 @@ add_action( 'rest_api_init', function () {
                 'style_schemes'  => $scheme_changes,
                 'totals'         => [
                     'theme_options' => count( $changes ),
-                    'buttons'      => count( $button_changes ),
-                    'input_fields' => count( $input_changes ),
+                    'buttons'       => count( $button_changes ),
+                    'input_fields'  => count( $input_changes ),
                     'style_schemes' => count( $scheme_changes ),
                 ],
             ];
+            if ( $do_post_content || $do_post_excerpt || $do_postmeta || $do_child_css ) {
+                $response['post_content']        = $post_content_changes;
+                $response['post_excerpt']        = $post_excerpt_changes;
+                $response['postmeta']            = $postmeta_changes;
+                $response['postmeta_serialized'] = $postmeta_serialized;
+                $response['child_css']           = $child_css_changes;
+                $response['scope_applied']       = array_values( array_filter( [
+                    $do_post_content ? 'post_content' : null,
+                    $do_post_excerpt ? 'post_excerpt' : null,
+                    $do_postmeta     ? 'postmeta'     : null,
+                    $do_child_css    ? 'child_css'    : null,
+                ] ) );
+            }
             if ( $prefer_roles ) {
-                $response['role_map'] = $role_map;
+                $response['role_map']    = $role_map;
+                $response['role_keying'] = $role_keying;
             }
             if ( $remove_colors ) {
                 $response['custom_colors_removed'] = $colors_removed;
+                $response['safe']                  = empty( $blocking_refs );
                 if ( ! empty( $blocking_refs ) ) {
                     $response['blocking_refs'] = $blocking_refs;
                 }
             }
             return $response;
+        },
+    ] );
+
+    /**
+     * GET /wp-json/aspera/v1/impreza/colors/inventory
+     * Lichtgewicht inventarisatie voor de /aspera-analysisapi-colors skill (v2.0.0).
+     * Levert custom_colors + scope-counts + role_map_proposal + child_css presence
+     * in één response, zodat de skill geen wp_get_option op usof_options_Impreza
+     * en geen losse SQL counts meer hoeft te doen.
+     */
+    register_rest_route( 'aspera/v1', '/impreza/colors/inventory', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            global $wpdb;
+
+            $option_name = 'usof_options_Impreza';
+            $raw         = get_option( $option_name );
+            if ( ! is_array( $raw ) ) {
+                return new WP_Error( 'invalid_option', 'usof_options_Impreza is geen array.', [ 'status' => 500 ] );
+            }
+
+            $custom_colors = $raw['custom_colors'] ?? [];
+            $colors_out    = [];
+            $slug_map      = [];
+            foreach ( (array) $custom_colors as $cc ) {
+                $slug  = $cc['slug']  ?? '';
+                $color = $cc['color'] ?? '';
+                if ( ! $slug || ! $color ) continue;
+                $colors_out[]        = [
+                    'slug'     => $slug,
+                    'hex'      => $color,
+                    'name'     => $cc['name'] ?? $slug,
+                    'gradient' => ( strpos( $color, 'gradient' ) !== false ) ? $color : null,
+                ];
+                $slug_map[ $slug ] = $color;
+            }
+
+            // Bouw role_map proposal (zelfde priority als /migrate)
+            $role_map    = [];
+            $slug_count  = 0;
+            $hex_count   = 0;
+            $priority    = [ 'color_content_', 'color_alt_content_', 'color_footer_', 'color_header_' ];
+            foreach ( $priority as $prefix ) {
+                foreach ( $raw as $key => $value ) {
+                    if ( strpos( $key, $prefix ) !== 0 ) continue;
+                    if ( ! is_string( $value ) || $value === '' ) continue;
+                    $role = '_' . substr( $key, 6 );
+                    if ( ! isset( $role_map[ $value ] ) ) {
+                        $role_map[ $value ] = $role;
+                    }
+                    if ( isset( $slug_map[ $value ] ) ) {
+                        $slug_count++;
+                        $hex = $slug_map[ $value ];
+                        if ( ! isset( $role_map[ $hex ] ) ) {
+                            $role_map[ $hex ] = $role;
+                        }
+                    } else {
+                        $hex_count++;
+                    }
+                }
+            }
+            $role_keying = ( $slug_count > $hex_count ) ? 'slug' : 'hex';
+
+            // Filter role_map_proposal naar alleen slug → rol (de mapping die de skill nodig heeft)
+            $proposal = [];
+            foreach ( $slug_map as $slug => $hex ) {
+                if ( isset( $role_map[ $slug ] ) ) {
+                    $proposal[ $slug ] = $role_map[ $slug ];
+                } elseif ( isset( $role_map[ $hex ] ) ) {
+                    $proposal[ $slug ] = $role_map[ $hex ];
+                }
+            }
+
+            // Theme-options scope: tel hoe vaak elke slug voorkomt in color_*-keys
+            $theme_counts = [];
+            foreach ( $slug_map as $slug => $hex ) {
+                $count = 0;
+                foreach ( $raw as $key => $value ) {
+                    if ( strpos( $key, 'color_' ) !== 0 ) continue;
+                    if ( ! is_string( $value ) || $value === '' ) continue;
+                    if ( strpos( $value, $slug ) !== false ) $count++;
+                }
+                $theme_counts[ $slug ] = $count;
+            }
+
+            // Buttons & input_fields counts
+            $count_in_array = function ( $arr, $slug ) {
+                if ( ! is_array( $arr ) ) return 0;
+                $n = 0;
+                foreach ( $arr as $row ) {
+                    if ( ! is_array( $row ) ) continue;
+                    foreach ( $row as $k => $v ) {
+                        if ( strpos( (string) $k, 'color_' ) !== 0 ) continue;
+                        if ( ! is_string( $v ) ) continue;
+                        if ( strpos( $v, $slug ) !== false ) $n++;
+                    }
+                }
+                return $n;
+            };
+
+            $button_counts = [];
+            $input_counts  = [];
+            foreach ( $slug_map as $slug => $hex ) {
+                $button_counts[ $slug ] = $count_in_array( $raw['buttons']      ?? [], $slug );
+                $input_counts[ $slug ]  = $count_in_array( $raw['input_fields'] ?? [], $slug );
+            }
+
+            // post_content + post_excerpt counts per post_type
+            $post_content_counts = [];
+            $post_excerpt_counts = [];
+            $postmeta_counts     = [];
+            foreach ( $slug_map as $slug => $hex ) {
+                $like = '%' . $wpdb->esc_like( $slug ) . '%';
+
+                $rows = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT post_type, COUNT(*) AS c FROM {$wpdb->posts}
+                     WHERE post_status='publish' AND post_content LIKE %s
+                     GROUP BY post_type", $like
+                ) );
+                $byType = [];
+                foreach ( (array) $rows as $r ) $byType[ $r->post_type ] = (int) $r->c;
+                $post_content_counts[ $slug ] = $byType;
+
+                $rowsX = $wpdb->get_results( $wpdb->prepare(
+                    "SELECT post_type, COUNT(*) AS c FROM {$wpdb->posts}
+                     WHERE post_status='publish' AND post_excerpt LIKE %s
+                     GROUP BY post_type", $like
+                ) );
+                $byTypeX = [];
+                foreach ( (array) $rowsX as $r ) $byTypeX[ $r->post_type ] = (int) $r->c;
+                $post_excerpt_counts[ $slug ] = $byTypeX;
+
+                $postmeta_counts[ $slug ] = (int) $wpdb->get_var( $wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_value LIKE %s", $like
+                ) );
+            }
+
+            // Child theme CSS presence
+            $css_status = [];
+            $theme_dir  = get_stylesheet_directory();
+            foreach ( [ 'style.css', 'custom.css' ] as $file ) {
+                $path = $theme_dir . '/' . $file;
+                if ( ! file_exists( $path ) ) {
+                    $css_status[ $file ] = null;
+                    continue;
+                }
+                $content = (string) file_get_contents( $path );
+                $hits    = [];
+                foreach ( $slug_map as $slug => $hex ) {
+                    $css_var = 'var(--color-' . ltrim( $slug, '_' ) . ')';
+                    $hits[ $slug ] = substr_count( $content, $css_var );
+                }
+                $css_status[ $file ] = $hits;
+            }
+
+            // Plugin-versie + active stylesheet voor de skill
+            $plugin_version = defined( 'ASPERA_ANALYSIS_API_VERSION' ) ? ASPERA_ANALYSIS_API_VERSION : null;
+            if ( ! $plugin_version ) {
+                $plugin_data    = function_exists( 'get_file_data' )
+                    ? get_file_data( __FILE__, [ 'Version' => 'Version' ] )
+                    : [];
+                $plugin_version = $plugin_data['Version'] ?? null;
+            }
+
+            return [
+                'plugin_version'       => $plugin_version,
+                'active_stylesheet'    => get_stylesheet(),
+                'custom_colors'        => $colors_out,
+                'role_keying'          => $role_keying,
+                'role_map_proposal'    => $proposal,
+                'scope_counts'         => [
+                    'theme_options' => $theme_counts,
+                    'buttons'       => $button_counts,
+                    'input_fields'  => $input_counts,
+                    'post_content'  => $post_content_counts,
+                    'post_excerpt'  => $post_excerpt_counts,
+                    'postmeta'      => $postmeta_counts,
+                    'child_css'     => $css_status,
+                ],
+            ];
         },
     ] );
 
