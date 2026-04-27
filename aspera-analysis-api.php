@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.0
+ * Version: 2.4.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.1' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -87,25 +87,29 @@ function aspera_host_is_subdomain(): bool {
 }
 
 /**
+ * Request-level cache voor file_get_contents op theme-CSS bestanden.
+ * `/site/audit` roept meerdere endpoints aan die elk style.css/custom.css
+ * inlezen — deze helper voorkomt dat de file binnen één request meerdere
+ * keren van disk wordt gelezen. Cache-key bevat mtime zodat een file_put_contents
+ * op hetzelfde pad (bv. /colors/migrate) de cache binnen dezelfde FPM-worker
+ * automatisch invalideert.
+ */
+function aspera_read_css_cached( string $path ): string {
+    static $cache = [];
+    $mtime = file_exists( $path ) ? filemtime( $path ) : 0;
+    $key   = $path . '|' . $mtime;
+    if ( array_key_exists( $key, $cache ) ) {
+        return $cache[ $key ];
+    }
+    $cache[ $key ] = $mtime ? (string) file_get_contents( $path ) : '';
+    return $cache[ $key ];
+}
+
+/**
  * Geeft het ACF veldtype terug voor een gegeven veldslug.
  * Bouwt eenmalig per request een slug→type map op basis van acf-field posts.
  * Geeft null terug als de slug niet gevonden wordt.
  */
-/**
- * Request-level cache voor file_get_contents op theme-CSS bestanden.
- * `/site/audit` roept meerdere endpoints aan die elk style.css/custom.css
- * inlezen — deze helper voorkomt dat de file binnen één request meerdere
- * keren van disk wordt gelezen.
- */
-function aspera_read_css_cached( string $path ): string {
-    static $cache = [];
-    if ( array_key_exists( $path, $cache ) ) {
-        return $cache[ $path ];
-    }
-    $cache[ $path ] = file_exists( $path ) ? (string) file_get_contents( $path ) : '';
-    return $cache[ $path ];
-}
-
 function aspera_acf_field_type( string $slug ): ?string {
     static $map = null;
     if ( $map === null ) {
@@ -11320,7 +11324,7 @@ add_action( 'rest_api_init', function () {
                     $css_status[ $file ] = null;
                     continue;
                 }
-                $content = (string) file_get_contents( $path );
+                $content = aspera_read_css_cached( $path );
                 $hits    = [];
                 foreach ( $slug_map as $slug => $hex ) {
                     $css_var = 'var(--color-' . ltrim( $slug, '_' ) . ')';
