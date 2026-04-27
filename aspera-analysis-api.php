@@ -2,14 +2,15 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.1.2
+ * Version: 2.2.0
+ * Requires PHP: 8.0
  * Author: Aspera
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.1.2' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.2.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -20,7 +21,23 @@ $aspera_updater = PucFactory::buildUpdateChecker(
     __FILE__,
     'aspera-analysis-api'
 );
-$aspera_updater->setAuthentication( base64_decode( 'Z2l0aHViX3BhdF8xMUNBRUY3NkkwTkx3bW9jQUFyTjlLX0lsWkRraVpKaFN2enkySERtaTNmYjdjTWxuRWRrd0R2TUZteHhIZ05DdWJEWTVUVE1ITzNRMmh1eFZu' ) );
+// PAT-loader: voorkeur ASPERA_GITHUB_TOKEN constant in wp-config.php; fallback op
+// option aspera_github_token; laatste fallback is de legacy ingebedde token
+// (gepland voor verwijdering in v2.3.0 zodra alle sites de constant gezet hebben).
+$aspera_github_token = '';
+if ( defined( 'ASPERA_GITHUB_TOKEN' ) && ASPERA_GITHUB_TOKEN ) {
+    $aspera_github_token = ASPERA_GITHUB_TOKEN;
+} else {
+    $opt_token = get_option( 'aspera_github_token' );
+    if ( $opt_token ) {
+        $aspera_github_token = $opt_token;
+    } else {
+        $aspera_github_token = base64_decode( 'Z2l0aHViX3BhdF8xMUNBRUY3NkkwTkx3bW9jQUFyTjlLX0lsWkRraVpKaFN2enkySERtaTNmYjdjTWxuRWRrd0R2TUZteHhIZ05DdWJEWTVUVE1ITzNRMmh1eFZu' );
+    }
+}
+if ( $aspera_github_token ) {
+    $aspera_updater->setAuthentication( $aspera_github_token );
+}
 $aspera_updater->setBranch( 'main' );
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1225,7 +1242,18 @@ function aspera_check_key( WP_REST_Request $req ): true|WP_Error {
     if ( empty( $stored ) ) {
         return new WP_Error( 'no_key', 'Aspera secret key niet geconfigureerd.', [ 'status' => 500 ] );
     }
-    $provided = (string) ( $req->get_param( 'aspera_key' ) ?? '' );
+    // Voorkeur: header X-Aspera-Key of Authorization: Bearer.
+    // Fallback: querystring/body-param aspera_key (backward compatible).
+    $provided = (string) ( $req->get_header( 'x-aspera-key' ) ?? '' );
+    if ( $provided === '' ) {
+        $auth = (string) ( $req->get_header( 'authorization' ) ?? '' );
+        if ( $auth !== '' && stripos( $auth, 'Bearer ' ) === 0 ) {
+            $provided = trim( substr( $auth, 7 ) );
+        }
+    }
+    if ( $provided === '' ) {
+        $provided = (string) ( $req->get_param( 'aspera_key' ) ?? '' );
+    }
     if ( ! hash_equals( $stored, $provided ) ) {
         return new WP_Error( 'unauthorized', 'Ongeldige of ontbrekende aspera_key.', [ 'status' => 401 ] );
     }
@@ -1781,6 +1809,10 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
 
             if ( ! $table ) {
                 wp_send_json_error( 'Tabelnaam ontbreekt.' );
+            }
+            // Strikte identifier-validatie: alleen alfanumeriek + underscore.
+            if ( ! preg_match( '/^[A-Za-z0-9_]+$/', $table ) ) {
+                wp_send_json_error( 'Ongeldige tabelnaam.' );
             }
             // Prefix-check: tabel moet bij deze WP-installatie horen.
             if ( strpos( $table, $wpdb->prefix ) !== 0 ) {
