@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.2.0
+ * Version: 2.3.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,10 +10,11 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.2.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.3.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
+// Repo is public, geen authenticatie nodig.
 require_once plugin_dir_path( __FILE__ ) . 'plugin-update-checker/plugin-update-checker.php';
 use YahnisElsts\PluginUpdateChecker\v5\PucFactory;
 $aspera_updater = PucFactory::buildUpdateChecker(
@@ -21,23 +22,6 @@ $aspera_updater = PucFactory::buildUpdateChecker(
     __FILE__,
     'aspera-analysis-api'
 );
-// PAT-loader: voorkeur ASPERA_GITHUB_TOKEN constant in wp-config.php; fallback op
-// option aspera_github_token; laatste fallback is de legacy ingebedde token
-// (gepland voor verwijdering in v2.3.0 zodra alle sites de constant gezet hebben).
-$aspera_github_token = '';
-if ( defined( 'ASPERA_GITHUB_TOKEN' ) && ASPERA_GITHUB_TOKEN ) {
-    $aspera_github_token = ASPERA_GITHUB_TOKEN;
-} else {
-    $opt_token = get_option( 'aspera_github_token' );
-    if ( $opt_token ) {
-        $aspera_github_token = $opt_token;
-    } else {
-        $aspera_github_token = base64_decode( 'Z2l0aHViX3BhdF8xMUNBRUY3NkkwTkx3bW9jQUFyTjlLX0lsWkRraVpKaFN2enkySERtaTNmYjdjTWxuRWRrd0R2TUZteHhIZ05DdWJEWTVUVE1ITzNRMmh1eFZu' );
-    }
-}
-if ( $aspera_github_token ) {
-    $aspera_updater->setAuthentication( $aspera_github_token );
-}
 $aspera_updater->setBranch( 'main' );
 // ─────────────────────────────────────────────────────────────────────────────
 
