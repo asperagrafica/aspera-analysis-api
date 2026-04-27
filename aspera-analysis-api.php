@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.3.0
+ * Version: 2.4.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.3.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -91,6 +91,21 @@ function aspera_host_is_subdomain(): bool {
  * Bouwt eenmalig per request een slug→type map op basis van acf-field posts.
  * Geeft null terug als de slug niet gevonden wordt.
  */
+/**
+ * Request-level cache voor file_get_contents op theme-CSS bestanden.
+ * `/site/audit` roept meerdere endpoints aan die elk style.css/custom.css
+ * inlezen — deze helper voorkomt dat de file binnen één request meerdere
+ * keren van disk wordt gelezen.
+ */
+function aspera_read_css_cached( string $path ): string {
+    static $cache = [];
+    if ( array_key_exists( $path, $cache ) ) {
+        return $cache[ $path ];
+    }
+    $cache[ $path ] = file_exists( $path ) ? (string) file_get_contents( $path ) : '';
+    return $cache[ $path ];
+}
+
 function aspera_acf_field_type( string $slug ): ?string {
     static $map = null;
     if ( $map === null ) {
@@ -6738,7 +6753,7 @@ add_action( 'rest_api_init', function () {
                 $css_path = $theme_dir . '/' . $css_file;
                 if ( ! file_exists( $css_path ) ) continue;
 
-                $lines = explode( "\n", file_get_contents( $css_path ) );
+                $lines = explode( "\n", aspera_read_css_cached( $css_path ) );
 
                 foreach ( $lines as $line_idx => $line ) {
                     // ── var(--color-*) referenties ────────────────────────────
@@ -7206,7 +7221,7 @@ add_action( 'rest_api_init', function () {
                 return new WP_Error( 'no_css', 'Geen style.css gevonden in het actieve theme.', [ 'status' => 404 ] );
             }
 
-            $css_content = file_get_contents( $css_path );
+            $css_content = aspera_read_css_cached( $css_path );
 
             // Strip de theme header comment (alles vóór eerste */)
             $header_end = strpos( $css_content, '*/' );
@@ -11088,8 +11103,8 @@ add_action( 'rest_api_init', function () {
                 $theme_dir = get_stylesheet_directory();
                 foreach ( [ 'style.css', 'custom.css' ] as $css_file ) {
                     $css_path = $theme_dir . '/' . $css_file;
-                    if ( ! file_exists( $css_path ) ) continue;
-                    $css_content = file_get_contents( $css_path );
+                    $css_content = aspera_read_css_cached( $css_path );
+                    if ( $css_content === '' ) continue;
                     foreach ( $slug_map as $slug => $color ) {
                         $css_var = 'var(--color-' . ltrim( $slug, '_' ) . ')';
                         if ( strpos( $css_content, $css_var ) !== false ) {
