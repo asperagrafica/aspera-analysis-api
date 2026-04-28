@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.1
+ * Version: 2.4.2
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.2' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -7264,11 +7264,15 @@ add_action( 'rest_api_init', function () {
                 'via_',          // Impreza grid via-modifier: via_grid, via_flex
                 'iconpos_',     // Impreza iconbox modifier: iconpos_left, iconpos_right
                 'owl-',         // OWL Carousel: owl-stage-outer, owl-dot, owl-item
+                'wpb_',         // WPBakery wrapper classes: wpb_wrapper, wpb_*
+                'icon_at',      // Impreza icon-positie: icon_atleft, icon_atright
             ];
 
             // Exact-match klassen die volledig genegeerd worden (framework/3rd-party)
             $framework_exact = [
                 'has_text_color', // WordPress block editor
+                'has_font_size',  // WordPress block editor
+                'dotstyle_smudge', // theme
             ];
 
             // Prefix-patronen die als observation gerapporteerd worden (niet als warning)
