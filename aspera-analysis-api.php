@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.2
+ * Version: 2.4.3
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -1400,6 +1400,9 @@ function aspera_site_health_test(): array {
         'plugins'       => 'Plugins',
         'cpt'           => 'Custom Post Types',
         'db_tables'     => 'Database Tabellen',
+        'options_orphaned' => 'Verweesde Options',
+        'options_config'   => 'Option pages — configuratie',
+        'naming'           => 'Naamgevingsconventies',
         'theme_check'   => 'Framework configuratie',
         'wp_settings'   => 'WP Core configuratie',
         'cache'         => 'Cache',
@@ -2245,6 +2248,9 @@ function aspera_dashboard_widget_render(): void {
         'header_config'    => 'Header-configuratie',
         'acf_fields'       => 'ACF Field Groups',
         'meta_orphaned'    => 'Orphaned ACF Meta',
+        'options_orphaned' => 'Verweesde Options',
+        'options_config'   => 'Option pages — configuratie',
+        'naming'           => 'Naamgevingsconventies',
         'theme_check'      => 'Framework configuratie',
         'wp_settings'      => 'WP Core configuratie',
         'cache'            => 'Cache',
