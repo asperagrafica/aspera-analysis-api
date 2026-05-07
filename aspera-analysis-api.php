@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.4
+ * Version: 2.4.5
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -5623,10 +5623,14 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
-            // 3. Alle _options_opt_* referenties met field_* waarden
+            // 3. Alle _options_* referenties met field_* waarden.
+            //    Filter op option_value LIKE 'field_%' garandeert ACF-herkomst,
+            //    dus we hoeven het naam-patroon niet aan opt_-prefix te koppelen.
+            //    Dat vangt ook suffix-stijl velden (bv. address_opt_contact)
+            //    en _core/_header/_footer-velden buiten een opt_-prefix.
             $refs = $wpdb->get_results(
                 "SELECT option_name, option_value FROM {$wpdb->options}
-                 WHERE option_name LIKE '\\_options\\_opt\\_%'
+                 WHERE option_name LIKE '\\_options\\_%'
                    AND option_value LIKE 'field_%'
                  ORDER BY option_name",
                 ARRAY_A
@@ -5645,10 +5649,17 @@ add_action( 'rest_api_init', function () {
                     continue;
                 }
 
-                // Prefix extraheren: options_opt_faq_2_0_text → opt_faq
+                // Prefix extraheren voor groepering. Drie patronen:
+                //  - opt_-prefix vooraan          : opt_faq, opt_forms       (options_opt_faq_2_0_text)
+                //  - _opt_-suffix met optionele _N: opt_contact, opt_counters (options_address_opt_contact, options_number_opt_counters_4)
+                //  - _core/_header/_footer-suffix : core, header, footer     (options_asperafooter_core, options_emailadres_core)
                 $bare   = preg_replace( '/^options_/', '', $value_name );
                 $prefix = 'unknown';
                 if ( preg_match( '/^(opt_[a-z]+)/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                } elseif ( preg_match( '/_(opt_[a-z]+)(?:_\d+)?$/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                } elseif ( preg_match( '/_(core|header|footer)(?:_[a-z0-9]+)?$/', $bare, $m ) ) {
                     $prefix = $m[1];
                 }
 
