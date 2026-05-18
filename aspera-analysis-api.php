@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.6
+ * Version: 2.4.7
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.6' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.7' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -7288,10 +7288,15 @@ add_action( 'rest_api_init', function () {
 
             // Exact-match klassen die volledig genegeerd worden (framework/3rd-party)
             $framework_exact = [
-                'has_text_color', // WordPress block editor
-                'has_font_size',  // WordPress block editor
-                'dotstyle_smudge', // theme
-                'header_hor',     // Impreza header-orientatie
+                'has_text_color',             // WordPress block editor
+                'has_font_size',              // WordPress block editor
+                'dotstyle_smudge',            // theme
+                'header_hor',                 // Impreza header-orientatie
+                'single-product',             // WooCommerce body class
+                'woocommerce-message',        // WooCommerce notificatie
+                'dropdown_height',            // navigatie dropdown modifier
+                'post-type-archive-product',  // WooCommerce archief body class
+                'product_meta',               // WooCommerce product meta blok
             ];
 
             // Prefix-patronen die als observation gerapporteerd worden (niet als warning)
@@ -7363,7 +7368,21 @@ add_action( 'rest_api_init', function () {
                 )
             );
 
-            $search_blob = implode( "\n", array_merge( $all_content, $all_excerpts ) );
+            // Voeg custom CSS classes van nav menu items toe (_menu_item_classes meta)
+            $menu_item_classes = $wpdb->get_col(
+                "SELECT meta_value FROM {$wpdb->postmeta}
+                 WHERE meta_key = '_menu_item_classes'
+                 AND meta_value != 'a:0:{}'"
+            );
+            $menu_class_strings = [];
+            foreach ( $menu_item_classes as $serialized ) {
+                $classes = maybe_unserialize( $serialized );
+                if ( is_array( $classes ) ) {
+                    $menu_class_strings[] = implode( ' ', $classes );
+                }
+            }
+
+            $search_blob = implode( "\n", array_merge( $all_content, $all_excerpts, $menu_class_strings ) );
 
             // ── 4. Per custom class: zoek in de gecombineerde content ────
             $unused = [];
