@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.7
+ * Version: 2.4.8
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.7' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.8' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1710,7 +1710,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
     $post_id = intval( $_POST['post_id'] ?? 0 );
 
-    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table' ];
+    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table' ];
     if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
@@ -1758,6 +1758,60 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             ) );
             wp_send_json_success( [
                 'message' => 'Meta key "' . $meta_key . '" verwijderd (' . ( $del_data + $del_ref ) . ' rijen).',
+            ] );
+            break;
+
+        case 'delete_orphaned_option':
+            global $wpdb;
+            $option_prefix = sanitize_text_field( $_POST['option_prefix'] ?? '' );
+            if ( ! $option_prefix ) {
+                wp_send_json_error( 'option_prefix ontbreekt.' );
+            }
+            // Re-verify: haal actieve ACF field keys op
+            $active_field_keys = $wpdb->get_col(
+                "SELECT post_name FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-field'
+                   AND post_status = 'publish'
+                   AND post_name LIKE 'field_%'"
+            );
+            // Haal alle _options_* refs op met field_* waarden (zelfde query als options/validate)
+            $refs = $wpdb->get_results(
+                "SELECT option_name, option_value FROM {$wpdb->options}
+                 WHERE option_name LIKE '\\_options\\_%'
+                   AND option_value LIKE 'field_%'",
+                ARRAY_A
+            );
+            // Filter op prefix (zelfde extractielogica als options/validate)
+            $to_delete = [];
+            foreach ( $refs as $ref ) {
+                $field_key  = $ref['option_value'];
+                $value_name = substr( $ref['option_name'], 1 ); // strip leading _
+                // Sla over als field_key nu actief is
+                if ( in_array( $field_key, $active_field_keys, true ) ) continue;
+                $bare   = preg_replace( '/^options_/', '', $value_name );
+                $prefix = 'unknown';
+                if ( preg_match( '/^(opt_[a-z]+)/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                } elseif ( preg_match( '/_(opt_[a-z]+)(?:_\d+)?$/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                } elseif ( preg_match( '/_(core|header|footer)(?:_[a-z0-9]+)?$/', $bare, $m ) ) {
+                    $prefix = $m[1];
+                }
+                if ( $prefix !== $option_prefix ) continue;
+                $to_delete[] = $value_name; // options_... (zonder _)
+            }
+            if ( empty( $to_delete ) ) {
+                wp_send_json_error( 'Geen verweesde options gevonden voor prefix "' . $option_prefix . '". Voer audit opnieuw uit.' );
+            }
+            $deleted = 0;
+            foreach ( $to_delete as $name ) {
+                $deleted += (int) $wpdb->query( $wpdb->prepare(
+                    "DELETE FROM {$wpdb->options} WHERE option_name = %s OR option_name = %s",
+                    '_' . $name, $name
+                ) );
+            }
+            wp_send_json_success( [
+                'message' => 'Options voor prefix "' . $option_prefix . '" verwijderd (' . $deleted . ' rijen).',
             ] );
             break;
 
@@ -3110,15 +3164,17 @@ function aspera_dashboard_widget_script(): void {
                 });
                 if (!fixes.length) return;
 
-                var delFG = 0, delMeta = 0, scFix = 0;
+                var delFG = 0, delMeta = 0, delOpt = 0, scFix = 0;
                 fixes.forEach(function (f) {
                     if (f.fix.action === 'delete_field_group') delFG++;
                     else if (f.fix.action === 'delete_orphaned_meta') delMeta++;
+                    else if (f.fix.action === 'delete_orphaned_option') delOpt++;
                     else scFix++;
                 });
                 var parts = [];
                 if (scFix > 0) parts.push(scFix + ' shortcode-fix' + (scFix > 1 ? 'es' : ''));
                 if (delMeta > 0) parts.push(delMeta + ' meta-verwijdering' + (delMeta > 1 ? 'en' : ''));
+                if (delOpt > 0) parts.push(delOpt + ' options-verwijdering' + (delOpt > 1 ? 'en' : ''));
                 if (delFG > 0) parts.push(delFG + ' field group-verwijdering' + (delFG > 1 ? 'en' : ''));
                 if (!confirm(fixes.length + ' fixes toepassen?\n\n' + parts.join(' + '))) return;
 
@@ -3140,6 +3196,7 @@ function aspera_dashboard_widget_script(): void {
                         + '&fix_action=' + encodeURIComponent(f.fix.action)
                         + '&post_id=' + encodeURIComponent(f.postId);
                     if (f.fix.meta_key) body += '&meta_key=' + encodeURIComponent(f.fix.meta_key);
+                    if (f.fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(f.fix.option_prefix);
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
 
@@ -3260,6 +3317,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Field group "' + (fix.title || '#' + postId) + '" wordt verplaatst naar de prullenbak.';
                 } else if (fix.action === 'delete_orphaned_meta') {
                     msg += 'Meta key "' + fix.meta_key + '" verwijderen (' + fix.rows + ' rijen + referenties).';
+                } else if (fix.action === 'delete_orphaned_option') {
+                    msg += 'Options voor prefix "' + fix.option_prefix + '" verwijderen (' + fix.rows + ' rijen).\n\nAlleen verweesde rijen worden verwijderd (re-verificatie server-side).';
                 } else if (fix.action === 'delete_wpforms_scheduled_actions') {
                     msg += fix.count + ' WPForms scheduled action(s) en bijbehorende logs verwijderen uit actionscheduler tabellen.';
                 } else if (fix.action === 'drop_orphaned_table') {
@@ -3274,6 +3333,7 @@ function aspera_dashboard_widget_script(): void {
                     + '&fix_action=' + encodeURIComponent(fix.action)
                     + '&post_id=' + encodeURIComponent(postId);
                 if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
+                if (fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(fix.option_prefix);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
                 if (fix.table) body += '&table=' + encodeURIComponent(fix.table);
@@ -6996,7 +7056,7 @@ add_action( 'rest_api_init', function () {
 
                 $slug                = $config['post_type'] ?? $acf_post->post_excerpt;
                 $publicly_queryable  = ! empty( $config['publicly_queryable'] );
-                $supports            = $config['supports'] ?? [];
+                $supports            = (array) ( $config['supports'] ?? [] );
                 $menu_icon_raw       = $config['menu_icon'] ?? [];
                 $menu_icon           = is_array( $menu_icon_raw ) ? ( $menu_icon_raw['value'] ?? '' ) : (string) $menu_icon_raw;
                 $show_in_rest        = ! empty( $config['show_in_rest'] );
@@ -9419,6 +9479,12 @@ add_action( 'rest_api_init', function () {
                                 ? ', option page actief maar veld verwijderd'
                                 : ', option page niet actief' )
                             . ')',
+                        'proposed_fix' => [
+                            'fixable'       => true,
+                            'action'        => 'delete_orphaned_option',
+                            'option_prefix' => $g['prefix'],
+                            'rows'          => $g['total_rows'],
+                        ],
                     ];
                 }
             }
