@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.22
+ * Version: 2.4.23
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.22' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.23' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -6999,25 +6999,24 @@ add_action( 'rest_api_init', function () {
                 aspera_scan_grid_extended_colors( $data, $post, $all_violations, $observations, $whitelist, $hex_map );
             }
 
-            // ─── 3. Theme opties: usof_options_Impreza ───────────────────────
+            // ─── 3. Theme opties: usof_options_Impreza (recursief) ───────────
             $theme_opts = get_option( 'usof_options_Impreza', [] );
             if ( is_array( $theme_opts ) ) {
-                $fake_post = (object) [ 'ID' => 0, 'post_title' => 'Theme Options', 'post_type' => 'theme_options' ];
-                foreach ( $theme_opts as $opt_key => $opt_val ) {
-                    if ( ! is_string( $opt_val ) || $opt_val === '' ) continue;
-                    if ( ! ( $opt_key === 'color' || str_starts_with( $opt_key, 'color_' ) || str_ends_with( $opt_key, '_color' ) || str_ends_with( $opt_key, '_bg' ) || str_ends_with( $opt_key, '_text' ) ) ) continue;
-                    $issue = aspera_validate_color_value( $opt_val, $opt_key, $whitelist, $hex_map );
-                    if ( $issue === null ) continue;
-                    // Thema-opties color_* zijn brondefinities van CSS vars — hardcoded hex
-                    // is hier correct. Alleen deprecated _cc* vars zijn een probleem.
-                    if ( ! in_array( $issue['rule'], [ 'deprecated_hex_var', 'deprecated_custom_var' ], true ) ) continue;
+                $scan_theme_value = function ( string $key, string $val ) use ( &$all_violations, &$observations, $whitelist, $hex_map ): void {
+                    $is_color_key = ( $key === 'color' || str_starts_with( $key, 'color_' ) || str_ends_with( $key, '_color' ) || str_ends_with( $key, '_bg' ) || str_ends_with( $key, '_text' ) );
+                    if ( ! $is_color_key || $val === '' ) return;
+                    $issue = aspera_validate_color_value( $val, $key, $whitelist, $hex_map );
+                    if ( $issue === null ) return;
+                    // Brondefinities van CSS vars mogen hardcoded hex bevatten.
+                    // Alleen deprecated _cc* vars zijn een probleem.
+                    if ( ! in_array( $issue['rule'], [ 'deprecated_hex_var', 'deprecated_custom_var' ], true ) ) return;
                     $entry = [
                         'post_id'    => 0,
                         'post_type'  => 'theme_options',
                         'post_title' => 'Theme Options',
                         'source'     => 'theme_options',
-                        'attribute'  => $opt_key,
-                        'value'      => $opt_val,
+                        'attribute'  => $key,
+                        'value'      => $val,
                         'rule'       => $issue['rule'],
                         'detail'     => $issue['detail'],
                         'severity'   => $issue['severity'],
@@ -7027,7 +7026,18 @@ add_action( 'rest_api_init', function () {
                     } else {
                         $all_violations[] = $entry;
                     }
-                }
+                };
+                // Recursief lopen vangt ook geneste arrays (input_fields, buttons, etc.)
+                $walk_theme = function ( array $arr ) use ( &$walk_theme, $scan_theme_value ): void {
+                    foreach ( $arr as $k => $v ) {
+                        if ( is_string( $v ) ) {
+                            $scan_theme_value( (string) $k, $v );
+                        } elseif ( is_array( $v ) ) {
+                            $walk_theme( $v );
+                        }
+                    }
+                };
+                $walk_theme( $theme_opts );
             }
 
             // ─── 4. Child theme CSS: custom.css + style.css ──────────────────
