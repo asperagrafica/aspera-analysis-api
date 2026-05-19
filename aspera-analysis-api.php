@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.20
+ * Version: 2.4.21
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.20' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.21' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -5715,14 +5715,17 @@ add_action( 'rest_api_init', function () {
             // 1. Actieve ACF field keys ophalen uit post_name van acf-field posts
             //    (post_name = field key zoals field_62c1766c295ed;
             //     post_excerpt = veldslug zoals bu_cpt_links_1)
-            $active_field_keys = $wpdb->get_col(
-                "SELECT post_name
+            $active_fields = $wpdb->get_results(
+                "SELECT post_name AS field_key, post_excerpt AS field_slug
                  FROM {$wpdb->posts}
                  WHERE post_type = 'acf-field'
                    AND post_status = 'publish'
-                   AND post_name LIKE 'field_%'"
+                   AND post_name LIKE 'field_%'",
+                ARRAY_A
             );
-            $active_field_keys = array_values( array_filter( $active_field_keys ) );
+            $active_field_keys  = array_column( $active_fields, 'field_key' );
+            $active_field_slugs = array_flip( array_filter( array_column( $active_fields, 'field_slug' ) ) );
+            $active_field_keys  = array_values( array_filter( $active_field_keys ) );
 
             // 2. Alle meta_keys met ACF-herkomst ophalen:
             //    - niet _ prefixed
@@ -5751,8 +5754,8 @@ add_action( 'rest_api_init', function () {
                 $key       = $row['meta_key'];
                 $field_key = $row['field_key'];
 
-                // Actief ACF-veld → overslaan
-                if ( in_array( $field_key, $active_field_keys, true ) ) {
+                // Actief ACF-veld → overslaan (op field key of op veldslug)
+                if ( in_array( $field_key, $active_field_keys, true ) || isset( $active_field_slugs[ $key ] ) ) {
                     $valid_count++;
                     continue;
                 }
