@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.16
+ * Version: 2.4.17
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.16' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.17' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1719,7 +1719,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
     $post_id = intval( $_POST['post_id'] ?? 0 );
 
-    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table' ];
+    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table', 'delete_orphaned_taxonomy' ];
     if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
@@ -1907,6 +1907,39 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
                 wp_send_json_error( 'DROP TABLE mislukt: ' . $wpdb->last_error );
             }
             wp_send_json_success( [ 'message' => 'Tabel "' . $table . '" gedropt.' ] );
+            break;
+
+        case 'delete_orphaned_taxonomy':
+            global $wpdb;
+            $taxonomy_slug = sanitize_key( $_POST['taxonomy_slug'] ?? '' );
+            if ( ! $taxonomy_slug ) {
+                wp_send_json_error( 'taxonomy_slug ontbreekt.' );
+            }
+            // Re-verify: taxonomy mag niet (weer) geregistreerd zijn.
+            if ( taxonomy_exists( $taxonomy_slug ) ) {
+                wp_send_json_error( 'Taxonomy "' . $taxonomy_slug . '" is weer geregistreerd — verwijdering geweigerd.' );
+            }
+            // Haal term_ids + term_taxonomy_ids op.
+            $rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT term_id, term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s",
+                $taxonomy_slug
+            ) );
+            if ( empty( $rows ) ) {
+                wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" had geen terms meer (al opgeruimd?).' ] );
+            }
+            $term_ids          = array_map( fn( $r ) => (int) $r->term_id, $rows );
+            $term_taxonomy_ids = array_map( fn( $r ) => (int) $r->term_taxonomy_id, $rows );
+            $ids_in            = implode( ',', $term_ids );
+            $ttids_in          = implode( ',', $term_taxonomy_ids );
+            // 1. Term relationships
+            $wpdb->query( "DELETE FROM {$wpdb->term_relationships} WHERE term_taxonomy_id IN ($ttids_in)" );
+            // 2. Term meta
+            $wpdb->query( "DELETE FROM {$wpdb->termmeta} WHERE term_id IN ($ids_in)" );
+            // 3. Term taxonomy
+            $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s", $taxonomy_slug ) );
+            // 4. Terms die nergens anders meer voorkomen
+            $wpdb->query( "DELETE FROM {$wpdb->terms} WHERE term_id IN ($ids_in) AND term_id NOT IN (SELECT term_id FROM {$wpdb->term_taxonomy})" );
+            wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" verwijderd (' . count( $term_ids ) . ' terms).' ] );
             break;
 
         default:
@@ -4767,8 +4800,29 @@ add_action( 'rest_api_init', function () {
                         // align_edges: per actieve plaatsing bepalen of de setting
                         // klopt. Verwacht 1 als menu de header-rand raakt
                         // (eerste in *_left, of laatste in *_right). Anders 0.
+                        // Uitzondering: als het menu in de default-breakpoint NIET het
+                        // meest rechter element is in een right-kolom, skip de check
+                        // helemaal — de ontwerper heeft bewust align_edges=0 gekozen
+                        // vanwege een element rechts op desktop.
                         if ( isset( $el['align_edges'] ) ) {
                             $actual_ae = (int) $el['align_edges'];
+
+                            // Controleer of het menu op default-breakpoint een right-kolom
+                            // heeft waarbij het NIET het laatste element is.
+                            $default_layout = $raw['default']['layout'] ?? [];
+                            $has_right_neighbor_on_default = false;
+                            if ( is_array( $default_layout ) ) {
+                                foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
+                                    $cell = $default_layout[ $zone . '_right' ] ?? null;
+                                    if ( ! is_array( $cell ) || ! in_array( $el_id, $cell, true ) ) continue;
+                                    if ( end( $cell ) !== $el_id ) {
+                                        $has_right_neighbor_on_default = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if ( $has_right_neighbor_on_default ) break 2; // skip align_edges check
+
                             $ae_mismatches = [];
                             foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
                                 $bp_layout  = $raw[ $bp ]['layout'] ?? null;
@@ -8673,7 +8727,7 @@ add_action( 'rest_api_init', function () {
                 $results[] = $entry;
 
                 // Violation voor /site/audit integratie
-                $violations[] = [
+                $violation_entry = [
                     'taxonomy' => $taxonomy,
                     'rule'     => $status === 'orphaned_safe'
                                     ? 'orphaned_taxonomy'
@@ -8683,6 +8737,15 @@ add_action( 'rest_api_init', function () {
                                   . ( $has_linked ? ', posts bestaan nog' : '' )
                                   . ( $has_references ? ', referenties gevonden' : '' ),
                 ];
+                if ( $status === 'orphaned_safe' ) {
+                    $violation_entry['proposed_fix'] = [
+                        'fixable'       => true,
+                        'action'        => 'delete_orphaned_taxonomy',
+                        'taxonomy_slug' => $taxonomy,
+                        'description'   => 'Taxonomy "' . $taxonomy . '" verwijderen: ' . $term_count . ' terms, termmeta en relaties',
+                    ];
+                }
+                $violations[] = $violation_entry;
             }
 
             return [
