@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.10
+ * Version: 2.4.11
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.10' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.11' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2710,7 +2710,7 @@ function aspera_dashboard_widget_render(): void {
                     return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
                 } );
                 echo '<div class="aspera-bulk-bar" data-cat="' . esc_attr( $key ) . '">';
-                echo '<label class="aspera-select-all-lbl"><input type="checkbox" class="aspera-select-all-cb">&ensp;Alles</label>';
+                echo '<label class="aspera-select-all-lbl"><input type="checkbox" class="aspera-select-all-cb">&ensp;Bulk-select</label>';
                 echo '<button class="aspera-bulk-btn" data-nonce="' . esc_attr( $nonce ) . '">Negeer geselecteerde</button>';
                 echo '<button class="aspera-bulk-fix-btn" data-nonce="' . esc_attr( $nonce ) . '" style="display:none;">Fix geselecteerde</button>';
                 echo '<span class="aspera-bulk-count" style="font-size:12px;color:#50575e;"></span>';
