@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.14
+ * Version: 2.4.15
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.14' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.15' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -6938,7 +6938,35 @@ add_action( 'rest_api_init', function () {
                 aspera_scan_grid_extended_colors( $data, $post, $all_violations, $observations, $whitelist, $hex_map );
             }
 
-            // ─── 3. Child theme CSS: custom.css + style.css ──────────────────
+            // ─── 3. Theme opties: usof_options_Impreza ───────────────────────
+            $theme_opts = get_option( 'usof_options_Impreza', [] );
+            if ( is_array( $theme_opts ) ) {
+                $fake_post = (object) [ 'ID' => 0, 'post_title' => 'Theme Options', 'post_type' => 'theme_options' ];
+                foreach ( $theme_opts as $opt_key => $opt_val ) {
+                    if ( ! is_string( $opt_val ) || $opt_val === '' ) continue;
+                    if ( ! ( $opt_key === 'color' || str_starts_with( $opt_key, 'color_' ) || str_ends_with( $opt_key, '_color' ) || str_ends_with( $opt_key, '_bg' ) || str_ends_with( $opt_key, '_text' ) ) ) continue;
+                    $issue = aspera_validate_color_value( $opt_val, $opt_key, $whitelist, $hex_map );
+                    if ( $issue === null ) continue;
+                    $entry = [
+                        'post_id'    => 0,
+                        'post_type'  => 'theme_options',
+                        'post_title' => 'Theme Options',
+                        'source'     => 'theme_options',
+                        'attribute'  => $opt_key,
+                        'value'      => $opt_val,
+                        'rule'       => $issue['rule'],
+                        'detail'     => $issue['detail'],
+                        'severity'   => $issue['severity'],
+                    ];
+                    if ( $issue['severity'] === 'observation' ) {
+                        $observations[] = $entry;
+                    } else {
+                        $all_violations[] = $entry;
+                    }
+                }
+            }
+
+            // ─── 4. Child theme CSS: custom.css + style.css ──────────────────
             $theme_dir        = get_stylesheet_directory();
             $theme_violations = [];
 
