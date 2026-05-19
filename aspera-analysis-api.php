@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.19
+ * Version: 2.4.20
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.19' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.20' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3328,6 +3328,7 @@ function aspera_dashboard_widget_script(): void {
                         + '&post_id=' + encodeURIComponent(f.postId);
                     if (f.fix.meta_key) body += '&meta_key=' + encodeURIComponent(f.fix.meta_key);
                     if (f.fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(f.fix.option_prefix);
+                    if (f.fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(f.fix.taxonomy_slug);
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
 
@@ -3454,6 +3455,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += fix.count + ' WPForms scheduled action(s) en bijbehorende logs verwijderen uit actionscheduler tabellen.';
                 } else if (fix.action === 'drop_orphaned_table') {
                     msg += 'Tabel "' + fix.table + '" wordt onomkeerbaar gedropt (DROP TABLE).\n\nPlugin: ' + (fix.plugin_slug || 'onbekend') + '\n\nDeze actie is NIET terug te draaien.';
+                } else if (fix.action === 'delete_orphaned_taxonomy') {
+                    msg += 'Taxonomy "' + fix.taxonomy_slug + '" verwijderen: alle terms, termmeta en relaties worden onomkeerbaar verwijderd.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -3465,6 +3468,7 @@ function aspera_dashboard_widget_script(): void {
                     + '&post_id=' + encodeURIComponent(postId);
                 if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
                 if (fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(fix.option_prefix);
+                if (fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(fix.taxonomy_slug);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
                 if (fix.table) body += '&table=' + encodeURIComponent(fix.table);
