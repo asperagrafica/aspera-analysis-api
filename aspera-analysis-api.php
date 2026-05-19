@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.8
+ * Version: 2.4.9
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.8' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.9' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1672,6 +1672,15 @@ add_action( 'wp_ajax_aspera_cleanup_exceptions', function () {
     wp_send_json_success( [ 'removed' => $removed ] );
 } );
 
+add_action( 'wp_ajax_aspera_reset_exceptions', function () {
+    check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
+    if ( ! aspera_user_is_administrator() ) wp_die( -1 );
+
+    $before = count( (array) get_option( 'aspera_audit_exceptions', [] ) );
+    update_option( 'aspera_audit_exceptions', [] );
+    wp_send_json_success( [ 'removed' => $before ] );
+} );
+
 add_action( 'wp_ajax_aspera_recheck_violation', function () {
     check_ajax_referer( 'aspera_refresh_nonce', 'nonce' );
     if ( ! aspera_user_is_administrator() ) wp_die( -1 );
@@ -2519,6 +2528,9 @@ function aspera_dashboard_widget_render(): void {
         echo '<span id="aspera-fixall-status"></span>';
     }
     echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
+    if ( $ignored_total > 0 ) {
+        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Zet alle ' . (int) $ignored_total . ' genegeerde meldingen terug op zichtbaar">&#x1F441;&ensp;Ont-negeer alles (' . (int) $ignored_total . ')</button>';
+    }
     echo '</span>';
     echo '</div>';
     echo '<span id="aspera-refresh-status" style="display:block;margin-bottom:10px;font-size:12px;color:#72777c;min-height:16px;"></span>';
@@ -2892,6 +2904,9 @@ function aspera_dashboard_widget_render(): void {
 
     // ── Sticky bottom bar: tweede Vernieuwen-trigger ──────────────────────────
     echo '<div id="aspera-audit-sticky-bar">';
+    if ( $ignored_total > 0 ) {
+        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Zet alle ' . (int) $ignored_total . ' genegeerde meldingen terug op zichtbaar">&#x1F441;&ensp;Ont-negeer alles (' . (int) $ignored_total . ')</button>';
+    }
     echo '<button class="button button-primary aspera-refresh-btn-sticky" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
     echo '</div>';
 
@@ -3077,6 +3092,32 @@ function aspera_dashboard_widget_script(): void {
         if (refreshBtn) {
             refreshBtn.addEventListener('click', function () { runAudit(); });
         }
+
+        // ── Ont-negeer alles ─────────────────────────────────────────────────
+        document.querySelectorAll('.aspera-reset-exc-btn').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                btn.disabled = true;
+                btn.textContent = 'Bezig…';
+                fetch(ajaxurl, {
+                    method:  'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body:    'action=aspera_reset_exceptions&nonce=' + encodeURIComponent(btn.dataset.nonce)
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.success) {
+                        location.reload();
+                    } else {
+                        btn.disabled = false;
+                        btn.textContent = 'Fout — probeer opnieuw';
+                    }
+                })
+                .catch(function () {
+                    btn.disabled = false;
+                    btn.textContent = 'Netwerkfout — probeer opnieuw';
+                });
+            });
+        });
 
         // ── Checkboxes: bulk-bar tonen/verbergen ─────────────────────────────
         function updateBulkBars() {
