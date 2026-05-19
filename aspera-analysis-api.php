@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.9
+ * Version: 2.4.10
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.9' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.10' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2349,8 +2349,11 @@ function aspera_dashboard_widget_render(): void {
         #aspera-audit-page .aspera-exc-btn.is-excepted { color:#a7aaad; }
         #aspera-audit-page .aspera-exc-btn.is-excepted:hover { color:#2271b1; }
         #aspera-audit-page .aspera-exc-cb { flex-shrink:0; margin:3px 0 0; cursor:pointer; }
-        #aspera-audit-page .aspera-bulk-bar { display:none; align-items:center; gap:8px; padding:6px 0; }
-        #aspera-audit-page .aspera-bulk-bar.has-selection { display:flex; }
+        #aspera-audit-page .aspera-bulk-bar { display:flex; align-items:center; gap:8px; padding:6px 0; }
+        #aspera-audit-page .aspera-bulk-bar .aspera-select-all-lbl { display:flex; align-items:center; font-size:12px; color:#50575e; cursor:pointer; user-select:none; }
+        #aspera-audit-page .aspera-bulk-bar .aspera-select-all-lbl input { margin:0; cursor:pointer; }
+        #aspera-audit-page .aspera-bulk-bar .aspera-bulk-btn { display:none; }
+        #aspera-audit-page .aspera-bulk-bar.has-selection .aspera-bulk-btn { display:inline-block; }
         #aspera-audit-page .aspera-bulk-btn { font-size:12px; cursor:pointer; background:#f0f0f0; border:1px solid #c3c4c7; border-radius:3px; padding:2px 10px; }
         #aspera-audit-page .aspera-bulk-btn:hover { background:#e0e0e0; }
         #aspera-audit-page .aspera-bulk-bar-ignored { display:none; align-items:center; gap:8px; padding:6px 0; }
@@ -2529,7 +2532,7 @@ function aspera_dashboard_widget_render(): void {
     }
     echo '<button class="button button-secondary" id="aspera-refresh-btn" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
     if ( $ignored_total > 0 ) {
-        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Zet alle ' . (int) $ignored_total . ' genegeerde meldingen terug op zichtbaar">&#x1F441;&ensp;Ont-negeer alles (' . (int) $ignored_total . ')</button>';
+        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Toon alle ' . (int) $ignored_total . ' genegeerde meldingen weer">Toon genegeerd (' . (int) $ignored_total . ')</button>';
     }
     echo '</span>';
     echo '</div>';
@@ -2707,6 +2710,7 @@ function aspera_dashboard_widget_render(): void {
                     return ( $sev_order[ $a['severity'] ?? 'warning' ] ?? 2 ) <=> ( $sev_order[ $b['severity'] ?? 'warning' ] ?? 2 );
                 } );
                 echo '<div class="aspera-bulk-bar" data-cat="' . esc_attr( $key ) . '">';
+                echo '<label class="aspera-select-all-lbl"><input type="checkbox" class="aspera-select-all-cb">&ensp;Alles</label>';
                 echo '<button class="aspera-bulk-btn" data-nonce="' . esc_attr( $nonce ) . '">Negeer geselecteerde</button>';
                 echo '<button class="aspera-bulk-fix-btn" data-nonce="' . esc_attr( $nonce ) . '" style="display:none;">Fix geselecteerde</button>';
                 echo '<span class="aspera-bulk-count" style="font-size:12px;color:#50575e;"></span>';
@@ -2905,7 +2909,7 @@ function aspera_dashboard_widget_render(): void {
     // ── Sticky bottom bar: tweede Vernieuwen-trigger ──────────────────────────
     echo '<div id="aspera-audit-sticky-bar">';
     if ( $ignored_total > 0 ) {
-        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Zet alle ' . (int) $ignored_total . ' genegeerde meldingen terug op zichtbaar">&#x1F441;&ensp;Ont-negeer alles (' . (int) $ignored_total . ')</button>';
+        echo '<button class="button button-secondary aspera-reset-exc-btn" data-nonce="' . esc_attr( $nonce ) . '" title="Toon alle ' . (int) $ignored_total . ' genegeerde meldingen weer">Toon genegeerd (' . (int) $ignored_total . ')</button>';
     }
     echo '<button class="button button-primary aspera-refresh-btn-sticky" data-nonce="' . esc_attr( $nonce ) . '">&#x21BA;&ensp;Vernieuwen</button>';
     echo '</div>';
@@ -3123,8 +3127,9 @@ function aspera_dashboard_widget_script(): void {
         function updateBulkBars() {
             document.querySelectorAll('.aspera-bulk-bar').forEach(function (bar) {
                 var container = bar.parentElement;
+                var all     = container.querySelectorAll('.aspera-exc-cb');
                 var checked = container.querySelectorAll('.aspera-exc-cb:checked');
-                var count = checked.length;
+                var count   = checked.length;
                 bar.classList.toggle('has-selection', count > 0);
                 var lbl = bar.querySelector('.aspera-bulk-count');
                 if (lbl) lbl.textContent = count > 0 ? count + ' geselecteerd' : '';
@@ -3132,7 +3137,12 @@ function aspera_dashboard_widget_script(): void {
                 if (fixBtn) {
                     var fixable = 0;
                     checked.forEach(function (cb) { if (cb.dataset.fix) fixable++; });
-                    fixBtn.style.display = fixable > 0 ? '' : 'none';
+                    fixBtn.style.display = fixable > 0 ? 'inline-block' : 'none';
+                }
+                var selectAllCb = bar.querySelector('.aspera-select-all-cb');
+                if (selectAllCb) {
+                    selectAllCb.checked       = all.length > 0 && count === all.length;
+                    selectAllCb.indeterminate = count > 0 && count < all.length;
                 }
             });
             document.querySelectorAll('.aspera-bulk-bar-ignored').forEach(function (bar) {
@@ -3149,6 +3159,17 @@ function aspera_dashboard_widget_script(): void {
         });
         document.querySelectorAll('.aspera-unexc-cb').forEach(function (cb) {
             cb.addEventListener('change', updateBulkBars);
+        });
+
+        // ── Selecteer alles per categorie ────────────────────────────────────
+        document.querySelectorAll('.aspera-select-all-cb').forEach(function (selectAllCb) {
+            selectAllCb.addEventListener('change', function () {
+                var container = selectAllCb.closest('.aspera-bulk-bar').parentElement;
+                container.querySelectorAll('.aspera-exc-cb').forEach(function (cb) {
+                    cb.checked = selectAllCb.checked;
+                });
+                updateBulkBars();
+            });
         });
 
         // ── Bulk negeer ──────────────────────────────────────────────────────
