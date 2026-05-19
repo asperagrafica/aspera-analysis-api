@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.13
+ * Version: 2.4.14
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.13' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.14' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -6866,12 +6866,25 @@ add_action( 'rest_api_init', function () {
             $whitelist      = $scheme['whitelist'];
             $hex_map        = $scheme['hex_map'];
 
-            // ─── 1. WPBakery shortcodes: us_content_template + us_page_block ──
+            // ─── 1. WPBakery shortcodes: us_content_template, us_page_block, page + ACF CPTs ──
+            $acf_cpt_slugs = [];
+            foreach ( get_posts( [ 'post_type' => 'acf-post-type', 'post_status' => 'publish', 'posts_per_page' => -1, 'fields' => 'ids' ] ) as $acf_id ) {
+                $cfg = maybe_unserialize( get_post_field( 'post_content', $acf_id ) );
+                if ( is_array( $cfg ) && ! empty( $cfg['post_type'] ) ) {
+                    $acf_cpt_slugs[] = $cfg['post_type'];
+                }
+            }
+            $scan_types   = array_unique( array_merge( [ 'us_content_template', 'us_page_block', 'page' ], $acf_cpt_slugs ) );
+            $placeholders = implode( ',', array_fill( 0, count( $scan_types ), '%s' ) );
             $shortcode_posts = $wpdb->get_results(
-                "SELECT ID, post_title, post_type, post_content
-                 FROM {$wpdb->posts}
-                 WHERE post_type IN ('us_content_template','us_page_block')
-                 AND post_status = 'publish'"
+                $wpdb->prepare(
+                    "SELECT ID, post_title, post_type, post_content
+                     FROM {$wpdb->posts}
+                     WHERE post_type IN ($placeholders)
+                     AND post_status = 'publish'
+                     AND post_content LIKE %s",
+                    array_merge( $scan_types, [ '%_color="%' ] )
+                )
             );
 
             foreach ( $shortcode_posts as $post ) {
