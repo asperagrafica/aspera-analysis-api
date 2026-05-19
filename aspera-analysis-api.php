@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.21
+ * Version: 2.4.22
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.21' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.22' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -7008,6 +7008,9 @@ add_action( 'rest_api_init', function () {
                     if ( ! ( $opt_key === 'color' || str_starts_with( $opt_key, 'color_' ) || str_ends_with( $opt_key, '_color' ) || str_ends_with( $opt_key, '_bg' ) || str_ends_with( $opt_key, '_text' ) ) ) continue;
                     $issue = aspera_validate_color_value( $opt_val, $opt_key, $whitelist, $hex_map );
                     if ( $issue === null ) continue;
+                    // Thema-opties color_* zijn brondefinities van CSS vars — hardcoded hex
+                    // is hier correct. Alleen deprecated _cc* vars zijn een probleem.
+                    if ( ! in_array( $issue['rule'], [ 'deprecated_hex_var', 'deprecated_custom_var' ], true ) ) continue;
                     $entry = [
                         'post_id'    => 0,
                         'post_type'  => 'theme_options',
