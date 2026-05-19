@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.15
+ * Version: 2.4.16
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.15' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.16' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -9729,7 +9729,7 @@ add_action( 'rest_api_init', function () {
             if ( ! $is_aspera ) {
                 $theme_violations[] = [
                     'rule'     => 'wrong_active_theme',
-                    'severity' => 'critical',
+                    'severity' => 'warning',
                     'detail'   => 'Actief thema: ' . $theme_name . ' (' . $stylesheet . ')',
                 ];
             }
