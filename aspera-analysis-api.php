@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.24
+ * Version: 2.4.25
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.23' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.25' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -7305,7 +7305,7 @@ add_action( 'rest_api_init', function () {
                 if ( $publicly_queryable && ! in_array( 'title', $supports, true ) ) {
                     $post_violations[] = [
                         'rule'   => 'missing_title_support',
-                        'detail' => 'publicly_queryable is true maar title ontbreekt in supports',
+                        'detail' => '"' . $slug . '" — publicly_queryable is true maar title ontbreekt in supports',
                     ];
                 }
 
@@ -7313,7 +7313,7 @@ add_action( 'rest_api_init', function () {
                 if ( empty( $menu_icon ) || $menu_icon === 'dashicons-admin-post' ) {
                     $post_violations[] = [
                         'rule'   => 'default_icon',
-                        'detail' => 'CPT gebruikt het standaard icoon (dashicons-admin-post) of heeft geen icoon — geef elk CPT een uniek herkenbaar icoon',
+                        'detail' => '"' . $slug . '" — CPT gebruikt het standaard icoon (dashicons-admin-post) of heeft geen icoon — geef elk CPT een uniek herkenbaar icoon',
                     ];
                 }
 
@@ -7321,7 +7321,7 @@ add_action( 'rest_api_init', function () {
                 if ( ! $show_in_rest ) {
                     $post_violations[] = [
                         'rule'   => 'missing_rest',
-                        'detail' => 'show_in_rest is uitgeschakeld — REST API toegang is altijd vereist voor MCP en Claude',
+                        'detail' => '"' . $slug . '" — show_in_rest is uitgeschakeld — REST API toegang is altijd vereist voor MCP en Claude',
                     ];
                 }
 
@@ -7329,7 +7329,7 @@ add_action( 'rest_api_init', function () {
                 if ( ! $publicly_queryable && $show_in_nav_menus ) {
                     $post_violations[] = [
                         'rule'   => 'nav_menus_no_frontend',
-                        'detail' => 'show_in_nav_menus is aan maar publicly_queryable is false — CPT zonder frontend hoort niet in het nav menu',
+                        'detail' => '"' . $slug . '" — show_in_nav_menus is aan maar publicly_queryable is false — CPT zonder frontend hoort niet in het nav menu',
                     ];
                 }
 
