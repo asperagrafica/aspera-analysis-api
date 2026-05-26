@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.25
+ * Version: 2.4.26
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.25' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.26' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -7579,6 +7579,10 @@ add_action( 'rest_api_init', function () {
                 'dropdown_height',            // navigatie dropdown modifier
                 'post-type-archive-product',  // WooCommerce archief body class
                 'product_meta',               // WooCommerce product meta blok
+                'mfp-title',                  // Magnific Popup — dynamisch door JS, niet in el_class
+                'mfp-close',                  // Magnific Popup — idem
+                'mfp-content',               // Magnific Popup — idem
+                'mfp-wrap',                  // Magnific Popup — idem
             ];
 
             // Prefix-patronen die als observation gerapporteerd worden (niet als warning)
@@ -7586,8 +7590,11 @@ add_action( 'rest_api_init', function () {
                 'page-id-',     // WordPress body class per pagina-ID
             ];
 
-            // Alle classes extraheren uit de CSS (zonder theme header)
-            preg_match_all( '/\.([a-zA-Z_][a-zA-Z0-9_-]*)/', $css_body, $class_matches );
+            // Strip url(...) inhoud zodat bestandspaden zoals .svg niet als class gematcht worden
+            $css_body_clean = preg_replace( '/url\s*\([^)]*\)/', 'url()', $css_body );
+
+            // Alle classes extraheren uit de CSS (zonder theme header, zonder url-inhoud)
+            preg_match_all( '/\.([a-zA-Z_][a-zA-Z0-9_-]*)/', $css_body_clean, $class_matches );
             $all_classes = array_unique( $class_matches[1] );
 
             // Classificeer: custom vs framework
