@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.23
+ * Version: 2.4.24
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -6632,6 +6632,15 @@ add_action( 'rest_api_init', function () {
                     //  - animation-*: doorgeven aan animate_detected (severity observation)
                     //  - alle overige properties: design_css_forbidden (severity error)
                     $element_css = $element['css'] ?? null;
+
+                    // css kan als URL-encoded JSON-string opgeslagen zijn (Design-tab formaat);
+                    // decode eerst zodat we een modern object niet als legacy string flaggen.
+                    if ( is_string( $element_css ) && $element_css !== '' ) {
+                        $decoded = json_decode( urldecode( $element_css ), true );
+                        if ( is_array( $decoded ) ) {
+                            $element_css = $decoded;
+                        }
+                    }
 
                     if ( is_string( $element_css ) && $element_css !== '' ) {
                         $violations[] = [
