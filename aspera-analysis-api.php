@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.4.27
+ * Version: 2.5.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.4.26' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.5.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -793,6 +793,16 @@ function aspera_validate_acf_group( int $group_id ): array {
         if ( $type === 'wysiwyg' && (int) ( $f['media_upload'] ?? 1 ) !== 0 ) {
             $issues[] = [
                 'type'        => 'wysiwyg_media_upload_enabled',
+                'field_label' => $f['label'] ?? $name,
+                'field_slug'  => $name,
+                'field_key'   => $key,
+            ];
+        }
+
+        // page_link veld zonder allow_null — standaard moet "Sta null toe" aanstaan
+        if ( $type === 'page_link' && (int) ( $f['allow_null'] ?? 0 ) !== 1 ) {
+            $issues[] = [
+                'type'        => 'page_link_missing_allow_null',
                 'field_label' => $f['label'] ?? $name,
                 'field_slug'  => $name,
                 'field_key'   => $key,
@@ -1881,6 +1891,26 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             wp_send_json_success( [ 'message' => 'Shortcode bijgewerkt in post #' . $post_id . '.' ] );
             break;
 
+        case 'enable_page_link_allow_null':
+            if ( ! function_exists( 'acf_get_field' ) || ! function_exists( 'acf_update_field' ) ) {
+                wp_send_json_error( 'ACF is niet actief.' );
+            }
+            $field_key = sanitize_text_field( $_POST['field_key'] ?? '' );
+            if ( ! $field_key ) {
+                wp_send_json_error( 'field_key ontbreekt.' );
+            }
+            $field = acf_get_field( $field_key );
+            if ( ! $field || ( $field['type'] ?? '' ) !== 'page_link' ) {
+                wp_send_json_error( 'Veld niet gevonden of is geen page-link — mogelijk al gewijzigd.' );
+            }
+            if ( (int) ( $field['allow_null'] ?? 0 ) === 1 ) {
+                wp_send_json_success( [ 'message' => 'Allow null stond al aan voor "' . ( $field['label'] ?? $field_key ) . '".' ] );
+            }
+            $field['allow_null'] = 1;
+            acf_update_field( $field );
+            wp_send_json_success( [ 'message' => 'Allow null ingeschakeld voor page-link "' . ( $field['label'] ?? $field_key ) . '".' ] );
+            break;
+
         case 'drop_orphaned_table':
             global $wpdb;
             $table       = sanitize_key( $_POST['table'] ?? '' );
@@ -2083,7 +2113,7 @@ function aspera_get_rules_per_category(): array {
         'wpb_templates' => [ 'wpb_saved_templates' ],
         'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies' ],
         'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_exceeds_breakpoints','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_mismatch','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
-        'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','wrong_group_name_prefix' ],
+        'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix' ],
         'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
         'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates' ],
         'options_orphaned' => [ 'orphaned_option' ],
@@ -2140,6 +2170,7 @@ function aspera_get_rule_context(): array {
         'broken_conditional_reference' => [ 'label' => 'ACF conditional logic verwijst naar niet-bestaand veld', 'explanation' => 'Een veld heeft conditional-logic die wijst naar een veld dat niet (meer) bestaat.', 'action' => 'Open de field group, los de conditional logic op (verwijder of pas aan).' ],
         'mixed_choice_key_types' => [ 'label' => 'ACF select-veld met gemixte key-types', 'explanation' => 'Choices in een select hebben deels numerieke deels string-keys; lastig te queryen.', 'action' => 'Standaardiseer choice-keys (alle string of alle numeriek).' ],
         'wysiwyg_media_upload_enabled' => [ 'label' => 'ACF wysiwyg met media-upload aan', 'explanation' => 'Een wysiwyg-veld laat media-upload toe; klanten kunnen ongecontroleerd images plaatsen.', 'action' => 'ACF veld > Toolbar > zet "Media Upload" uit.' ],
+        'page_link_missing_allow_null' => [ 'label' => 'ACF page-link zonder allow null', 'explanation' => 'Een page-link-veld heeft "Sta null toe" uitgeschakeld; het veld kan dan niet leeggelaten worden.', 'action' => 'ACF veld > zet "Sta null toe" aan (of gebruik de Fix-knop).' ],
 
         // ── Orphaned ─────────────────────────────────────────────────────
         'orphaned_meta' => [ 'label' => 'Verweesde post-meta', 'explanation' => 'Een meta_key wordt nergens meer in field groups, templates of code gerefereerd; alleen historische data in postmeta.', 'action' => 'Beoordeel of de meta verwijderd kan; gebruik fix-button om alle rijen te verwijderen.' ],
@@ -2854,6 +2885,8 @@ function aspera_dashboard_widget_render(): void {
                                 echo (int) ( $fix['count'] ?? 0 ) . ' WPForms scheduled action(s) verwijderen';
                             } elseif ( $fa === 'drop_orphaned_table' ) {
                                 echo 'tabel <code>' . esc_html( $fix['table'] ?? '' ) . '</code> droppen (DROP TABLE)';
+                            } elseif ( $fa === 'enable_page_link_allow_null' ) {
+                                echo 'allow null inschakelen op page-link <code>' . esc_html( $fix['label'] ?? $fix['field_key'] ?? '' ) . '</code>';
                             } else {
                                 $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
                                 $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
@@ -3340,6 +3373,7 @@ function aspera_dashboard_widget_script(): void {
                     if (f.fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(f.fix.taxonomy_slug);
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
+                    if (f.fix.field_key) body += '&field_key=' + encodeURIComponent(f.fix.field_key);
 
                     fetch(ajaxurl, {
                         method:  'POST',
@@ -3466,6 +3500,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Tabel "' + fix.table + '" wordt onomkeerbaar gedropt (DROP TABLE).\n\nPlugin: ' + (fix.plugin_slug || 'onbekend') + '\n\nDeze actie is NIET terug te draaien.';
                 } else if (fix.action === 'delete_orphaned_taxonomy') {
                     msg += 'Taxonomy "' + fix.taxonomy_slug + '" verwijderen: alle terms, termmeta en relaties worden onomkeerbaar verwijderd.';
+                } else if (fix.action === 'enable_page_link_allow_null') {
+                    msg += 'Allow null inschakelen op page-link "' + (fix.label || fix.field_key) + '".\n\nHet veld kan daarna leeggelaten worden.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -3482,6 +3518,7 @@ function aspera_dashboard_widget_script(): void {
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
                 if (fix.table) body += '&table=' + encodeURIComponent(fix.table);
                 if (fix.plugin_slug) body += '&plugin_slug=' + encodeURIComponent(fix.plugin_slug);
+                if (fix.field_key) body += '&field_key=' + encodeURIComponent(fix.field_key);
 
                 btn.disabled    = true;
                 btn.textContent = '...';
@@ -3945,6 +3982,7 @@ add_action( 'rest_api_init', function () {
                 'broken_conditional_reference' => 'error',
                 'mixed_choice_key_types'       => 'warning',
                 'wysiwyg_media_upload_enabled' => 'warning',
+                'page_link_missing_allow_null' => 'warning',
                 'wrong_group_name_prefix'      => 'warning',
             ];
 
@@ -4005,16 +4043,31 @@ add_action( 'rest_api_init', function () {
                         case 'wysiwyg_media_upload_enabled':
                             $detail = $group->post_title . ': WYSIWYG "' . ( $label ?: $name ) . '" heeft media upload ingeschakeld';
                             break;
+                        case 'page_link_missing_allow_null':
+                            $detail = $group->post_title . ': page-link "' . ( $label ?: $name ) . '" heeft allow null niet ingeschakeld';
+                            break;
                         default:
                             $detail = $group->post_title . ': ' . $t;
                     }
 
-                    $violations[] = [
+                    $entry = [
                         'rule'     => $t,
                         'severity' => $sev_map[ $t ] ?? 'warning',
                         'post_id'  => $group->ID,
                         'detail'   => $detail,
                     ];
+
+                    // Deterministische fix: allow_null aanzetten op het page_link-veld
+                    if ( $t === 'page_link_missing_allow_null' && $key !== '' ) {
+                        $entry['proposed_fix'] = [
+                            'fixable'   => true,
+                            'action'    => 'enable_page_link_allow_null',
+                            'field_key' => $key,
+                            'label'     => $label ?: $name,
+                        ];
+                    }
+
+                    $violations[] = $entry;
                 }
             }
 
@@ -9103,6 +9156,7 @@ add_action( 'rest_api_init', function () {
                 'broken_conditional_reference'           => 'error',
                 'mixed_choice_key_types'                 => 'warning',
                 'wysiwyg_media_upload_enabled'           => 'warning',
+                'page_link_missing_allow_null'           => 'warning',
                 'wrong_group_name_prefix'                => 'warning',
 
                 // meta/validate
@@ -9672,12 +9726,14 @@ add_action( 'rest_api_init', function () {
                 foreach ( $acf_val['violations'] ?? [] as $v ) {
                     $rule = $v['rule'] ?? 'unknown';
                     $sev  = $severity_map[ $rule ] ?? 'warning';
-                    $acf_field_violations[] = [
+                    $entry = [
                         'rule'     => $rule,
                         'severity' => $sev,
                         'post_id'  => $v['post_id'] ?? null,
                         'detail'   => $v['detail'] ?? '',
                     ];
+                    if ( isset( $v['proposed_fix'] ) ) $entry['proposed_fix'] = $v['proposed_fix'];
+                    $acf_field_violations[] = $entry;
                 }
             }
             $categories['acf_fields'] = [
