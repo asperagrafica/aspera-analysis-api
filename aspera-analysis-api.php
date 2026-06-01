@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.5.0
+ * Version: 2.5.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -887,7 +887,7 @@ function aspera_validate_color_value( string $value, string $attr_name, array $w
             $result      = [
                 'rule'     => 'deprecated_hex_var',
                 'detail'   => $attr_name . '="' . $value . '" — hex-code als CSS var; vervang door bijpassende framework CSS var',
-                'severity' => 'error',
+                'severity' => 'observation',
             ];
             if ( ! empty( $suggestions ) ) {
                 $result['suggestion'] = implode( ' / ', $suggestions );
