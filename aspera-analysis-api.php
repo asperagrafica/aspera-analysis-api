@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.7.0
+ * Version: 2.7.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.7.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.7.1' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1975,28 +1975,6 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             $new_content = str_replace( $before, $after, $post->post_content );
             wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_content ] );
             wp_send_json_success( [ 'message' => 'Shortcode bijgewerkt in post #' . $post_id . '.' ] );
-            break;
-
-        case 'set_grid_attribute':
-            $element_key = sanitize_text_field( $_POST['element'] ?? '' );
-            $attribute   = sanitize_text_field( $_POST['attribute'] ?? '' );
-            $value_raw   = wp_unslash( $_POST['value'] ?? '' );
-            if ( ! $element_key || ! $attribute ) {
-                wp_send_json_error( 'element of attribute ontbreekt.' );
-            }
-            $post = get_post( $post_id );
-            if ( ! $post || ! in_array( $post->post_type, [ 'us_grid_layout', 'us_header' ], true ) ) {
-                wp_send_json_error( 'Post niet gevonden of geen grid/header post type.' );
-            }
-            $raw = json_decode( $post->post_content, true );
-            if ( ! is_array( $raw ) || ! isset( $raw['data'][ $element_key ] ) ) {
-                wp_send_json_error( 'Element niet gevonden in post_content — mogelijk al gewijzigd.' );
-            }
-            $value = is_numeric( $value_raw ) ? (int) $value_raw : $value_raw;
-            $raw['data'][ $element_key ][ $attribute ] = $value;
-            $new_json = wp_json_encode( $raw, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
-            wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_json ] );
-            wp_send_json_success( [ 'message' => 'Attribuut "' . $attribute . '" gezet op "' . $value . '" voor element "' . $element_key . '" in post #' . $post_id . '.' ] );
             break;
 
         case 'enable_page_link_allow_null':
@@ -7153,19 +7131,16 @@ add_action( 'rest_api_init', function () {
                     }
 
                     // ─── missing_hide_empty / missing_color_link (post_custom_field) ──
+                    // Let op: geen proposed_fix hier. set_grid_attribute (v2.7.0) is teruggedraaid
+                    // in v2.7.1 — corrumpeerde vwrapper:1.link op post 375 (lpfwestland.nl) bij
+                    // een enkele aanroep, oorzaak nog niet vastgesteld. Niet opnieuw toevoegen
+                    // zonder eerst de root cause te begrijpen.
                     if ( $element_type === 'post_custom_field' ) {
                         if ( ( $element['hide_empty'] ?? 1 ) != 1 ) {
                             $violations[] = [
                                 'element' => $element_key,
                                 'rule'    => 'missing_hide_empty',
                                 'detail'  => 'hide_empty is niet ingeschakeld — lege veldwaarden worden zichtbaar weergegeven',
-                                'proposed_fix' => [
-                                    'fixable'   => true,
-                                    'action'    => 'set_grid_attribute',
-                                    'element'   => $element_key,
-                                    'attribute' => 'hide_empty',
-                                    'value'     => 1,
-                                ],
                             ];
                         }
                         if ( ( $element['color_link'] ?? 0 ) != 0 && aspera_acf_field_type( $element['key'] ?? '' ) !== 'image' ) {
@@ -7173,13 +7148,6 @@ add_action( 'rest_api_init', function () {
                                 'element' => $element_key,
                                 'rule'    => 'missing_color_link',
                                 'detail'  => 'color_link staat aan — veldinhoud erft linkkleuren onnodig',
-                                'proposed_fix' => [
-                                    'fixable'   => true,
-                                    'action'    => 'set_grid_attribute',
-                                    'element'   => $element_key,
-                                    'attribute' => 'color_link',
-                                    'value'     => 0,
-                                ],
                             ];
                         }
                     }
