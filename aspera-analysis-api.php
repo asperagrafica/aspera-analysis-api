@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.6.0
+ * Version: 2.6.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.6.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.6.1' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3581,6 +3581,10 @@ function aspera_dashboard_widget_script(): void {
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
                     if (f.fix.field_key) body += '&field_key=' + encodeURIComponent(f.fix.field_key);
+                    if (f.fix.table) body += '&table=' + encodeURIComponent(f.fix.table);
+                    if (f.fix.plugin_slug) body += '&plugin_slug=' + encodeURIComponent(f.fix.plugin_slug);
+                    if (f.fix.post_type) body += '&post_type=' + encodeURIComponent(f.fix.post_type);
+                    if (f.fix.prefix) body += '&prefix=' + encodeURIComponent(f.fix.prefix);
 
                     fetch(ajaxurl, {
                         method:  'POST',
