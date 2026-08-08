@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.5.3
+ * Version: 2.6.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.5.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.6.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -723,6 +723,78 @@ function aspera_get_plugin_slugs(): array {
         'active'    => array_map( $extract_slug, $active_files ),
     ];
     return $cache;
+}
+
+/**
+ * Bekende post_types van plugins die orphaned data achterlaten wanneer ze
+ * gedeactiveerd/verwijderd worden. Gedeeld tussen /db/tables/validate en
+ * /taxonomy/validate zodat beide dezelfde herkomst-herkenning gebruiken.
+ *
+ * @return array<string,array{plugin:string,slug:string}>
+ */
+function aspera_known_post_types(): array {
+    return [
+        'wppopups'          => [ 'plugin' => 'WP Popups',              'slug' => 'wp-popups-lite' ],
+        'popup'             => [ 'plugin' => 'Popup Maker',             'slug' => 'popup-maker' ],
+        'spu'               => [ 'plugin' => 'Popup by Supsystic',      'slug' => 'popup-by-supsystic' ],
+        'cookielawinfo'     => [ 'plugin' => 'Cookie Law Info',         'slug' => 'cookie-law-info' ],
+        'shortcoder'        => [ 'plugin' => 'Shortcoder',              'slug' => 'shortcoder' ],
+        'wpcode'            => [ 'plugin' => 'WPCode',                  'slug' => 'insert-headers-and-footers' ],
+        'wpforms'           => [ 'plugin' => 'WPForms',                 'slug' => 'wpforms-lite' ],
+        'tribe_events'      => [ 'plugin' => 'The Events Calendar',     'slug' => 'the-events-calendar' ],
+        'elementor_library' => [ 'plugin' => 'Elementor',               'slug' => 'elementor' ],
+    ];
+}
+
+/**
+ * Verwijdert alle posts van een post_type (hard delete — geen prullenbak).
+ * wp_delete_post() met force_delete ruimt postmeta/comments automatisch mee op.
+ *
+ * @return int aantal verwijderde posts
+ */
+function aspera_delete_posts_by_type( string $post_type ): int {
+    global $wpdb;
+    $post_ids = $wpdb->get_col( $wpdb->prepare(
+        "SELECT ID FROM {$wpdb->posts} WHERE post_type = %s", $post_type
+    ) );
+    $deleted = 0;
+    foreach ( $post_ids as $pid ) {
+        if ( wp_delete_post( (int) $pid, true ) ) $deleted++;
+    }
+    return $deleted;
+}
+
+/**
+ * Verwijdert alle terms/term_taxonomy/termmeta/term_relationships voor een
+ * niet-geregistreerde taxonomy (hard delete). Gedeeld tussen de fix-actions
+ * 'delete_orphaned_taxonomy' en 'delete_orphaned_taxonomy_and_posts'.
+ *
+ * @return array{terms:int,relationships:int}
+ */
+function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
+    global $wpdb;
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        "SELECT term_id, term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s",
+        $taxonomy_slug
+    ) );
+    $term_ids          = array_map( fn( $r ) => (int) $r->term_id, $rows );
+    $term_taxonomy_ids = array_map( fn( $r ) => (int) $r->term_taxonomy_id, $rows );
+
+    $relationships_deleted = 0;
+    if ( ! empty( $term_taxonomy_ids ) ) {
+        $ttids_in = implode( ',', $term_taxonomy_ids );
+        $relationships_deleted = (int) $wpdb->query( "DELETE FROM {$wpdb->term_relationships} WHERE term_taxonomy_id IN ($ttids_in)" );
+    }
+    if ( ! empty( $term_ids ) ) {
+        $ids_in = implode( ',', $term_ids );
+        $wpdb->query( "DELETE FROM {$wpdb->termmeta} WHERE term_id IN ($ids_in)" );
+    }
+    $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s", $taxonomy_slug ) );
+    if ( ! empty( $term_ids ) ) {
+        $ids_in = implode( ',', $term_ids );
+        $wpdb->query( "DELETE FROM {$wpdb->terms} WHERE term_id IN ($ids_in) AND term_id NOT IN (SELECT term_id FROM {$wpdb->term_taxonomy})" );
+    }
+    return [ 'terms' => count( $term_ids ), 'relationships' => $relationships_deleted ];
 }
 
 /**
@@ -1747,7 +1819,12 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $action  = sanitize_text_field( $_POST['fix_action'] ?? '' );
     $post_id = intval( $_POST['post_id'] ?? 0 );
 
-    $no_post_id_actions = [ 'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions', 'drop_orphaned_table', 'delete_orphaned_taxonomy' ];
+    $no_post_id_actions = [
+        'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions',
+        'drop_orphaned_table', 'delete_orphaned_taxonomy', 'disable_wpb_modules',
+        'delete_orphaned_taxonomy_and_posts', 'delete_orphaned_post_type_posts',
+        'delete_orphaned_plugin_options', 'delete_orphaned_plugin_meta', 'delete_cptui_data',
+    ];
     if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
@@ -1958,7 +2035,6 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             break;
 
         case 'delete_orphaned_taxonomy':
-            global $wpdb;
             $taxonomy_slug = sanitize_key( $_POST['taxonomy_slug'] ?? '' );
             if ( ! $taxonomy_slug ) {
                 wp_send_json_error( 'taxonomy_slug ontbreekt.' );
@@ -1967,27 +2043,137 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             if ( taxonomy_exists( $taxonomy_slug ) ) {
                 wp_send_json_error( 'Taxonomy "' . $taxonomy_slug . '" is weer geregistreerd — verwijdering geweigerd.' );
             }
-            // Haal term_ids + term_taxonomy_ids op.
-            $rows = $wpdb->get_results( $wpdb->prepare(
-                "SELECT term_id, term_taxonomy_id FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s",
-                $taxonomy_slug
-            ) );
-            if ( empty( $rows ) ) {
+            $tax_result = aspera_delete_taxonomy_data( $taxonomy_slug );
+            if ( $tax_result['terms'] === 0 ) {
                 wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" had geen terms meer (al opgeruimd?).' ] );
             }
-            $term_ids          = array_map( fn( $r ) => (int) $r->term_id, $rows );
-            $term_taxonomy_ids = array_map( fn( $r ) => (int) $r->term_taxonomy_id, $rows );
-            $ids_in            = implode( ',', $term_ids );
-            $ttids_in          = implode( ',', $term_taxonomy_ids );
-            // 1. Term relationships
-            $wpdb->query( "DELETE FROM {$wpdb->term_relationships} WHERE term_taxonomy_id IN ($ttids_in)" );
-            // 2. Term meta
-            $wpdb->query( "DELETE FROM {$wpdb->termmeta} WHERE term_id IN ($ids_in)" );
-            // 3. Term taxonomy
-            $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->term_taxonomy} WHERE taxonomy = %s", $taxonomy_slug ) );
-            // 4. Terms die nergens anders meer voorkomen
-            $wpdb->query( "DELETE FROM {$wpdb->terms} WHERE term_id IN ($ids_in) AND term_id NOT IN (SELECT term_id FROM {$wpdb->term_taxonomy})" );
-            wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" verwijderd (' . count( $term_ids ) . ' terms).' ] );
+            wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" verwijderd (' . $tax_result['terms'] . ' terms).' ] );
+            break;
+
+        case 'delete_orphaned_taxonomy_and_posts':
+            $taxonomy_slug = sanitize_key( $_POST['taxonomy_slug'] ?? '' );
+            $dep_post_type = sanitize_key( $_POST['post_type'] ?? '' );
+            $plugin_slug   = sanitize_text_field( $_POST['plugin_slug'] ?? '' );
+            if ( ! $taxonomy_slug || ! $dep_post_type ) {
+                wp_send_json_error( 'taxonomy_slug of post_type ontbreekt.' );
+            }
+            // Re-verify: taxonomy en post_type mogen niet (weer) geregistreerd zijn,
+            // en de bronplugin mag niet (weer) actief zijn.
+            if ( taxonomy_exists( $taxonomy_slug ) ) {
+                wp_send_json_error( 'Taxonomy "' . $taxonomy_slug . '" is weer geregistreerd — verwijdering geweigerd.' );
+            }
+            if ( post_type_exists( $dep_post_type ) ) {
+                wp_send_json_error( 'Post type "' . $dep_post_type . '" is weer geregistreerd — verwijdering geweigerd.' );
+            }
+            if ( $plugin_slug ) {
+                foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                    if ( stripos( $p, $plugin_slug ) !== false ) {
+                        wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — verwijdering geweigerd.' );
+                    }
+                }
+            }
+            $deleted_posts = aspera_delete_posts_by_type( $dep_post_type );
+            $tax_result    = aspera_delete_taxonomy_data( $taxonomy_slug );
+            wp_send_json_success( [
+                'message' => $deleted_posts . ' post(s) van type "' . $dep_post_type . '" en taxonomy "' . $taxonomy_slug . '" (' . $tax_result['terms'] . ' terms) verwijderd.',
+            ] );
+            break;
+
+        case 'delete_orphaned_post_type_posts':
+            $del_post_type = sanitize_key( $_POST['post_type'] ?? '' );
+            $plugin_slug    = sanitize_text_field( $_POST['plugin_slug'] ?? '' );
+            if ( ! $del_post_type ) {
+                wp_send_json_error( 'post_type ontbreekt.' );
+            }
+            if ( post_type_exists( $del_post_type ) ) {
+                wp_send_json_error( 'Post type "' . $del_post_type . '" is weer geregistreerd — verwijdering geweigerd.' );
+            }
+            if ( $plugin_slug ) {
+                foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                    if ( stripos( $p, $plugin_slug ) !== false ) {
+                        wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — verwijdering geweigerd.' );
+                    }
+                }
+            }
+            $deleted = aspera_delete_posts_by_type( $del_post_type );
+            wp_send_json_success( [ 'message' => $deleted . ' post(s) van type "' . $del_post_type . '" verwijderd.' ] );
+            break;
+
+        case 'delete_orphaned_plugin_options':
+            global $wpdb;
+            $opt_prefix  = sanitize_text_field( $_POST['prefix'] ?? '' );
+            $plugin_slug = sanitize_text_field( $_POST['plugin_slug'] ?? '' );
+            if ( ! $opt_prefix ) {
+                wp_send_json_error( 'prefix ontbreekt.' );
+            }
+            if ( $plugin_slug ) {
+                foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                    if ( stripos( $p, $plugin_slug ) !== false ) {
+                        wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — verwijdering geweigerd.' );
+                    }
+                }
+            }
+            $like    = $wpdb->esc_like( $opt_prefix ) . '%';
+            $deleted = (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->options} WHERE option_name LIKE %s", $like ) );
+            wp_send_json_success( [ 'message' => $deleted . ' option(s) met prefix "' . $opt_prefix . '" verwijderd.' ] );
+            break;
+
+        case 'delete_orphaned_plugin_meta':
+            global $wpdb;
+            $meta_prefix = sanitize_text_field( $_POST['prefix'] ?? '' );
+            $plugin_slug = sanitize_text_field( $_POST['plugin_slug'] ?? '' );
+            if ( ! $meta_prefix ) {
+                wp_send_json_error( 'prefix ontbreekt.' );
+            }
+            if ( $plugin_slug ) {
+                foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                    if ( stripos( $p, $plugin_slug ) !== false ) {
+                        wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — verwijdering geweigerd.' );
+                    }
+                }
+            }
+            $like    = $wpdb->esc_like( $meta_prefix ) . '%';
+            $deleted = (int) $wpdb->query( $wpdb->prepare( "DELETE FROM {$wpdb->postmeta} WHERE meta_key LIKE %s", $like ) );
+            wp_send_json_success( [ 'message' => $deleted . ' postmeta-rij(en) met prefix "' . $meta_prefix . '" verwijderd.' ] );
+            break;
+
+        case 'delete_cptui_data':
+            $plugin_slug = sanitize_text_field( $_POST['plugin_slug'] ?? 'custom-post-type-ui' );
+            foreach ( (array) get_option( 'active_plugins', [] ) as $p ) {
+                if ( stripos( $p, $plugin_slug ) !== false ) {
+                    wp_send_json_error( 'Plugin "' . $plugin_slug . '" is weer actief — verwijdering geweigerd.' );
+                }
+            }
+            if ( empty( get_option( 'cptui_post_types', null ) ) ) {
+                wp_send_json_success( [ 'message' => 'CPTUI-data was al verwijderd (al opgeruimd?).' ] );
+            }
+            delete_option( 'cptui_post_types' );
+            wp_send_json_success( [ 'message' => 'CPTUI post_types-data verwijderd uit wp_options.' ] );
+            break;
+
+        case 'disable_wpb_modules':
+            $current_raw = get_option( 'wpb_js_modules', '' );
+            $current     = ( is_string( $current_raw ) && $current_raw !== '' ) ? json_decode( $current_raw, true ) : null;
+            if ( ! is_array( $current ) ) {
+                $current = [
+                    'vc-seo'                => true,
+                    'vc-ai'                 => true,
+                    'vc-automapper'         => true,
+                    'vc-custom-js'          => true,
+                    'vc-custom-css'         => true,
+                    'vc-post-custom-layout' => true,
+                    'vc-scroll-to-element'  => true,
+                    'vc-color-picker'       => true,
+                    'vc-typography'         => true,
+                ];
+            }
+            $active_count = 0;
+            foreach ( $current as $mod_key => $mod_val ) {
+                if ( $mod_val === true ) $active_count++;
+                $current[ $mod_key ] = false;
+            }
+            update_option( 'wpb_js_modules', wp_json_encode( $current ) );
+            wp_send_json_success( [ 'message' => $active_count . ' WPBakery Module Manager module(s) uitgeschakeld.' ] );
             break;
 
         default:
@@ -2896,6 +3082,18 @@ function aspera_dashboard_widget_render(): void {
                                 echo 'tabel <code>' . esc_html( $fix['table'] ?? '' ) . '</code> droppen (DROP TABLE)';
                             } elseif ( $fa === 'enable_page_link_allow_null' ) {
                                 echo 'allow null inschakelen op page-link <code>' . esc_html( $fix['label'] ?? $fix['field_key'] ?? '' ) . '</code>';
+                            } elseif ( $fa === 'disable_wpb_modules' ) {
+                                echo 'alle WPBakery Module Manager modules uitschakelen';
+                            } elseif ( $fa === 'delete_orphaned_taxonomy_and_posts' ) {
+                                echo 'taxonomy <code>' . esc_html( $fix['taxonomy_slug'] ?? '' ) . '</code> + posts van type <code>' . esc_html( $fix['post_type'] ?? '' ) . '</code> verwijderen';
+                            } elseif ( $fa === 'delete_orphaned_post_type_posts' ) {
+                                echo (int) ( $fix['count'] ?? 0 ) . ' post(s) van type <code>' . esc_html( $fix['post_type'] ?? '' ) . '</code> verwijderen';
+                            } elseif ( $fa === 'delete_orphaned_plugin_options' ) {
+                                echo (int) ( $fix['count'] ?? 0 ) . ' option(s) met prefix <code>' . esc_html( $fix['prefix'] ?? '' ) . '</code> verwijderen';
+                            } elseif ( $fa === 'delete_orphaned_plugin_meta' ) {
+                                echo (int) ( $fix['count'] ?? 0 ) . ' postmeta-rij(en) met prefix <code>' . esc_html( $fix['prefix'] ?? '' ) . '</code> verwijderen';
+                            } elseif ( $fa === 'delete_cptui_data' ) {
+                                echo 'option <code>cptui_post_types</code> verwijderen';
                             } else {
                                 $before_short = esc_html( mb_strimwidth( $fix['before'] ?? '', 0, 80, '...' ) );
                                 $after_short  = esc_html( mb_strimwidth( $fix['after'] ?? '', 0, 80, '...' ) );
@@ -3511,6 +3709,18 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Taxonomy "' + fix.taxonomy_slug + '" verwijderen: alle terms, termmeta en relaties worden onomkeerbaar verwijderd.';
                 } else if (fix.action === 'enable_page_link_allow_null') {
                     msg += 'Allow null inschakelen op page-link "' + (fix.label || fix.field_key) + '".\n\nHet veld kan daarna leeggelaten worden.';
+                } else if (fix.action === 'disable_wpb_modules') {
+                    msg += 'Alle WPBakery Module Manager modules worden uitgeschakeld (optie "wpb_js_modules" overschreven).\n\nDit lost in één keer alle actieve-module violations op.';
+                } else if (fix.action === 'delete_orphaned_taxonomy_and_posts') {
+                    msg += 'Taxonomy "' + fix.taxonomy_slug + '" EN alle posts van type "' + fix.post_type + '" worden onomkeerbaar verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).\n\nDeze actie is NIET terug te draaien.';
+                } else if (fix.action === 'delete_orphaned_post_type_posts') {
+                    msg += fix.count + ' post(s) van type "' + fix.post_type + '" worden onomkeerbaar verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).\n\nDeze actie is NIET terug te draaien.';
+                } else if (fix.action === 'delete_orphaned_plugin_options') {
+                    msg += fix.count + ' option(s) met prefix "' + fix.prefix + '" worden verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).';
+                } else if (fix.action === 'delete_orphaned_plugin_meta') {
+                    msg += fix.count + ' postmeta-rij(en) met prefix "' + fix.prefix + '" worden verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).';
+                } else if (fix.action === 'delete_cptui_data') {
+                    msg += (fix.description || 'Option "cptui_post_types" wordt verwijderd uit wp_options.') + '\n\nCPTUI-plugin is inactief; ACF blijft leidend voor de post type-registratie.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -3528,6 +3738,8 @@ function aspera_dashboard_widget_script(): void {
                 if (fix.table) body += '&table=' + encodeURIComponent(fix.table);
                 if (fix.plugin_slug) body += '&plugin_slug=' + encodeURIComponent(fix.plugin_slug);
                 if (fix.field_key) body += '&field_key=' + encodeURIComponent(fix.field_key);
+                if (fix.post_type) body += '&post_type=' + encodeURIComponent(fix.post_type);
+                if (fix.prefix) body += '&prefix=' + encodeURIComponent(fix.prefix);
 
                 btn.disabled    = true;
                 btn.textContent = '...';
@@ -6212,17 +6424,7 @@ add_action( 'rest_api_init', function () {
             }
 
             // ── Bekende plugin post types — orphaned wanneer plugin inactief ──
-            $known_post_types = [
-                'wppopups'          => [ 'plugin' => 'WP Popups',              'slug' => 'wp-popups-lite' ],
-                'popup'             => [ 'plugin' => 'Popup Maker',             'slug' => 'popup-maker' ],
-                'spu'               => [ 'plugin' => 'Popup by Supsystic',      'slug' => 'popup-by-supsystic' ],
-                'cookielawinfo'     => [ 'plugin' => 'Cookie Law Info',         'slug' => 'cookie-law-info' ],
-                'shortcoder'        => [ 'plugin' => 'Shortcoder',              'slug' => 'shortcoder' ],
-                'wpcode'            => [ 'plugin' => 'WPCode',                  'slug' => 'insert-headers-and-footers' ],
-                'wpforms'           => [ 'plugin' => 'WPForms',                 'slug' => 'wpforms-lite' ],
-                'tribe_events'      => [ 'plugin' => 'The Events Calendar',     'slug' => 'the-events-calendar' ],
-                'elementor_library' => [ 'plugin' => 'Elementor',               'slug' => 'elementor' ],
-            ];
+            $known_post_types = aspera_known_post_types();
 
             // Post types die altijd veilig zijn — nooit flaggen
             $safe_post_types = [
@@ -6245,6 +6447,13 @@ add_action( 'rest_api_init', function () {
                         'plugin_active' => false,
                         'count'         => $count,
                         'advies'        => 'verwijderen na akkoord',
+                        'proposed_fix'  => [
+                            'fixable'     => true,
+                            'action'      => 'delete_orphaned_post_type_posts',
+                            'post_type'   => $post_type,
+                            'plugin_slug' => $info['slug'],
+                            'count'       => $count,
+                        ],
                     ];
                 }
             }
@@ -6280,6 +6489,13 @@ add_action( 'rest_api_init', function () {
                         'count'         => $count,
                         'examples'      => $examples,
                         'advies'        => 'verwijderen na akkoord',
+                        'proposed_fix'  => [
+                            'fixable'     => true,
+                            'action'      => 'delete_orphaned_plugin_options',
+                            'prefix'      => $prefix,
+                            'plugin_slug' => $info['slug'],
+                            'count'       => $count,
+                        ],
                     ];
                 }
             }
@@ -6307,6 +6523,13 @@ add_action( 'rest_api_init', function () {
                         'count'         => $count,
                         'examples'      => $examples,
                         'advies'        => 'verwijderen na akkoord',
+                        'proposed_fix'  => [
+                            'fixable'     => true,
+                            'action'      => 'delete_orphaned_plugin_meta',
+                            'prefix'      => $meta_prefix,
+                            'plugin_slug' => $info['slug'],
+                            'count'       => $count,
+                        ],
                     ];
                 }
             }
@@ -7329,8 +7552,9 @@ add_action( 'rest_api_init', function () {
             $cpt_overview = [];
 
             // ── 1. CPTUI leftover check ───────────────────────────────────
-            $cptui_data     = get_option( 'cptui_post_types', null );
-            $cptui_leftover = ! empty( $cptui_data );
+            $cptui_data           = get_option( 'cptui_post_types', null );
+            $cptui_leftover       = ! empty( $cptui_data );
+            $cptui_plugin_active  = in_array( 'custom-post-type-ui', aspera_get_plugin_slugs()['active'], true );
 
             // ── 2. ACF-geregistreerde CPTs ophalen ────────────────────────
             $acf_posts = get_posts( [
@@ -7485,6 +7709,21 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // Fix alleen aanbieden als CPTUI zelf niet meer actief is — anders
+            // registreert CPTUI zelf nog post_types via deze option (met name
+            // de orphan-slugs die niet ook door ACF gedekt worden) en zou
+            // verwijdering live functionaliteit kunnen deregistreren.
+            $cptui_fix = null;
+            if ( $cptui_leftover && ! $cptui_plugin_active ) {
+                $cptui_fix = [
+                    'fixable'     => true,
+                    'action'      => 'delete_cptui_data',
+                    'plugin_slug' => 'custom-post-type-ui',
+                    'description' => 'Option "cptui_post_types" verwijderen uit wp_options'
+                                      . ( ! empty( $cptui_orphans ) ? ' (' . count( $cptui_orphans ) . ' slug(s) niet in ACF: ' . implode( ', ', $cptui_orphans ) . ')' : '' ),
+                ];
+            }
+
             // ── 4. Option page iconen toevoegen aan icon_tracker ──────────
             $opt_pages = get_posts( [
                 'post_type'      => 'acf-ui-options-page',
@@ -7552,6 +7791,7 @@ add_action( 'rest_api_init', function () {
                 'observation_count' => count( $observations ),
                 'cptui_leftover'    => $cptui_leftover,
                 'cptui_orphans'     => $cptui_orphans,
+                'cptui_fix'         => $cptui_fix,
                 'cpt_count'         => count( $cpt_overview ),
                 'cpts'              => $cpt_overview,
                 'violations'        => $violations,
@@ -8334,19 +8574,36 @@ add_action( 'rest_api_init', function () {
 
             // 3. Module Manager — alle modules moeten uit staan
             $modules_raw = get_option( 'wpb_js_modules', '' );
-            $modules     = is_string( $modules_raw ) ? json_decode( $modules_raw, true ) : [];
-            $active_modules = [];
+            $modules     = ( is_string( $modules_raw ) && $modules_raw !== '' ) ? json_decode( $modules_raw, true ) : null;
 
-            if ( is_array( $modules ) ) {
-                foreach ( $modules as $module => $enabled ) {
-                    if ( $enabled === true ) {
-                        $active_modules[] = $module;
-                        $violations[] = [
-                            'rule'   => 'wpb_module_active',
-                            'module' => $module,
-                            'detail' => 'WPBakery Module Manager: "' . $module . '" is actief — alle modules moeten uitgeschakeld zijn',
-                        ];
-                    }
+            // Optie ontbreekt: WPBakery valt terug op zijn eigen default, alle modules enabled.
+            if ( ! is_array( $modules ) ) {
+                $modules = [
+                    'vc-seo'                => true,
+                    'vc-ai'                 => true,
+                    'vc-automapper'         => true,
+                    'vc-custom-js'          => true,
+                    'vc-custom-css'         => true,
+                    'vc-post-custom-layout' => true,
+                    'vc-scroll-to-element'  => true,
+                    'vc-color-picker'       => true,
+                    'vc-typography'         => true,
+                ];
+            }
+
+            $active_modules = [];
+            foreach ( $modules as $module => $enabled ) {
+                if ( $enabled === true ) {
+                    $active_modules[] = $module;
+                    $violations[] = [
+                        'rule'         => 'wpb_module_active',
+                        'module'       => $module,
+                        'detail'       => 'WPBakery Module Manager: "' . $module . '" is actief — alle modules moeten uitgeschakeld zijn',
+                        'proposed_fix' => [
+                            'fixable' => true,
+                            'action'  => 'disable_wpb_modules',
+                        ],
+                    ];
                 }
             }
 
@@ -8851,6 +9108,26 @@ add_action( 'rest_api_init', function () {
                         'taxonomy_slug' => $taxonomy,
                         'description'   => 'Taxonomy "' . $taxonomy . '" verwijderen: ' . $term_count . ' terms, termmeta en relaties',
                     ];
+                } elseif ( $status === 'orphaned_has_posts' ) {
+                    // Alleen fixable als alle gekoppelde posts tot één post_type behoren,
+                    // dat post_type een bekende dead-plugin herkomst heeft, en die plugin
+                    // bij herverificatie nog steeds inactief is. Anders: needs_review, geen fix.
+                    $linked_types = array_unique( array_map( fn( $p ) => $p->post_type, $linked_posts ) );
+                    if ( count( $linked_types ) === 1 ) {
+                        $dep_post_type   = $linked_types[0];
+                        $known_pt        = aspera_known_post_types();
+                        if ( isset( $known_pt[ $dep_post_type ] )
+                             && ! in_array( $known_pt[ $dep_post_type ]['slug'], aspera_get_plugin_slugs()['active'], true ) ) {
+                            $violation_entry['proposed_fix'] = [
+                                'fixable'       => true,
+                                'action'        => 'delete_orphaned_taxonomy_and_posts',
+                                'taxonomy_slug' => $taxonomy,
+                                'post_type'     => $dep_post_type,
+                                'plugin_slug'   => $known_pt[ $dep_post_type ]['slug'],
+                                'description'   => 'Taxonomy "' . $taxonomy . '" + ' . count( $linked_posts ) . ' post(s) van type "' . $dep_post_type . '" verwijderen (herkomst: ' . $known_pt[ $dep_post_type ]['plugin'] . ', plugin inactief)',
+                            ];
+                        }
+                    }
                 }
                 $violations[] = $violation_entry;
             }
@@ -9471,11 +9748,13 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
                 if ( ! empty( $cpt['cptui_leftover'] ) ) {
-                    $cpt_violations[] = [
+                    $cptui_entry = [
                         'rule'     => 'cptui_leftover',
                         'severity' => 'warning',
                         'detail'   => 'CPTUI data aanwezig in wp_options terwijl ACF leidend is',
                     ];
+                    if ( ! empty( $cpt['cptui_fix'] ) ) $cptui_entry['proposed_fix'] = $cpt['cptui_fix'];
+                    $cpt_violations[] = $cptui_entry;
                 }
             }
             $categories['cpt'] = [
@@ -9489,11 +9768,13 @@ add_action( 'rest_api_init', function () {
             $db_violations = [];
             if ( ! isset( $db['_error'] ) ) {
                 foreach ( $db['orphaned_tables'] ?? [] as $t ) {
-                    $db_violations[] = [
+                    $entry = [
                         'rule'     => 'orphaned_table',
                         'severity' => 'warning',
                         'detail'   => $t['table'] . ' (' . ( $t['plugin'] ?? 'onbekend' ) . ')',
                     ];
+                    if ( isset( $t['proposed_fix'] ) ) $entry['proposed_fix'] = $t['proposed_fix'];
+                    $db_violations[] = $entry;
                 }
                 foreach ( $db['unknown_tables'] ?? [] as $t ) {
                     $db_violations[] = [
@@ -9503,25 +9784,31 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
                 foreach ( $db['orphaned_post_types'] ?? [] as $pt ) {
-                    $db_violations[] = [
+                    $entry = [
                         'rule'     => 'orphaned_post_type',
                         'severity' => 'warning',
                         'detail'   => $pt['post_type'] . ' (' . $pt['plugin'] . ', ' . $pt['count'] . ' posts)',
                     ];
+                    if ( isset( $pt['proposed_fix'] ) ) $entry['proposed_fix'] = $pt['proposed_fix'];
+                    $db_violations[] = $entry;
                 }
                 foreach ( $db['orphaned_options'] ?? [] as $oo ) {
-                    $db_violations[] = [
+                    $entry = [
                         'rule'     => 'orphaned_plugin_options',
                         'severity' => 'warning',
                         'detail'   => $oo['prefix'] . '* (' . $oo['plugin'] . ', ' . $oo['count'] . ' rijen)',
                     ];
+                    if ( isset( $oo['proposed_fix'] ) ) $entry['proposed_fix'] = $oo['proposed_fix'];
+                    $db_violations[] = $entry;
                 }
                 foreach ( $db['orphaned_meta'] ?? [] as $om ) {
-                    $db_violations[] = [
+                    $entry = [
                         'rule'     => 'orphaned_plugin_meta',
                         'severity' => 'warning',
                         'detail'   => $om['prefix'] . '* (' . $om['plugin'] . ', ' . $om['count'] . ' rijen)',
                     ];
+                    if ( isset( $om['proposed_fix'] ) ) $entry['proposed_fix'] = $om['proposed_fix'];
+                    $db_violations[] = $entry;
                 }
             }
             $categories['db_tables'] = [
@@ -9609,13 +9896,15 @@ add_action( 'rest_api_init', function () {
             $wpb_mod_violations = [];
             if ( ! isset( $wpb_mod['_error'] ) ) {
                 foreach ( $wpb_mod['violations'] ?? [] as $v ) {
-                    $rule = $v['rule'] ?? 'wpb_module_active';
-                    $wpb_mod_violations[] = [
+                    $rule  = $v['rule'] ?? 'wpb_module_active';
+                    $entry = [
                         'rule'     => $rule,
                         'severity' => $severity_map[ $rule ] ?? 'critical',
                         'post_id'  => $v['post_id'] ?? null,
                         'detail'   => $v['detail'] ?? '',
                     ];
+                    if ( isset( $v['proposed_fix'] ) ) $entry['proposed_fix'] = $v['proposed_fix'];
+                    $wpb_mod_violations[] = $entry;
                 }
             }
             $categories['wpb_modules'] = [
