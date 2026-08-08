@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.6.1
+ * Version: 2.7.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.6.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.7.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1977,6 +1977,28 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             wp_send_json_success( [ 'message' => 'Shortcode bijgewerkt in post #' . $post_id . '.' ] );
             break;
 
+        case 'set_grid_attribute':
+            $element_key = sanitize_text_field( $_POST['element'] ?? '' );
+            $attribute   = sanitize_text_field( $_POST['attribute'] ?? '' );
+            $value_raw   = wp_unslash( $_POST['value'] ?? '' );
+            if ( ! $element_key || ! $attribute ) {
+                wp_send_json_error( 'element of attribute ontbreekt.' );
+            }
+            $post = get_post( $post_id );
+            if ( ! $post || ! in_array( $post->post_type, [ 'us_grid_layout', 'us_header' ], true ) ) {
+                wp_send_json_error( 'Post niet gevonden of geen grid/header post type.' );
+            }
+            $raw = json_decode( $post->post_content, true );
+            if ( ! is_array( $raw ) || ! isset( $raw['data'][ $element_key ] ) ) {
+                wp_send_json_error( 'Element niet gevonden in post_content — mogelijk al gewijzigd.' );
+            }
+            $value = is_numeric( $value_raw ) ? (int) $value_raw : $value_raw;
+            $raw['data'][ $element_key ][ $attribute ] = $value;
+            $new_json = wp_json_encode( $raw, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
+            wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_json ] );
+            wp_send_json_success( [ 'message' => 'Attribuut "' . $attribute . '" gezet op "' . $value . '" voor element "' . $element_key . '" in post #' . $post_id . '.' ] );
+            break;
+
         case 'enable_page_link_allow_null':
             if ( ! function_exists( 'acf_get_field' ) || ! function_exists( 'acf_update_field' ) ) {
                 wp_send_json_error( 'ACF is niet actief.' );
@@ -3585,6 +3607,9 @@ function aspera_dashboard_widget_script(): void {
                     if (f.fix.plugin_slug) body += '&plugin_slug=' + encodeURIComponent(f.fix.plugin_slug);
                     if (f.fix.post_type) body += '&post_type=' + encodeURIComponent(f.fix.post_type);
                     if (f.fix.prefix) body += '&prefix=' + encodeURIComponent(f.fix.prefix);
+                    if (f.fix.element) body += '&element=' + encodeURIComponent(f.fix.element);
+                    if (f.fix.attribute) body += '&attribute=' + encodeURIComponent(f.fix.attribute);
+                    if (f.fix.value !== undefined) body += '&value=' + encodeURIComponent(f.fix.value);
 
                     fetch(ajaxurl, {
                         method:  'POST',
@@ -3744,6 +3769,9 @@ function aspera_dashboard_widget_script(): void {
                 if (fix.field_key) body += '&field_key=' + encodeURIComponent(fix.field_key);
                 if (fix.post_type) body += '&post_type=' + encodeURIComponent(fix.post_type);
                 if (fix.prefix) body += '&prefix=' + encodeURIComponent(fix.prefix);
+                if (fix.element) body += '&element=' + encodeURIComponent(fix.element);
+                if (fix.attribute) body += '&attribute=' + encodeURIComponent(fix.attribute);
+                if (fix.value !== undefined) body += '&value=' + encodeURIComponent(fix.value);
 
                 btn.disabled    = true;
                 btn.textContent = '...';
@@ -5886,8 +5914,10 @@ add_action( 'rest_api_init', function () {
 
             // Whitelist: besproken plugins worden nooit geflagged (actief, inactief of afwezig)
             // Burst: gratis variant is ook acceptabel
+            // Redis Object Cache: optioneel, hosting-afhankelijk, geen verplichting op elke site
             $whitelist_slugs   = array_keys( $essential );
             $whitelist_slugs[] = 'burst-statistics';
+            $whitelist_slugs[] = 'redis-cache';
 
             $known_status = [];
             foreach ( $essential as $slug => $name ) {
@@ -7129,6 +7159,13 @@ add_action( 'rest_api_init', function () {
                                 'element' => $element_key,
                                 'rule'    => 'missing_hide_empty',
                                 'detail'  => 'hide_empty is niet ingeschakeld — lege veldwaarden worden zichtbaar weergegeven',
+                                'proposed_fix' => [
+                                    'fixable'   => true,
+                                    'action'    => 'set_grid_attribute',
+                                    'element'   => $element_key,
+                                    'attribute' => 'hide_empty',
+                                    'value'     => 1,
+                                ],
                             ];
                         }
                         if ( ( $element['color_link'] ?? 0 ) != 0 && aspera_acf_field_type( $element['key'] ?? '' ) !== 'image' ) {
@@ -7136,6 +7173,13 @@ add_action( 'rest_api_init', function () {
                                 'element' => $element_key,
                                 'rule'    => 'missing_color_link',
                                 'detail'  => 'color_link staat aan — veldinhoud erft linkkleuren onnodig',
+                                'proposed_fix' => [
+                                    'fixable'   => true,
+                                    'action'    => 'set_grid_attribute',
+                                    'element'   => $element_key,
+                                    'attribute' => 'color_link',
+                                    'value'     => 0,
+                                ],
                             ];
                         }
                     }
@@ -9642,12 +9686,14 @@ add_action( 'rest_api_init', function () {
                     foreach ( $g['violations'] ?? [] as $v ) {
                         $rule = $v['rule'] ?? 'unknown';
                         $sev  = $severity_map[ $rule ] ?? 'warning';
-                        $grid_violations[] = [
+                        $entry = [
                             'rule'     => $rule,
                             'severity' => $sev,
                             'post_id'  => $g['post_id'] ?? null,
                             'detail'   => $v['detail'] ?? '',
                         ];
+                        if ( isset( $v['proposed_fix'] ) ) $entry['proposed_fix'] = $v['proposed_fix'];
+                        $grid_violations[] = $entry;
                     }
                 }
             }
