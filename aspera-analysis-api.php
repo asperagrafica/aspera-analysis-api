@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.8.0
+ * Version: 2.9.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.8.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.9.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -270,21 +270,46 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         // de beeld/tekst-volgorde alleen wanneer de afbeelding in een ándere kolom staat dan de
         // tekst. Staan beeld en tekst in dezelfde kolom, dan verwisselt het attribuut slechts twee
         // gelijkwaardige blokken en heeft het geen nut.
+        // De fix-handler doet een str_replace over de volledige post_content. Bied een fix daarom
+        // alleen aan wanneer de openingstag maar één keer voorkomt — anders zouden andere inner
+        // rijen met identieke attributen ongemerkt meeveranderen.
+        $ri_unique = ( substr_count( $content, $ri_open ) === 1 );
+
+        // Fix die het attribuut weghaalt; gedeeld door de twee regels hieronder.
+        $remove_cr_fix = [
+            'fixable'   => true,
+            'action'    => 'remove_attribute',
+            'attribute' => 'columns_reverse',
+            'before'    => $ri_open,
+            'after'     => preg_replace( '/\s*\bcolumns_reverse="1"/', '', $ri_open ),
+        ];
+
         $ri_cols = preg_split( '/\[vc_column_inner(?:"[^"]*"|\'[^\']*\'|[^\]])*\]/', $ri_body );
         array_shift( $ri_cols ); // alles vóór de eerste kolom-tag
+
+        // Eén kolom: er valt niets te wisselen, dus het attribuut kan hier nooit werken.
         if ( count( $ri_cols ) < 2 ) {
+            if ( $cr ) {
+                $viol = [
+                    'tag'      => 'vc_row_inner',
+                    'rule'     => 'columns_reverse_single_column',
+                    'detail'   => 'columns_reverse="1" op een inner rij met ' . ( count( $ri_cols ) === 1 ? 'één kolom' : 'geen kolommen' ) . ' — er is geen tweede kolom om mee te wisselen, het attribuut doet niets',
+                    'snippet'  => $snippet,
+                    'location' => $ri_location,
+                ];
+                if ( $ri_unique ) {
+                    $viol['proposed_fix'] = $remove_cr_fix;
+                }
+                $violations[] = $viol;
+            }
             continue;
         }
+
         $col1_kind = aspera_wpb_column_kind( $ri_cols[0] );
         $col2_kind = aspera_wpb_column_kind( $ri_cols[1] );
 
         // Alleen een beeldkolom gevolgd door een tekstkolom vereist columns_reverse.
         $reverse_needed = ( $col1_kind === 'image' && $col2_kind === 'text' );
-
-        // De fix-handler doet een str_replace over de volledige post_content. Bied de fix daarom
-        // alleen aan wanneer de openingstag maar één keer voorkomt — anders zouden andere inner
-        // rijen met identieke attributen ongemerkt meeveranderen.
-        $ri_unique = ( substr_count( $content, $ri_open ) === 1 );
 
         if ( $reverse_needed && ! $cr ) {
             $viol = [
@@ -314,13 +339,7 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 'location' => $ri_location,
             ];
             if ( $ri_unique ) {
-                $viol['proposed_fix'] = [
-                    'fixable'   => true,
-                    'action'    => 'remove_attribute',
-                    'attribute' => 'columns_reverse',
-                    'before'    => $ri_open,
-                    'after'     => preg_replace( '/\s*\bcolumns_reverse="1"/', '', $ri_open ),
-                ];
+                $viol['proposed_fix'] = $remove_cr_fix;
             }
             $violations[] = $viol;
         }
@@ -674,7 +693,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
     // ── Post-niveau: dezelfde ACF-veldnaam meerdere keren opgeroepen ──────────
     // Bij het dupliceren van elementen worden veldverwijzingen makkelijk meegekopieerd.
     // Eén melding per post, niet per veld: de post is het aanknopingspunt voor controle.
-    if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true ) ) {
+    if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true )
+         && ! aspera_wpb_duplicate_fields_exempt( $post ) ) {
         $dupes = aspera_wpb_duplicate_field_refs( $content );
         if ( ! empty( $dupes ) ) {
             $violations[] = [
@@ -692,6 +712,28 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         'shortcode_count' => count( $matches ),
         'post_type'       => $post_type,
     ];
+}
+
+/**
+ * Bepaalt of een post is uitgezonderd van duplicate_acf_fields.
+ *
+ * Paginatemplates volgens de Aspera-conventie "Page - Template {nummer}" zijn juist
+ * gebouwd op herhaling: elke layout-variant roept dezelfde velden opnieuw op vanuit een
+ * eigen conditie. Een melding daarop is per definitie ruis.
+ *
+ * Uit te breiden per site via de filter 'aspera_duplicate_fields_exempt': een map
+ * post_type => regex op de posttitel.
+ */
+function aspera_wpb_duplicate_fields_exempt( WP_Post $post ): bool {
+    $exempt = apply_filters( 'aspera_duplicate_fields_exempt', [
+        // "Page - Template 1", ook met en-dash of afwijkende spatiëring
+        // De u-modifier is nodig om en-dash en em-dash als één teken te matchen.
+        'us_content_template' => '/^\s*page\s*[-–—]\s*template\s*\d+/iu',
+    ] );
+
+    $pattern = $exempt[ $post->post_type ] ?? null;
+
+    return $pattern !== null && (bool) preg_match( $pattern, $post->post_title );
 }
 
 /**
@@ -2448,7 +2490,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','missing_move_label','empty_option_field' ],
@@ -2667,6 +2709,7 @@ function aspera_get_rule_context(): array {
         'scroll_effect_forbidden' => [ 'label' => 'Scroll-effect attribuut gebruikt', 'explanation' => 'Element heeft scroll_effect; voor performance UIT.', 'action' => 'Verwijder scroll_effect attribuut.' ],
         'vc_video_wrong_attribute' => [ 'label' => 'vc_video met verkeerd attribuut', 'explanation' => 'Video gebruikt afgeschafte attribuut-naam.', 'action' => 'Pas naar huidige naming.' ],
         'missing_columns_reverse' => [ 'label' => 'Row mist columns_reverse', 'explanation' => 'Beeldkolom staat vóór de tekstkolom; zonder columns_reverse komt de afbeelding op mobiel boven de tekst.', 'action' => 'Voeg columns_reverse toe.' ],
+        'columns_reverse_single_column' => [ 'label' => 'columns_reverse op enkele kolom', 'explanation' => 'De inner rij heeft maar één kolom; er is niets om van volgorde te wisselen, dus het attribuut doet niets.', 'action' => 'Verwijder attribuut.' ],
         'unexpected_columns_reverse' => [ 'label' => 'Onverwachte columns_reverse', 'explanation' => 'columns_reverse op een row zonder gescheiden beeld- en tekstkolom; heeft geen effect op de beeld/tekst-stapeling.', 'action' => 'Verwijder attribuut.' ],
         'animate_detected' => [ 'label' => 'Animate-attribuut gedetecteerd', 'explanation' => 'Element heeft animate-eigenschap; meestal performance-impact.', 'action' => 'Beoordeel of nodig; eventueel verwijderen.' ],
         'responsive_hide_detected' => [ 'label' => 'Responsive-hide attribuut', 'explanation' => 'Element heeft responsive_hide_at_*; layout-keuze om expliciet te zijn.', 'action' => 'Bevestigen of bewust.' ],
@@ -9489,6 +9532,7 @@ add_action( 'rest_api_init', function () {
                 'vc_video_wrong_attribute'    => 'warning',
                 'missing_columns_reverse'     => 'error',
                 'unexpected_columns_reverse'  => 'error',
+                'columns_reverse_single_column' => 'warning',
                 'wpforms_deprecated'          => 'warning',
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
