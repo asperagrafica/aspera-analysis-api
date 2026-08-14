@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.7.1
+ * Version: 2.8.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.7.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.8.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -133,6 +133,65 @@ function aspera_acf_field_type( string $slug ): ?string {
 }
 
 /**
+ * Bepaalt de inhoudelijke rol van één vc_column_inner-body.
+ *
+ * Retourneert:
+ *   'image' — eerste inhoudelijke element is media en de kolom bevat geen tekst
+ *   'text'  — kolom bevat tekst en geen media
+ *   'mixed' — kolom bevat zowel media als tekst
+ *   'empty' — geen van beide
+ *
+ * Knoppen (us_btn), separators en overige elementen zijn neutraal: zij bepalen de
+ * rol niet. Media wordt herkend aan us_image en aan us_post_custom_field met een
+ * ACF-veldtype image of gallery.
+ */
+function aspera_wpb_column_kind( string $col_body ): string {
+    $text_tags = [ 'us_text', 'vc_column_text', 'us_post_title', 'us_post_content' ];
+
+    $has_media   = false;
+    $has_text    = false;
+    $media_first = false;
+    $seen_first  = false;
+
+    preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $col_body, $els, PREG_SET_ORDER );
+
+    foreach ( $els as $el ) {
+        $tag     = $el[1];
+        $is_media = false;
+        $is_text  = false;
+
+        if ( $tag === 'us_image' ) {
+            $is_media = true;
+        } elseif ( $tag === 'us_post_custom_field' ) {
+            preg_match( '/\bkey="([^"]+)"/', $el[2], $key_match );
+            $type = aspera_acf_field_type( $key_match[1] ?? '' );
+            if ( in_array( $type, [ 'image', 'gallery' ], true ) ) {
+                $is_media = true;
+            } else {
+                $is_text = true;
+            }
+        } elseif ( in_array( $tag, $text_tags, true ) ) {
+            $is_text = true;
+        }
+
+        if ( ! $is_media && ! $is_text ) {
+            continue; // neutraal element: telt niet mee voor de kolomrol
+        }
+        if ( ! $seen_first ) {
+            $seen_first  = true;
+            $media_first = $is_media;
+        }
+        $has_media = $has_media || $is_media;
+        $has_text  = $has_text || $is_text;
+    }
+
+    if ( $has_media && $has_text ) return 'mixed';
+    if ( $has_media && $media_first ) return 'image';
+    if ( $has_text ) return 'text';
+    return $has_media ? 'image' : 'empty';
+}
+
+/**
  * Valideert de WPBakery shortcodes van één post op beleidsschendingen.
  * Geeft een array terug met 'violations' en 'shortcode_count'.
  * Wordt gebruikt door zowel /wpb/validate/{id} als /wpb/validate/all.
@@ -181,14 +240,16 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
     $violations = [];
 
     // Pre-pass: vc_row_inner columns_reverse controle.
-    // Regel: eerste kolom bevat afbeelding → columns_reverse="1" verplicht.
-    //        eerste kolom bevat geen afbeelding → columns_reverse mag niet voorkomen.
+    // Regel: kolom 1 is een pure beeldkolom én kolom 2 een tekstkolom → columns_reverse="1" verplicht.
+    //        elke andere kolomcombinatie → columns_reverse mag niet voorkomen; het attribuut heeft daar
+    //        geen effect op de beeld/tekst-stapeling (bv. beeld én tekst in dezelfde kolom).
     preg_match_all( '/\[vc_row_inner([^\]]*)\](.*?)\[\/vc_row_inner\]/s', $content, $ri_blocks, PREG_SET_ORDER );
     foreach ( $ri_blocks as $ri ) {
         $ri_attrs  = $ri[1];
         $ri_body   = $ri[2];
         $cr        = (bool) preg_match( '/\bcolumns_reverse="1"/', $ri_attrs );
         $snippet   = '[vc_row_inner' . substr( trim( $ri_attrs ), 0, 60 ) . '…]';
+        $ri_open   = '[vc_row_inner' . $ri_attrs . ']';
 
         $ri_pos    = strpos( $content, $ri[0] );
         $ri_row    = preg_match_all( '/\[vc_row[\s\]]/', substr( $content, 0, $ri_pos ) );
@@ -204,44 +265,64 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             'breadcrumb' => 'Rij ' . $ri_row . ' → Inner rij' . ( $ri_el_id !== '' ? ' (' . $ri_el_id . ')' : '' ),
         ];
 
-        if ( ! preg_match( '/\[vc_column_inner[^\]]*\](.*?)(?=\[vc_column_inner|\[\/vc_row_inner\])/s', $ri_body, $first_col ) ) {
+        // Beoordeel de rol van kolom 1 en kolom 2, niet alleen het eerste element van kolom 1.
+        // columns_reverse verwisselt op mobiel de stapelvolgorde van de kolommen. Dat corrigeert
+        // de beeld/tekst-volgorde alleen wanneer de afbeelding in een ándere kolom staat dan de
+        // tekst. Staan beeld en tekst in dezelfde kolom, dan verwisselt het attribuut slechts twee
+        // gelijkwaardige blokken en heeft het geen nut.
+        $ri_cols = preg_split( '/\[vc_column_inner(?:"[^"]*"|\'[^\']*\'|[^\]])*\]/', $ri_body );
+        array_shift( $ri_cols ); // alles vóór de eerste kolom-tag
+        if ( count( $ri_cols ) < 2 ) {
             continue;
         }
-        // Controleer alleen het EERSTE inhoudelijke element van col1.
-        // columns_reverse is bedoeld voor kolommen waarbij de afbeelding als eerste
-        // element staat — niet voor kolommen waarbij tekst eerst staat en een afbeelding
-        // verder naar beneden voorkomt.
-        $first_has_image = false;
-        if ( preg_match( '/\[(us_image|us_post_custom_field|us_text|us_btn|vc_video)\b([^\]]*)\]/', $first_col[1], $first_el ) ) {
-            $first_el_tag   = $first_el[1];
-            $first_el_attrs = $first_el[2];
-            if ( $first_el_tag === 'us_image' ) {
-                $first_has_image = true;
-            } elseif ( $first_el_tag === 'us_post_custom_field' ) {
-                preg_match( '/\bkey="([^"]+)"/', $first_el_attrs, $key_match );
-                $first_key = $key_match[1] ?? '';
-                if ( $first_key !== '' && aspera_acf_field_type( $first_key ) === 'image' ) {
-                    $first_has_image = true;
-                }
-            }
-        }
+        $col1_kind = aspera_wpb_column_kind( $ri_cols[0] );
+        $col2_kind = aspera_wpb_column_kind( $ri_cols[1] );
 
-        if ( $first_has_image && ! $cr ) {
-            $violations[] = [
+        // Alleen een beeldkolom gevolgd door een tekstkolom vereist columns_reverse.
+        $reverse_needed = ( $col1_kind === 'image' && $col2_kind === 'text' );
+
+        // De fix-handler doet een str_replace over de volledige post_content. Bied de fix daarom
+        // alleen aan wanneer de openingstag maar één keer voorkomt — anders zouden andere inner
+        // rijen met identieke attributen ongemerkt meeveranderen.
+        $ri_unique = ( substr_count( $content, $ri_open ) === 1 );
+
+        if ( $reverse_needed && ! $cr ) {
+            $viol = [
                 'tag'      => 'vc_row_inner',
                 'rule'     => 'missing_columns_reverse',
-                'detail'   => 'Eerste kolom bevat een afbeelding maar columns_reverse="1" ontbreekt — op mobiel verschijnt de afbeelding boven de tekst',
+                'detail'   => 'Kolom 1 bevat alleen een afbeelding en kolom 2 de tekst, maar columns_reverse="1" ontbreekt — op mobiel verschijnt de afbeelding boven de tekst',
                 'snippet'  => $snippet,
                 'location' => $ri_location,
             ];
-        } elseif ( ! $first_has_image && $cr ) {
-            $violations[] = [
+            if ( $ri_unique ) {
+                $viol['proposed_fix'] = [
+                    'fixable'   => true,
+                    'action'    => 'add_attribute',
+                    'attribute' => 'columns_reverse',
+                    'value'     => '1',
+                    'before'    => $ri_open,
+                    'after'     => substr( $ri_open, 0, -1 ) . ' columns_reverse="1"]',
+                ];
+            }
+            $violations[] = $viol;
+        } elseif ( ! $reverse_needed && $cr ) {
+            $viol = [
                 'tag'      => 'vc_row_inner',
                 'rule'     => 'unexpected_columns_reverse',
-                'detail'   => 'columns_reverse="1" aanwezig maar eerste kolom bevat geen afbeelding — op mobiel verschijnt de tekst onder de afbeelding',
+                'detail'   => 'columns_reverse="1" aanwezig terwijl de kolommen geen gescheiden beeld- en tekstkolom vormen — het attribuut heeft hier geen effect op de beeld/tekst-stapeling',
                 'snippet'  => $snippet,
                 'location' => $ri_location,
             ];
+            if ( $ri_unique ) {
+                $viol['proposed_fix'] = [
+                    'fixable'   => true,
+                    'action'    => 'remove_attribute',
+                    'attribute' => 'columns_reverse',
+                    'before'    => $ri_open,
+                    'after'     => preg_replace( '/\s*\bcolumns_reverse="1"/', '', $ri_open ),
+                ];
+            }
+            $violations[] = $viol;
         }
     }
 
@@ -590,11 +671,85 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         }
     }
 
+    // ── Post-niveau: dezelfde ACF-veldnaam meerdere keren opgeroepen ──────────
+    // Bij het dupliceren van elementen worden veldverwijzingen makkelijk meegekopieerd.
+    // Eén melding per post, niet per veld: de post is het aanknopingspunt voor controle.
+    if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true ) ) {
+        $dupes = aspera_wpb_duplicate_field_refs( $content );
+        if ( ! empty( $dupes ) ) {
+            $violations[] = [
+                'tag'    => 'post',
+                'rule'   => 'duplicate_acf_fields',
+                'detail' => 'Duplicate ACF-veldwaarden gedetecteerd in "' . get_the_title( $post->ID ) . '" ('
+                    . count( $dupes ) . ' ' . ( count( $dupes ) === 1 ? 'veld komt' : 'velden komen' )
+                    . ' meerdere keren voor)',
+            ];
+        }
+    }
+
     return [
         'violations'      => $violations,
         'shortcode_count' => count( $matches ),
         'post_type'       => $post_type,
     ];
+}
+
+/**
+ * Geeft de ACF-veldnamen terug die binnen één post meer dan één keer worden opgeroepen.
+ *
+ * Meegeteld worden key="veldnaam" (us_post_custom_field), {{veldnaam}} in elk attribuut
+ * (us_image, achtergrondafbeelding, button-label) en de custom_field-verwijzing in
+ * us_btn link=. Per shortcode-element telt een veldnaam maar één keer, zodat één element
+ * dat hetzelfde veld in twee attributen gebruikt geen duplicaat oplevert.
+ *
+ * Option page-velden blijven buiten beschouwing: die zijn globaal en worden bewust
+ * hergebruikt. Herkenbaar aan {{option/...}}, key="option|..." en de opt_-prefix.
+ *
+ * Retourneert een map veldnaam => aantal, alleen voor namen met een telling van 2 of hoger.
+ */
+function aspera_wpb_duplicate_field_refs( string $content ): array {
+    $field_patterns = apply_filters( 'aspera_field_patterns', [
+        '/\{\{([\w_]+)\}\}/',   // {{veldnaam}} — UpSolution/US
+        '/\bkey="([\w_]+)"/',   // key="veldnaam" — us_post_custom_field
+    ] );
+
+    preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $els, PREG_SET_ORDER );
+
+    $all_refs = [];
+
+    foreach ( $els as $el ) {
+        $tag   = $el[1];
+        $attrs = $el[2];
+
+        $refs = [];
+        foreach ( $field_patterns as $pattern ) {
+            if ( preg_match_all( $pattern, $attrs, $f ) ) {
+                $refs = array_merge( $refs, array_filter( $f[1] ) );
+            }
+        }
+
+        if ( $tag === 'us_btn' && preg_match( '/\blink="([^"]+)"/', $attrs, $link_match ) ) {
+            $link_data = json_decode( urldecode( $link_match[1] ), true );
+            if ( isset( $link_data['type'], $link_data['custom_field'] )
+                 && $link_data['type'] === 'custom_field'
+                 && ! empty( $link_data['custom_field'] ) ) {
+                $refs[] = $link_data['custom_field'];
+            }
+        }
+
+        // Option page-velden overslaan; per element blijft elke veldnaam uniek.
+        $refs = array_filter( array_unique( $refs ), function ( $ref ) {
+            return strpos( $ref, 'option/' ) !== 0
+                && strpos( $ref, 'option|' ) !== 0
+                && strpos( $ref, 'opt_' ) !== 0;
+        } );
+
+        $all_refs = array_merge( $all_refs, $refs );
+    }
+
+    return array_filter( array_count_values( $all_refs ), function ( $count ) {
+        return $count > 1;
+    } );
 }
 
 /**
@@ -2293,7 +2448,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','missing_move_label','empty_option_field' ],
@@ -2511,10 +2666,11 @@ function aspera_get_rule_context(): array {
         'empty_button_style' => [ 'label' => 'Form-button zonder stijl', 'explanation' => 'Submit-button zonder stijl.', 'action' => 'Definieer stijl in opt_forms.' ],
         'scroll_effect_forbidden' => [ 'label' => 'Scroll-effect attribuut gebruikt', 'explanation' => 'Element heeft scroll_effect; voor performance UIT.', 'action' => 'Verwijder scroll_effect attribuut.' ],
         'vc_video_wrong_attribute' => [ 'label' => 'vc_video met verkeerd attribuut', 'explanation' => 'Video gebruikt afgeschafte attribuut-naam.', 'action' => 'Pas naar huidige naming.' ],
-        'missing_columns_reverse' => [ 'label' => 'Row mist columns_reverse', 'explanation' => 'Two-column row mist columns_reverse voor mobile-stacking.', 'action' => 'Voeg columns_reverse toe.' ],
-        'unexpected_columns_reverse' => [ 'label' => 'Onverwachte columns_reverse', 'explanation' => 'columns_reverse op single-column row; betekenisloos.', 'action' => 'Verwijder attribuut.' ],
+        'missing_columns_reverse' => [ 'label' => 'Row mist columns_reverse', 'explanation' => 'Beeldkolom staat vóór de tekstkolom; zonder columns_reverse komt de afbeelding op mobiel boven de tekst.', 'action' => 'Voeg columns_reverse toe.' ],
+        'unexpected_columns_reverse' => [ 'label' => 'Onverwachte columns_reverse', 'explanation' => 'columns_reverse op een row zonder gescheiden beeld- en tekstkolom; heeft geen effect op de beeld/tekst-stapeling.', 'action' => 'Verwijder attribuut.' ],
         'animate_detected' => [ 'label' => 'Animate-attribuut gedetecteerd', 'explanation' => 'Element heeft animate-eigenschap; meestal performance-impact.', 'action' => 'Beoordeel of nodig; eventueel verwijderen.' ],
         'responsive_hide_detected' => [ 'label' => 'Responsive-hide attribuut', 'explanation' => 'Element heeft responsive_hide_at_*; layout-keuze om expliciet te zijn.', 'action' => 'Bevestigen of bewust.' ],
+        'duplicate_acf_fields' => [ 'label' => 'Duplicate ACF-veldwaarden', 'explanation' => 'Dezelfde ACF-veldnaam wordt binnen deze post meerdere keren opgeroepen; vaak het gevolg van het dupliceren van een element.', 'action' => 'Controleer of de herhaling bedoeld is; zo niet, koppel de kopie aan een eigen veld.' ],
 
         // ── Grid (us_header / us_grid_layout) ─────────────────────────────
         'image_lazy_loading_enabled' => [ 'label' => 'Header-image met lazy-loading', 'explanation' => 'Hero/header-image heeft lazy=true; eerste paint vertraagd.', 'action' => 'Zet lazy=false op header-image.' ],
@@ -9336,6 +9492,7 @@ add_action( 'rest_api_init', function () {
                 'wpforms_deprecated'          => 'warning',
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
+                'duplicate_acf_fields'        => 'warning',
 
                 // grid/validate — image:* (us_header only)
                 'image_lazy_loading_enabled'  => 'error',
