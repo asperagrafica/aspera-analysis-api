@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.10.0
+ * Version: 2.11.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.10.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.11.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1747,24 +1747,64 @@ function aspera_user_is_administrator(): bool {
     return in_array( 'administrator', (array) $user->roles, true );
 }
 
+/**
+ * Slug van de admin-pagina. Eén bron van waarheid voor menu, links en screen-id.
+ */
+const ASPERA_ADMIN_PAGE_SLUG = 'aspera-analysis-api';
+
+/**
+ * URL naar het Aspera-dashboard. Top-level menu, dus admin.php (niet tools.php).
+ */
+function aspera_admin_page_url(): string {
+    return admin_url( 'admin.php?page=' . ASPERA_ADMIN_PAGE_SLUG );
+}
+
+// Top-level menu-item, onderaan het adminmenu (positie 100.7 om botsing met
+// andere plugins op exact 100 te voorkomen).
 add_action( 'admin_menu', function () {
     if ( ! aspera_user_is_administrator() ) return;
-    add_management_page(
+    add_menu_page(
         'AsperAi Site Tools',
         'AsperAi Site Tools',
         'manage_options',
-        'aspera-analysis-api',
-        'aspera_admin_page_render'
+        ASPERA_ADMIN_PAGE_SLUG,
+        'aspera_admin_page_render',
+        'dashicons-editor-textcolor',
+        100.7
     );
 } );
 
 add_action( 'admin_head', function () {
     $screen = get_current_screen();
-    if ( $screen && $screen->id === 'tools_page_aspera-analysis-api' ) {
+    if ( $screen && $screen->id === 'toplevel_page_' . ASPERA_ADMIN_PAGE_SLUG ) {
         remove_all_actions( 'admin_notices' );
         remove_all_actions( 'all_admin_notices' );
     }
 } );
+
+// ── Snelkoppelingen: plugin-lijst en admin bar ───────────────────────────────
+
+// "Dashboard"-link naast Deactivate op de plugins-pagina.
+add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), function ( array $links ): array {
+    if ( ! current_user_can( 'manage_options' ) ) return $links;
+    array_unshift(
+        $links,
+        '<a href="' . esc_url( aspera_admin_page_url() ) . '">Dashboard</a>'
+    );
+    return $links;
+} );
+
+// Item in de WP-toolbar, ook zichtbaar op de front-end voor administrators.
+add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
+    if ( ! aspera_user_is_administrator() ) return;
+    $wp_admin_bar->add_node( [
+        'id'    => 'aspera-site-tools',
+        'title' => '<span class="ab-icon dashicons dashicons-editor-textcolor" style="top:2px;"></span>'
+                 . '<span class="ab-label">AsperAi Site Tools</span>',
+        'href'  => aspera_admin_page_url(),
+        'meta'  => [ 'title' => 'AsperAi Site Tools — audit-dashboard' ],
+    ] );
+}, 100 );
 
 function aspera_admin_page_render(): void {
     echo '<div class="wrap" id="aspera-audit-page">';
@@ -1821,7 +1861,7 @@ function aspera_dashboard_summary_render(): void {
 
     if ( $score === false ) {
         echo '<p style="color:#72777c;margin:0;">Nog geen audit uitgevoerd.</p>';
-        echo '<p style="margin:8px 0 0;"><a href="' . esc_url( admin_url( 'tools.php?page=aspera-analysis-api' ) ) . '" class="button">Audit uitvoeren</a></p>';
+        echo '<p style="margin:8px 0 0;"><a href="' . esc_url( aspera_admin_page_url() ) . '" class="button">Audit uitvoeren</a></p>';
         return;
     }
 
@@ -1854,7 +1894,7 @@ function aspera_dashboard_summary_render(): void {
     }
     echo '</div>';
 
-    echo '<a href="' . esc_url( admin_url( 'tools.php?page=aspera-analysis-api' ) ) . '" class="button button-primary">Volledig rapport</a>';
+    echo '<a href="' . esc_url( aspera_admin_page_url() ) . '" class="button button-primary">Volledig rapport</a>';
 }
 
 add_action( 'wp_ajax_aspera_refresh_audit', function () {
@@ -6011,9 +6051,12 @@ add_action( 'rest_api_init', function () {
             // Whitelist: besproken plugins worden nooit geflagged (actief, inactief of afwezig)
             // Burst: gratis variant is ook acceptabel
             // Redis Object Cache: optioneel, hosting-afhankelijk, geen verplichting op elke site
+            // Duplicator: migratie-/backuptool, situationeel ingezet, gratis en Pro-variant
             $whitelist_slugs   = array_keys( $essential );
             $whitelist_slugs[] = 'burst-statistics';
             $whitelist_slugs[] = 'redis-cache';
+            $whitelist_slugs[] = 'duplicator';
+            $whitelist_slugs[] = 'duplicator-pro';
 
             $known_status = [];
             foreach ( $essential as $slug => $name ) {
@@ -6470,6 +6513,10 @@ add_action( 'rest_api_init', function () {
                 'wcpdf'       => [ 'plugin' => 'PDF Invoices & Packing Slips',     'slug' => 'woocommerce-pdf-invoices-packing-slips' ],
                 'spu'         => [ 'plugin' => 'Popup by Supsystic',               'slug' => 'popup-by-supsystic' ],
                 'wppopups'    => [ 'plugin' => 'WP Popups',                        'slug' => 'wp-popups-lite' ],
+                // Duplicator: tabellen horen bij een actieve installatie; blijven ze achter
+                // na deactivering, dan zijn ze wél orphaned. 'slug' mag een array zijn
+                // (gratis + Pro-variant), de eerste slug is leidend voor de fix-actie.
+                'duplicator'  => [ 'plugin' => 'Duplicator', 'slug' => [ 'duplicator', 'duplicator-pro' ] ],
                 // installed_only: true — alleen flaggen als plugin volledig niet geïnstalleerd is (actief én inactief zijn OK)
                 'wpconsent'   => [ 'plugin' => 'WPConsent', 'slug' => 'wpconsent-cookies-banner-privacy-suite', 'installed_only' => true ],
             ];
@@ -6525,8 +6572,9 @@ add_action( 'rest_api_init', function () {
                 foreach ( $known_patterns as $pattern => $info ) {
                     if ( strpos( $bare, $pattern ) === 0 ) {
                         $matched      = true;
+                        $slug_list    = (array) $info['slug'];
                         $check_slugs  = ! empty( $info['installed_only'] ) ? $installed_slugs : $active_slugs;
-                        if ( ! in_array( $info['slug'], $check_slugs, true ) ) {
+                        if ( ! array_intersect( $slug_list, $check_slugs ) ) {
                             $orphaned[] = [
                                 'table'         => $table,
                                 'pattern'       => $pattern . '_*',
@@ -6537,7 +6585,7 @@ add_action( 'rest_api_init', function () {
                                     'fixable'     => true,
                                     'action'      => 'drop_orphaned_table',
                                     'table'       => $table,
-                                    'plugin_slug' => $info['slug'],
+                                    'plugin_slug' => $slug_list[0],
                                 ],
                             ];
                         }
