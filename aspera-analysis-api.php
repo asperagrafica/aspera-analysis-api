@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.11.0
+ * Version: 2.12.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.11.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.12.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1765,7 +1765,7 @@ add_action( 'admin_menu', function () {
     if ( ! aspera_user_is_administrator() ) return;
     add_menu_page(
         'AsperAi Site Tools',
-        'AsperAi Site Tools',
+        'AsperAi',
         'manage_options',
         ASPERA_ADMIN_PAGE_SLUG,
         'aspera_admin_page_render',
@@ -1799,10 +1799,9 @@ add_action( 'admin_bar_menu', function ( $wp_admin_bar ) {
     if ( ! aspera_user_is_administrator() ) return;
     $wp_admin_bar->add_node( [
         'id'    => 'aspera-site-tools',
-        'title' => '<span class="ab-icon dashicons dashicons-editor-textcolor" style="top:2px;"></span>'
-                 . '<span class="ab-label">AsperAi Site Tools</span>',
+        'title' => 'AsperAi',
         'href'  => aspera_admin_page_url(),
-        'meta'  => [ 'title' => 'AsperAi Site Tools — audit-dashboard' ],
+        'meta'  => [ 'title' => 'AsperAi Site Tools: audit-dashboard' ],
     ] );
 }, 100 );
 
@@ -2533,7 +2532,7 @@ function aspera_get_rules_per_category(): array {
         'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
-        'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','missing_move_label','empty_option_field' ],
+        'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
         'plugins' => [ 'extra_plugin' ],
         'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover' ],
         'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta' ],
@@ -2780,7 +2779,6 @@ function aspera_get_rule_context(): array {
         // ── Forms (overig) ────────────────────────────────────────────────
         'wrong_email_field_type' => [ 'label' => 'Email-veld verkeerd type', 'explanation' => 'Veld heeft type "text" i.p.v. "email".', 'action' => 'Pas veld-type aan.' ],
         'empty_option_field' => [ 'label' => 'Lege opt_-option-field', 'explanation' => 'Een opt_forms-veld is leeg.', 'action' => 'Vul option page in.' ],
-        'missing_move_label' => [ 'label' => 'Form-veld zonder move-label', 'explanation' => 'Float-label-pattern ontbreekt.', 'action' => 'Voeg move_label="true" toe.' ],
 
         // ── Misc ─────────────────────────────────────────────────────────
         'wrong_option_syntax' => [ 'label' => 'Verkeerde opt_-syntax in shortcode', 'explanation' => 'opt_-veld wordt niet correct gerefereerd.', 'action' => 'Pas opt_field-syntax aan.' ],
@@ -6744,7 +6742,6 @@ add_action( 'rest_api_init', function () {
      * - missing_email_message / missing_field_list
      * - missing_recaptcha
      * - missing_email_field / wrong_email_field_type
-     * - missing_move_label
      *
      * Observaties (geen schending, altijd gerapporteerd):
      * - hide_form_after_sending (aan/uit)
@@ -6868,8 +6865,6 @@ add_action( 'rest_api_init', function () {
                     $type        = $field['type'] ?? '';
                     $label       = $field['label'] ?? '';
                     $required    = isset( $field['required'] ) && $field['required'] === '1';
-                    $placeholder = $field['placeholder'] ?? '';
-                    $move_label  = $field['move_label'] ?? '0';
 
                     if ( $type === 'reCAPTCHA' ) {
                         $has_recaptcha = true;
@@ -6884,11 +6879,6 @@ add_action( 'rest_api_init', function () {
                     // E-mailveld met verkeerd type
                     if ( $label !== '' && stripos( $label, 'email' ) !== false && $type !== 'email' ) {
                         $violations[] = [ 'rule' => 'wrong_email_field_type', 'detail' => 'Veld "' . $label . '" lijkt een e-mailveld maar heeft type "' . $type . '" in plaats van "email"' ];
-                    }
-
-                    // Placeholder zonder move_label
-                    if ( $placeholder !== '' && $move_label !== '1' ) {
-                        $violations[] = [ 'rule' => 'missing_move_label', 'detail' => 'Veld "' . $label . '" heeft een placeholder maar move_label is niet ingeschakeld' ];
                     }
 
                     $field_list[] = [
@@ -9543,7 +9533,6 @@ add_action( 'rest_api_init', function () {
                 'missing_recaptcha'           => 'critical',
                 'missing_email_field'         => 'error',
                 'wrong_email_field_type'      => 'error',
-                'missing_move_label'          => 'observation',
                 'empty_option_field'          => 'error',
 
                 // plugins/validate
