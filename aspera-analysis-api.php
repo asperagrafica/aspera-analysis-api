@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.13.0
+ * Version: 2.14.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.13.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.14.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1899,7 +1899,7 @@ function aspera_admin_page_url(): string {
 }
 
 // Top-level menu-item, onderaan het adminmenu (positie 100.7 om botsing met
-// andere plugins op exact 100 te voorkomen).
+// andere plugins op exact 100 te voorkomen). Submenu: Dashboard + Checklist.
 add_action( 'admin_menu', function () {
     if ( ! aspera_user_is_administrator() ) return;
     add_menu_page(
@@ -1911,11 +1911,36 @@ add_action( 'admin_menu', function () {
         'dashicons-rest-api',
         100.7
     );
+    // Zelfde slug als de parent: hernoemt het eerste submenu-item naar "Dashboard".
+    add_submenu_page(
+        ASPERA_ADMIN_PAGE_SLUG,
+        'AsperAi Site Tools',
+        'Dashboard',
+        'manage_options',
+        ASPERA_ADMIN_PAGE_SLUG,
+        'aspera_admin_page_render'
+    );
+    $hook = add_submenu_page(
+        ASPERA_ADMIN_PAGE_SLUG,
+        'AsperAi Lanceer-checklist',
+        'Checklist',
+        'manage_options',
+        ASPERA_CHECKLIST_PAGE_SLUG,
+        'aspera_checklist_page_render'
+    );
+    if ( $hook ) {
+        $GLOBALS['aspera_checklist_hook'] = $hook;
+    }
 } );
 
 add_action( 'admin_head', function () {
     $screen = get_current_screen();
-    if ( $screen && $screen->id === 'toplevel_page_' . ASPERA_ADMIN_PAGE_SLUG ) {
+    if ( ! $screen ) return;
+    $own = [ 'toplevel_page_' . ASPERA_ADMIN_PAGE_SLUG ];
+    if ( ! empty( $GLOBALS['aspera_checklist_hook'] ) ) {
+        $own[] = $GLOBALS['aspera_checklist_hook'];
+    }
+    if ( in_array( $screen->id, $own, true ) ) {
         remove_all_actions( 'admin_notices' );
         remove_all_actions( 'all_admin_notices' );
     }
@@ -1978,6 +2003,428 @@ function aspera_admin_page_pdf_export(): void {
         pdfBtn.innerHTML = '⤓&ensp;Exporteer als PDF';
         pdfBtn.addEventListener('click', function () { window.print(); });
         refreshBtn.parentNode.insertBefore(pdfBtn, refreshBtn);
+    })();
+    </script>
+    <?php
+}
+
+// ── Lanceer-checklist ────────────────────────────────────────────────────────
+// Handmatige opleveringschecklist. Alleen de gebruiker vinkt af; de plugin
+// bepaalt niets zelf. State staat in één option; de definitie hieronder is
+// leidend, zodat nieuwe items bij een plugin-update automatisch ongevinkt
+// bij de bestaande lijst verschijnen. Item-keys zijn permanent: nooit
+// hernoemen of hergebruiken, anders verschuiven bestaande vinkjes.
+
+const ASPERA_CHECKLIST_PAGE_SLUG = 'aspera-launch-checklist';
+const ASPERA_CHECKLIST_VERSION   = '1.0.0';
+const ASPERA_CHECKLIST_OPTION    = 'aspera_launch_checklist';
+
+/**
+ * Checklist-definitie: categorieën met items. Bij uitbreiding altijd een
+ * nieuwe key toevoegen en de ASPERA_CHECKLIST_VERSION bumpen.
+ */
+function aspera_checklist_definition(): array {
+    return [
+        'Aspera' => [
+            'aspera_full_audit' => 'Full site audit',
+        ],
+        'WPForms' => [
+            'wpf_verzending'    => 'Verzending en aankomst controleren',
+            'wpf_instellingen'  => 'Formulier instellingen controleren',
+            'wpf_privacy'       => 'Privacyvermelding onder formulier(en)',
+            'wpf_recaptcha'     => 'Google Recaptcha',
+            'wpf_notificatie'   => 'Notificatie of redirect formulieren',
+            'wpf_inzendingen'   => 'Inzendingen database opslaan',
+        ],
+        'Cache' => [
+            'cache_wpfc'  => 'WP Fastest Cache configuratie',
+            'cache_redis' => 'Redis Object cache configuratie',
+        ],
+        'SMTP' => [
+            'smtp_brevo_domein' => 'Domein in Brevo',
+            'smtp_instellen'    => 'SMTP instellen',
+        ],
+        'Design' => [
+            'design_widgets'          => 'Widgets volgorde en gebruik controleren',
+            'design_fouten'           => 'Controleren op fouten: design, links, buttons, navigatie',
+            'design_logo_link'        => 'Logo link',
+            'design_ongebruikte_css'  => 'Ongebruikte CSS verwijderen',
+            'design_cropping'         => 'Cropping afbeeldingen grids',
+            'design_aspera_footer'    => 'Aspera footer toevoegen',
+            'design_copyright_footer' => 'Copyright footer toevoegen',
+        ],
+        'Thema' => [
+            'thema_favicon'          => 'Favicon toevoegen',
+            'thema_schema'           => 'Schema aanzetten',
+            'thema_404'              => '404 configuratie',
+            'thema_backup_opties'    => 'Backup thema-opties',
+            'thema_optimalisatie'    => 'Thema optimalisatie',
+            'thema_kleurprofiel'     => 'Kleurprofiel opslaan',
+            'thema_gmaps_key'        => 'GMaps API key',
+            'thema_api_koppelen'     => 'Theme API koppelen',
+            'thema_wpb_templates'    => 'WPB Templates verwijderen',
+            'thema_responsive'       => 'Responsive weergave testen',
+            'thema_standaard_themas' => 'Standaard thema’s verwijderen',
+            'thema_standaard_layout' => 'Standaard pagina layout voor nieuwe pagina',
+            'thema_lazy_loading'     => 'Lazy loading uitzetten afbeeldingen: header, caroussel',
+        ],
+        'Webhosting' => [
+            'host_demo_verwijderen'          => 'Demo verwijderen',
+            'host_php_256m'                  => 'PHP: 256M',
+            'host_forceer_ssl'               => 'Forceer SSL',
+            'host_backups'                   => 'Auto & manuele backup',
+            'host_installatron_notificaties' => 'Installatron: notificaties uitschakelen',
+            'host_ftp'                       => 'Controleer FTP',
+            'host_nieuwste_php'              => 'Nieuwste PHP',
+            'host_litespeed_flag'            => '.litespeed_flag voor mijn.host',
+            'host_acme_ssl'                  => 'Acme SSL activeren',
+            'host_redis'                     => 'Redis aanzetten en WPCONFIG regel',
+        ],
+        'Content' => [
+            'content_cross_browser'     => 'Cross-browser controle',
+            'content_search_replace'    => 'Domeinnaam search & replace',
+            'content_permalinks'        => 'Permalinks: ‘%category%/%postname%’ blogs en shops',
+            'content_je_u'              => 'Je/jouw u/uw controleren',
+            'content_prullenbak'        => 'Prullenbak legen',
+            'content_vimeo'             => 'Vimeo iFrame weergave',
+            'content_ongebruikte_media' => 'Ongebruikte media verwijderen',
+            'content_maintenance'       => 'Maintenance mode controle',
+            'content_post_categorie'    => 'Post categorie instellen',
+            'content_wp_content_url'    => 'wp-content URL in CSS',
+            'content_privacy'           => 'Privacy / Disclaimer controle',
+        ],
+        'SEO' => [
+            'seo_titel_tagline'  => 'Site titel en tagline',
+            'seo_indexering'     => 'Google Indexering',
+            'seo_yoast'          => 'Yoast configuratie',
+            'seo_noindex'        => 'No-index pagina’s',
+            'seo_search_console' => 'Search Console configuratie',
+            'seo_sitemap'        => 'Sitemap toevoegen',
+            'seo_redirects'      => 'Links doorverwijzen',
+            'seo_burst'          => 'Burst installeren',
+            'seo_schema_key'     => 'Schema instellen voor key-pagina’s',
+            'seo_robots'         => 'Robots.txt aanmaken',
+        ],
+        'Plugins' => [
+            'plugins_deactiveren'     => 'Ongebruikte plugins deactiveren',
+            'plugins_wpb_modules'     => 'WPB modules deactiveren',
+            'plugins_licenties'       => 'Licentiecode(s) koppelen',
+            'plugins_media_converter' => 'Media Converter configuratie',
+            'plugins_wp_optimize'     => 'WP-Optimize configuratie',
+            'plugins_aios'            => 'WP All-in One Security configuratie',
+            'plugins_auto_updates'    => 'Auto-updates aanzetten voor de juiste plugins (mu-plugin verwijderen)',
+        ],
+        'Cookies' => [
+            'cookies_wpconsent' => 'WPConsent instellen',
+        ],
+        'Aspera Grafica' => [
+            'ag_excel_websites'   => 'Toevoegen aan website-exceloverzicht',
+            'ag_password_manager' => 'Logingegevens in password manager',
+            'ag_excel_support'    => 'Toevoegen aan supportpakket-exceloverzicht',
+        ],
+        'Gebruikersbeheer' => [
+            'gb_admin_menu_editor' => 'Admin menu editor configuratie',
+            'gb_wpb_rechten'       => 'WPB rechten bewerken',
+            'gb_view_panelen'      => 'View-panelen aanpassen',
+        ],
+        'Optioneel' => [
+            'opt_yoast_acf'          => 'Yoast ACF configuratie',
+            'opt_burst_ga'           => 'Burst / Google Analytics configuratie',
+            'opt_dns_forward'        => 'DNS forward controle',
+            'opt_wp_enqueue'         => 'WP Enqueue script toevoegen',
+            'opt_afbeeldingformaten' => 'Afbeeldingformaten thema verwijderen',
+        ],
+    ];
+}
+
+/**
+ * Alle geldige item-keys, plat.
+ */
+function aspera_checklist_all_keys(): array {
+    $keys = [];
+    foreach ( aspera_checklist_definition() as $items ) {
+        foreach ( $items as $key => $_label ) $keys[] = $key;
+    }
+    return $keys;
+}
+
+/**
+ * Opgeslagen state, gefilterd op keys die nog in de definitie voorkomen.
+ * Onbekende keys (verwijderde items) worden genegeerd, niet gewist.
+ */
+function aspera_checklist_state(): array {
+    $raw = get_option( ASPERA_CHECKLIST_OPTION, [] );
+    if ( ! is_array( $raw ) ) $raw = [];
+    $valid = array_flip( aspera_checklist_all_keys() );
+
+    $filter = function ( $list ) use ( $valid ): array {
+        $out = [];
+        foreach ( (array) $list as $k ) {
+            $k = (string) $k;
+            if ( isset( $valid[ $k ] ) ) $out[ $k ] = true;
+        }
+        return $out;
+    };
+
+    return [
+        'checked'  => $filter( $raw['checked'] ?? [] ),
+        'ignored'  => $filter( $raw['ignored'] ?? [] ),
+        'saved_at' => (string) ( $raw['saved_at'] ?? '' ),
+        'version'  => (string) ( $raw['version'] ?? '' ),
+    ];
+}
+
+/**
+ * Kleur + label bij een voortgangspercentage.
+ */
+function aspera_checklist_progress_style( int $pct ): array {
+    if ( $pct >= 100 ) return [ '#14622a', 'Volledig afgerond' ];
+    if ( $pct >= 80 )  return [ '#5cc46c', 'Bijna klaar' ];
+    if ( $pct >= 60 )  return [ '#dba617', 'Op koers' ];
+    if ( $pct >= 30 )  return [ '#e8801a', 'Halverwege' ];
+    if ( $pct >= 20 )  return [ '#d63638', 'Net begonnen' ];
+    return [ '#8a1f21', 'Nog nauwelijks begonnen' ];
+}
+
+// Opslaan: klassieke form-POST met redirect, zodat F5 niets opnieuw indient.
+add_action( 'admin_post_aspera_save_checklist', function () {
+    if ( ! aspera_user_is_administrator() ) wp_die( 'Onvoldoende rechten.' );
+    check_admin_referer( 'aspera_save_checklist' );
+
+    $valid   = array_flip( aspera_checklist_all_keys() );
+    $sanit   = function ( $input ) use ( $valid ): array {
+        $out = [];
+        foreach ( (array) $input as $k ) {
+            $k = sanitize_key( wp_unslash( $k ) );
+            if ( isset( $valid[ $k ] ) ) $out[ $k ] = true;
+        }
+        return array_keys( $out );
+    };
+
+    $checked = $sanit( $_POST['aspera_check']   ?? [] );
+    $ignored = $sanit( $_POST['aspera_ignored'] ?? [] );
+
+    update_option( ASPERA_CHECKLIST_OPTION, [
+        'checked'  => $checked,
+        'ignored'  => $ignored,
+        'saved_at' => current_time( 'Y-m-d H:i' ),
+        'version'  => ASPERA_CHECKLIST_VERSION,
+    ], false );
+
+    wp_safe_redirect( add_query_arg(
+        [ 'page' => ASPERA_CHECKLIST_PAGE_SLUG, 'saved' => '1' ],
+        admin_url( 'admin.php' )
+    ) );
+    exit;
+} );
+
+function aspera_checklist_page_render(): void {
+    if ( ! aspera_user_is_administrator() ) return;
+
+    $definition = aspera_checklist_definition();
+    $state      = aspera_checklist_state();
+    $checked    = $state['checked'];
+    $ignored    = $state['ignored'];
+
+    $total_all     = count( aspera_checklist_all_keys() );
+    $ignored_count = count( $ignored );
+    $relevant      = max( 0, $total_all - $ignored_count );
+    $done          = 0;
+    foreach ( $checked as $k => $_ ) {
+        if ( ! isset( $ignored[ $k ] ) ) $done++;
+    }
+    $pct = $relevant > 0 ? (int) round( $done / $relevant * 100 ) : 100;
+    [ $pct_color, $pct_label ] = aspera_checklist_progress_style( $pct );
+
+    echo '<div class="wrap" id="aspera-checklist-page">';
+    echo '<h1>AsperAi Lanceer-checklist</h1>';
+    echo '<p class="description">Controlepunten bij oplevering van een website. '
+        . 'Checklist versie <strong>' . esc_html( ASPERA_CHECKLIST_VERSION ) . '</strong>'
+        . ( $state['saved_at'] !== '' ? ' &middot; laatst opgeslagen ' . esc_html( $state['saved_at'] ) : '' )
+        . '</p>';
+
+    if ( isset( $_GET['saved'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>Checklist opgeslagen.</p></div>';
+    }
+
+    ?>
+    <style>
+        #aspera-checklist-page .aspera-cl-hero { display:flex; align-items:center; gap:22px; padding:18px 22px; border:1px solid #dcdcde; border-left-width:6px; border-radius:6px; background:#fff; margin:14px 0 18px; flex-wrap:wrap; }
+        #aspera-checklist-page .aspera-cl-pct { font-size:3em; font-weight:800; line-height:1; flex-shrink:0; }
+        #aspera-checklist-page .aspera-cl-hero-meta { flex:1; min-width:220px; display:flex; flex-direction:column; gap:8px; }
+        #aspera-checklist-page .aspera-cl-hero-label { font-size:13px; font-weight:700; }
+        #aspera-checklist-page .aspera-cl-hero-total { font-size:13px; color:#50575e; }
+        #aspera-checklist-page .aspera-cl-bar { height:10px; border-radius:5px; background:#e5e5e5; overflow:hidden; }
+        #aspera-checklist-page .aspera-cl-bar-fill { height:100%; width:0; border-radius:5px; transition:width 0.25s ease, background-color 0.25s ease; }
+        #aspera-checklist-page .aspera-cl-cat { border:1px solid #dcdcde; border-radius:4px; background:#fff; margin-bottom:12px; overflow:hidden; }
+        #aspera-checklist-page .aspera-cl-cat-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 14px; background:#f6f7f7; border-bottom:1px solid #dcdcde; }
+        #aspera-checklist-page .aspera-cl-cat-head h2 { margin:0; font-size:14px; }
+        #aspera-checklist-page .aspera-cl-cat-count { font-size:12px; color:#50575e; font-variant-numeric:tabular-nums; }
+        #aspera-checklist-page .aspera-cl-item { display:flex; align-items:center; gap:10px; padding:7px 14px; border-bottom:1px solid #f0f0f1; }
+        #aspera-checklist-page .aspera-cl-item:last-child { border-bottom:none; }
+        #aspera-checklist-page .aspera-cl-item label { flex:1; cursor:pointer; font-size:13px; line-height:1.4; }
+        #aspera-checklist-page .aspera-cl-item input[type="checkbox"] { margin:0; flex-shrink:0; }
+        #aspera-checklist-page .aspera-cl-ignore { visibility:hidden; font-size:11px; background:none; border:1px solid #c3c4c7; border-radius:3px; padding:2px 8px; color:#50575e; cursor:pointer; flex-shrink:0; }
+        #aspera-checklist-page .aspera-cl-item:hover .aspera-cl-ignore { visibility:visible; }
+        #aspera-checklist-page .aspera-cl-ignore:hover { background:#f0f0f1; color:#1d2327; }
+        #aspera-checklist-page .aspera-cl-item.is-ignored { display:none; }
+        #aspera-checklist-page.show-ignored .aspera-cl-item.is-ignored { display:flex; opacity:0.45; background:#f6f7f7; }
+        #aspera-checklist-page.show-ignored .aspera-cl-item.is-ignored label { color:#646970; text-decoration:line-through; }
+        #aspera-checklist-page.show-ignored .aspera-cl-item.is-ignored .aspera-cl-ignore { visibility:visible; }
+        #aspera-checklist-page .aspera-cl-cat.is-all-ignored { display:none; }
+        #aspera-checklist-page.show-ignored .aspera-cl-cat.is-all-ignored { display:block; }
+        #aspera-checklist-page .aspera-cl-sticky { position:sticky; bottom:0; left:0; right:0; background:#f0f0f1; border-top:1px solid #c3c4c7; padding:10px 16px; margin:24px -20px 0; display:flex; align-items:center; justify-content:flex-end; gap:8px; box-shadow:0 -2px 6px rgba(0,0,0,0.04); z-index:50; }
+        #aspera-checklist-page .aspera-cl-sticky .aspera-cl-sticky-pct { margin-right:auto; font-size:13px; font-weight:700; }
+        #aspera-checklist-page .aspera-cl-toggle-ignored.is-active { background:#1d2327; color:#fff; border-color:#1d2327; }
+    </style>
+    <?php
+
+    echo '<div class="aspera-cl-hero" style="border-left-color:' . esc_attr( $pct_color ) . ';">';
+    echo '<div class="aspera-cl-pct" style="color:' . esc_attr( $pct_color ) . ';">' . (int) $pct . '<span style="font-size:0.4em;font-weight:600;">%</span></div>';
+    echo '<div class="aspera-cl-hero-meta">';
+    echo '<div class="aspera-cl-hero-label" style="color:' . esc_attr( $pct_color ) . ';">' . esc_html( $pct_label ) . '</div>';
+    echo '<div class="aspera-cl-bar"><div class="aspera-cl-bar-fill" style="width:' . (int) $pct . '%;background:' . esc_attr( $pct_color ) . ';"></div></div>';
+    echo '<div class="aspera-cl-hero-total"><strong>' . (int) $done . '</strong> van <strong>' . (int) $relevant . '</strong> controlepunten afgerond'
+        . ( $ignored_count > 0 ? ' &middot; ' . (int) $ignored_count . ' genegeerd (telt niet mee)' : '' )
+        . '</div>';
+    echo '</div></div>';
+
+    echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '" id="aspera-cl-form">';
+    echo '<input type="hidden" name="action" value="aspera_save_checklist">';
+    wp_nonce_field( 'aspera_save_checklist' );
+
+    foreach ( $definition as $cat_label => $items ) {
+        $cat_total   = count( $items );
+        $cat_ignored = 0;
+        $cat_done    = 0;
+        foreach ( $items as $key => $_l ) {
+            if ( isset( $ignored[ $key ] ) ) { $cat_ignored++; continue; }
+            if ( isset( $checked[ $key ] ) ) $cat_done++;
+        }
+        $cat_relevant = $cat_total - $cat_ignored;
+
+        echo '<div class="aspera-cl-cat' . ( $cat_relevant === 0 ? ' is-all-ignored' : '' ) . '">';
+        echo '<div class="aspera-cl-cat-head"><h2>' . esc_html( $cat_label ) . '</h2>';
+        echo '<span class="aspera-cl-cat-count">' . (int) $cat_done . '/' . (int) $cat_relevant . '</span>';
+        echo '</div>';
+
+        foreach ( $items as $key => $label ) {
+            $is_ignored = isset( $ignored[ $key ] );
+            $is_checked = isset( $checked[ $key ] );
+            echo '<div class="aspera-cl-item' . ( $is_ignored ? ' is-ignored' : '' ) . '" data-key="' . esc_attr( $key ) . '">';
+            echo '<input type="checkbox" id="cl-' . esc_attr( $key ) . '" name="aspera_check[]" value="' . esc_attr( $key ) . '"' . checked( $is_checked, true, false ) . '>';
+            echo '<label for="cl-' . esc_attr( $key ) . '">' . esc_html( $label ) . '</label>';
+            echo '<input type="hidden" class="aspera-cl-ignored-input" name="aspera_ignored[]" value="' . esc_attr( $key ) . '"' . ( $is_ignored ? '' : ' disabled' ) . '>';
+            echo '<button type="button" class="aspera-cl-ignore">' . ( $is_ignored ? 'Meetellen' : 'Negeren' ) . '</button>';
+            echo '</div>';
+        }
+        echo '</div>';
+    }
+
+    echo '<div class="aspera-cl-sticky">';
+    echo '<span class="aspera-cl-sticky-pct" style="color:' . esc_attr( $pct_color ) . ';">Voortgang: ' . (int) $pct . '%</span>';
+    echo '<button type="button" class="button button-secondary aspera-cl-toggle-ignored"' . ( $ignored_count === 0 ? ' disabled' : '' ) . '>Toon genegeerd (<span class="aspera-cl-ignored-count">' . (int) $ignored_count . '</span>)</button>';
+    echo '<button type="submit" class="button button-primary">Opslaan</button>';
+    echo '</div>';
+
+    echo '</form>';
+    echo '</div>'; // .wrap
+
+    aspera_checklist_page_script();
+}
+
+function aspera_checklist_page_script(): void {
+    ?>
+    <script>
+    (function () {
+        var page = document.getElementById('aspera-checklist-page');
+        if (!page) return;
+
+        // Zelfde drempels als aspera_checklist_progress_style() in PHP.
+        var STEPS = [
+            [100, '#14622a', 'Volledig afgerond'],
+            [80,  '#5cc46c', 'Bijna klaar'],
+            [60,  '#dba617', 'Op koers'],
+            [30,  '#e8801a', 'Halverwege'],
+            [20,  '#d63638', 'Net begonnen'],
+            [0,   '#8a1f21', 'Nog nauwelijks begonnen']
+        ];
+
+        var hero        = page.querySelector('.aspera-cl-hero');
+        var pctEl       = page.querySelector('.aspera-cl-pct');
+        var labelEl     = page.querySelector('.aspera-cl-hero-label');
+        var fillEl      = page.querySelector('.aspera-cl-bar-fill');
+        var totalEl     = page.querySelector('.aspera-cl-hero-total');
+        var stickyPct   = page.querySelector('.aspera-cl-sticky-pct');
+        var toggleBtn   = page.querySelector('.aspera-cl-toggle-ignored');
+        var countEl     = page.querySelector('.aspera-cl-ignored-count');
+
+        function recalc() {
+            var total = 0, done = 0, ignored = 0;
+            page.querySelectorAll('.aspera-cl-item').forEach(function (row) {
+                var box = row.querySelector('input[type="checkbox"]');
+                if (row.classList.contains('is-ignored')) { ignored++; return; }
+                total++;
+                if (box && box.checked) done++;
+            });
+
+            var pct = total > 0 ? Math.round(done / total * 100) : 100;
+            var step = STEPS.find(function (s) { return pct >= s[0]; }) || STEPS[STEPS.length - 1];
+
+            if (pctEl)     { pctEl.style.color = step[1]; pctEl.childNodes[0].nodeValue = pct; }
+            if (labelEl)   { labelEl.style.color = step[1]; labelEl.textContent = step[2]; }
+            if (fillEl)    { fillEl.style.width = pct + '%'; fillEl.style.backgroundColor = step[1]; }
+            if (hero)      { hero.style.borderLeftColor = step[1]; }
+            if (stickyPct) { stickyPct.style.color = step[1]; stickyPct.textContent = 'Voortgang: ' + pct + '%'; }
+            if (totalEl) {
+                totalEl.innerHTML = '<strong>' + done + '</strong> van <strong>' + total + '</strong> controlepunten afgerond'
+                    + (ignored > 0 ? ' &middot; ' + ignored + ' genegeerd (telt niet mee)' : '');
+            }
+            if (countEl) { countEl.textContent = ignored; }
+            if (toggleBtn) {
+                var showing = page.classList.contains('show-ignored');
+                toggleBtn.disabled = (ignored === 0 && !showing);
+                toggleBtn.classList.toggle('is-active', showing && ignored > 0);
+                toggleBtn.firstChild.nodeValue = showing ? 'Verberg genegeerd (' : 'Toon genegeerd (';
+            }
+
+            page.querySelectorAll('.aspera-cl-cat').forEach(function (cat) {
+                var t = 0, d = 0;
+                cat.querySelectorAll('.aspera-cl-item').forEach(function (row) {
+                    if (row.classList.contains('is-ignored')) return;
+                    t++;
+                    var box = row.querySelector('input[type="checkbox"]');
+                    if (box && box.checked) d++;
+                });
+                var c = cat.querySelector('.aspera-cl-cat-count');
+                if (c) c.textContent = d + '/' + t;
+                cat.classList.toggle('is-all-ignored', t === 0);
+            });
+        }
+
+        page.addEventListener('change', function (e) {
+            if (e.target.matches('.aspera-cl-item input[type="checkbox"]')) recalc();
+        });
+
+        page.addEventListener('click', function (e) {
+            var btn = e.target.closest('.aspera-cl-ignore');
+            if (btn) {
+                var row = btn.closest('.aspera-cl-item');
+                var on  = row.classList.toggle('is-ignored');
+                var hid = row.querySelector('.aspera-cl-ignored-input');
+                if (hid) hid.disabled = !on;
+                btn.textContent = on ? 'Meetellen' : 'Negeren';
+                if (on) page.classList.add('show-ignored');
+                recalc();
+                return;
+            }
+            if (e.target.closest('.aspera-cl-toggle-ignored')) {
+                page.classList.toggle('show-ignored');
+                recalc();
+            }
+        });
+
+        recalc();
     })();
     </script>
     <?php
