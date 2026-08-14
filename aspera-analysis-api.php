@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.9.0
+ * Version: 2.10.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.9.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.10.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2504,7 +2504,7 @@ function aspera_get_rules_per_category(): array {
         'widgets' => [ 'widgetised_sidebar_in_template','extra_widget_area','default_sidebar_not_empty','active_widget_text','active_widget_nav_menu','active_widget_other' ],
         'wpb_templates' => [ 'wpb_saved_templates' ],
         'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies' ],
-        'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_exceeds_breakpoints','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_mismatch','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
+        'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_enabled','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
         'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix' ],
         'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
         'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates' ],
@@ -2727,12 +2727,11 @@ function aspera_get_rule_context(): array {
         'custom_breakpoint_exceeds_content_width' => [ 'label' => 'Custom breakpoint groter dan content-width', 'explanation' => 'Custom breakpoint > site-content-width.', 'action' => 'Verlaag breakpoint.' ],
         'custom_breakpoint_active' => [ 'label' => 'Custom breakpoint actief', 'explanation' => 'Header gebruikt custom breakpoint i.p.v. defaults.', 'action' => 'Bevestigen of bewust.' ],
         'menu_mobile_always' => [ 'label' => 'Mobile menu altijd zichtbaar', 'explanation' => 'menu-element toont mobile-versie op alle breakpoints.', 'action' => 'Bevestigen.' ],
-        'menu_mobile_exceeds_content_width' => [ 'label' => 'Mobile menu boven content-width', 'explanation' => 'Mobile-menu actief boven site-content-width.', 'action' => 'Pas breakpoint aan.' ],
-        'menu_mobile_exceeds_breakpoints' => [ 'label' => 'Mobile menu boven theme-breakpoints', 'explanation' => 'Mobile-menu trigger boven theme tablet-breakpoint.', 'action' => 'Harmoniseer.' ],
+        'menu_mobile_exceeds_content_width' => [ 'label' => 'Mobile menu boven content-width', 'explanation' => 'De mobile-menu trigger ligt boven de site-breedte; tot en met site_content_width is toegestaan.', 'action' => 'Verlaag mobile_width naar maximaal de site-breedte.' ],
         'menu_mobile_behavior_not_label_and_arrow' => [ 'label' => 'Mobile menu-behavior afwijkend', 'explanation' => 'Behavior is niet "label and arrow".', 'action' => 'Header builder > Mobile menu > behavior > Label and arrow.' ],
         'menu_mobile_icon_size_too_large' => [ 'label' => 'Mobile-menu-icon te groot', 'explanation' => 'Icon-size te groot voor het ontwerp.', 'action' => 'Verklein icon-size.' ],
         'menu_mobile_icon_size_inconsistent' => [ 'label' => 'Mobile-menu-icon-sizes inconsistent', 'explanation' => 'Icon-sizes verschillen tussen breakpoints.', 'action' => 'Synchroniseer.' ],
-        'menu_align_edges_mismatch' => [ 'label' => 'Menu-uitlijning rand-mismatch', 'explanation' => 'Menu-edges-align niet conform.', 'action' => 'Header builder > pas align aan.' ],
+        'menu_align_edges_enabled' => [ 'label' => 'Menu-uitlijning op randen actief', 'explanation' => 'Het menu-element heeft align_edges aan en wordt tegen de header-rand uitgelijnd.', 'action' => 'Bevestigen of bewust.' ],
         'centering_missing' => [ 'label' => 'Element-centrering ontbreekt', 'explanation' => 'Verwacht centrering-instelling ontbreekt.', 'action' => 'Voeg toe in header builder.' ],
         'centering_unexpected' => [ 'label' => 'Element-centrering onverwacht', 'explanation' => 'Centrering staat aan op element waar het niet hoort.', 'action' => 'Verwijder.' ],
         'header_element_unused' => [ 'label' => 'Ongebruikt header-element', 'explanation' => 'Element bestaat maar wordt op geen breakpoint getoond.', 'action' => 'Verwijder.' ],
@@ -4879,19 +4878,10 @@ add_action( 'rest_api_init', function () {
 
             // --- 5d. Menu mobile_width checks ---
 
+            // De mobile-menu trigger mag tot en met de site-breedte liggen: een menu dat
+            // eerder omklapt dan de header-breakpoint is een geldige keuze. Alleen boven
+            // site_content_width is de trigger echt te hoog.
             if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
-                // Bepaal hoogste actieve header breakpoint
-                $all_bps_ordered = [ 'default', 'laptops', 'tablets', 'mobiles' ];
-                $highest_bp = 0;
-                foreach ( $all_bps_ordered as $bp ) {
-                    if ( $bp === 'default' ) continue;
-                    $bp_opts_check = $raw[ $bp ]['options'] ?? [];
-                    $bp_val_check  = (int) ( $bp_opts_check['breakpoint'] ?? 0 );
-                    if ( $bp_val_check > $highest_bp ) {
-                        $highest_bp = $bp_val_check;
-                    }
-                }
-
                 foreach ( $raw['data'] as $el_id => $el ) {
                     if ( strpos( $el_id, 'menu:' ) !== 0 ) continue;
                     $mw = isset( $el['mobile_width'] ) ? (int) $el['mobile_width'] : null;
@@ -4911,14 +4901,6 @@ add_action( 'rest_api_init', function () {
                             'value'     => $el['mobile_width'],
                             'reference' => $content_width . 'px',
                             'detail'    => "{$el_id}: mobile_width ({$el['mobile_width']}) > site_content_width ({$content_width}px) — ongebruikelijk",
-                        ];
-                    } elseif ( $highest_bp > 0 && $mw > $highest_bp ) {
-                        $observations[] = [
-                            'type'      => 'menu_mobile_exceeds_breakpoints',
-                            'element'   => $el_id,
-                            'value'     => $el['mobile_width'],
-                            'reference' => $highest_bp . 'px',
-                            'detail'    => "{$el_id}: mobile_width ({$el['mobile_width']}) > hoogste header breakpoint ({$highest_bp}px) — menu gaat eerder mobiel dan de header",
                         ];
                     }
                 }
@@ -5217,13 +5199,9 @@ add_action( 'rest_api_init', function () {
                 }
 
                 // ── Menu mobile_width checks ──────────────────────────────
+                // De trigger mag tot en met site_content_width liggen; eerder omklappen
+                // dan de header-breakpoint is een geldige keuze.
                 if ( isset( $raw['data'] ) && is_array( $raw['data'] ) ) {
-                    $highest_bp = 0;
-                    foreach ( $bp_device_order as $bp ) {
-                        $bpv = (int) ( $raw[ $bp ]['options']['breakpoint'] ?? 0 );
-                        if ( $bpv > $highest_bp ) $highest_bp = $bpv;
-                    }
-
                     foreach ( $raw['data'] as $el_id => $el ) {
                         if ( strpos( $el_id, 'menu:' ) !== 0 ) continue;
 
@@ -5293,69 +5271,17 @@ add_action( 'rest_api_init', function () {
                             ];
                         }
 
-                        // align_edges: per actieve plaatsing bepalen of de setting
-                        // klopt. Verwacht 1 als menu de header-rand raakt
-                        // (eerste in *_left, of laatste in *_right). Anders 0.
-                        // Uitzondering: als het menu in de default-breakpoint NIET het
-                        // meest rechter element is in een right-kolom, skip de check
-                        // helemaal — de ontwerper heeft bewust align_edges=0 gekozen
-                        // vanwege een element rechts op desktop.
-                        if ( isset( $el['align_edges'] ) ) {
-                            $actual_ae = (int) $el['align_edges'];
-
-                            // Controleer of het menu op default-breakpoint een right-kolom
-                            // heeft waarbij het NIET het laatste element is.
-                            $default_layout = $raw['default']['layout'] ?? [];
-                            $has_right_neighbor_on_default = false;
-                            if ( is_array( $default_layout ) ) {
-                                foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
-                                    $cell = $default_layout[ $zone . '_right' ] ?? null;
-                                    if ( ! is_array( $cell ) || ! in_array( $el_id, $cell, true ) ) continue;
-                                    if ( end( $cell ) !== $el_id ) {
-                                        $has_right_neighbor_on_default = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if ( $has_right_neighbor_on_default ) break 2; // skip align_edges check
-
-                            $ae_mismatches = [];
-                            foreach ( [ 'default', 'laptops', 'tablets', 'mobiles' ] as $bp ) {
-                                $bp_layout  = $raw[ $bp ]['layout'] ?? null;
-                                $bp_options = $raw[ $bp ]['options'] ?? null;
-                                if ( ! is_array( $bp_layout ) ) continue;
-
-                                foreach ( [ 'top', 'middle', 'bottom' ] as $zone ) {
-                                    if ( $zone !== 'middle' ) {
-                                        $show = (int) ( $bp_options[ $zone . '_show' ] ?? 1 );
-                                        if ( $show === 0 ) continue;
-                                    }
-                                    foreach ( [ 'left', 'center', 'right' ] as $col ) {
-                                        $cell = $bp_layout[ $zone . '_' . $col ] ?? null;
-                                        if ( ! is_array( $cell ) || empty( $cell ) ) continue;
-                                        if ( ! in_array( $el_id, $cell, true ) ) continue;
-
-                                        $expected = 0;
-                                        if ( $col === 'left' && $cell[0] === $el_id ) {
-                                            $expected = 1;
-                                        } elseif ( $col === 'right' && end( $cell ) === $el_id ) {
-                                            $expected = 1;
-                                        }
-
-                                        if ( $expected !== $actual_ae ) {
-                                            $ae_mismatches[] = $bp . '/' . $zone . '_' . $col . ' (verwacht ' . $expected . ')';
-                                        }
-                                    }
-                                }
-                            }
-                            if ( ! empty( $ae_mismatches ) ) {
-                                $violations[] = [
-                                    'rule'     => 'menu_align_edges_mismatch',
-                                    'severity' => 'warning',
-                                    'post_id'  => $post->ID,
-                                    'detail'   => $title . ': ' . $el_id . ' align_edges = ' . $actual_ae . ' maar verkeerd op: ' . implode( ', ', $ae_mismatches ),
-                                ];
-                            }
+                        // align_edges is één schakelaar voor het hele menu-element, niet
+                        // per breakpoint instelbaar. Uit is de gangbare situatie en levert
+                        // geen melding op; aan is het vermelden waard omdat het menu dan
+                        // tegen de header-rand wordt getrokken.
+                        if ( isset( $el['align_edges'] ) && (int) $el['align_edges'] === 1 ) {
+                            $observations[] = [
+                                'rule'     => 'menu_align_edges_enabled',
+                                'severity' => 'observation',
+                                'post_id'  => $post->ID,
+                                'detail'   => $title . ': ' . $el_id . ' align_edges staat aan — het menu wordt tegen de header-rand uitgelijnd',
+                            ];
                         }
 
                         $mw = isset( $el['mobile_width'] ) ? (int) $el['mobile_width'] : null;
@@ -5374,13 +5300,6 @@ add_action( 'rest_api_init', function () {
                                 'severity' => 'observation',
                                 'post_id'  => $post->ID,
                                 'detail'   => $title . ': ' . $el_id . ' mobile_width (' . $mw . 'px) > site_content_width (' . $content_width . 'px)',
-                            ];
-                        } elseif ( $highest_bp > 0 && $mw > $highest_bp ) {
-                            $observations[] = [
-                                'rule'     => 'menu_mobile_exceeds_breakpoints',
-                                'severity' => 'observation',
-                                'post_id'  => $post->ID,
-                                'detail'   => $title . ': ' . $el_id . ' mobile_width (' . $mw . 'px) > hoogste header breakpoint (' . $highest_bp . 'px)',
                             ];
                         }
                     }
@@ -9647,7 +9566,6 @@ add_action( 'rest_api_init', function () {
                 'orientation_vertical_forbidden'         => 'error',
                 'menu_mobile_always'                     => 'observation',
                 'menu_mobile_exceeds_content_width'      => 'observation',
-                'menu_mobile_exceeds_breakpoints'        => 'observation',
 
                 // acf/validate/locations
                 'orphaned_location_taxonomy'             => 'error',
@@ -9720,7 +9638,7 @@ add_action( 'rest_api_init', function () {
                 'menu_mobile_behavior_not_label_and_arrow' => 'warning',
                 'menu_mobile_icon_size_too_large'        => 'warning',
                 'menu_mobile_icon_size_inconsistent'     => 'warning',
-                'menu_align_edges_mismatch'              => 'warning',
+                'menu_align_edges_enabled'               => 'observation',
 
                 // cache/validate (WP Fastest Cache)
                 'cache_disabled'                         => 'critical',
