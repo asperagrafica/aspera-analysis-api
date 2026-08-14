@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.12.0
+ * Version: 2.13.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.12.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '2.13.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -106,30 +106,54 @@ function aspera_read_css_cached( string $path ): string {
 }
 
 /**
+ * Bouwt eenmalig per request een map veldnaam → veldtype van alle bestaande ACF-velden.
+ *
+ * Bron 1: acf-field posts in de database (velden aangemaakt via de ACF-UI).
+ * Bron 2: lokaal geregistreerde velden (acf_add_local_field_group of JSON-sync), voor
+ * zover ACF geladen is. Zonder bron 2 zou een site die velden in PHP registreert elke
+ * veldverwijzing als onbekend zien.
+ *
+ * Uit te breiden per site via de filter 'aspera_known_acf_fields' (map naam => type),
+ * bedoeld voor velden die geen van beide bronnen kent.
+ */
+function aspera_acf_field_map(): array {
+    static $map = null;
+    if ( $map !== null ) return $map;
+
+    global $wpdb;
+    $rows = $wpdb->get_results(
+        "SELECT post_excerpt AS slug, post_content AS content
+         FROM {$wpdb->posts}
+         WHERE post_type = 'acf-field' AND post_status = 'publish'"
+    );
+    $map = [];
+    foreach ( $rows as $row ) {
+        if ( $row->slug === '' || isset( $map[ $row->slug ] ) ) continue;
+        $data = maybe_unserialize( $row->content );
+        if ( is_array( $data ) && isset( $data['type'] ) ) {
+            $map[ $row->slug ] = $data['type'];
+        }
+    }
+
+    if ( function_exists( 'acf_get_local_fields' ) ) {
+        foreach ( (array) acf_get_local_fields() as $field ) {
+            $name = $field['name'] ?? '';
+            if ( $name === '' || isset( $map[ $name ] ) ) continue;
+            $map[ $name ] = $field['type'] ?? 'unknown';
+        }
+    }
+
+    $map = (array) apply_filters( 'aspera_known_acf_fields', $map );
+    return $map;
+}
+
+/**
  * Geeft het ACF veldtype terug voor een gegeven veldslug.
- * Bouwt eenmalig per request een slug→type map op basis van acf-field posts.
  * Geeft null terug als de slug niet gevonden wordt.
  */
 function aspera_acf_field_type( string $slug ): ?string {
-    static $map = null;
-    if ( $map === null ) {
-        global $wpdb;
-        $rows = $wpdb->get_results(
-            "SELECT post_excerpt AS slug, post_content AS content
-             FROM {$wpdb->posts}
-             WHERE post_type = 'acf-field' AND post_status = 'publish'"
-        );
-        $map = [];
-        foreach ( $rows as $row ) {
-            if ( $row->slug === '' || isset( $map[ $row->slug ] ) ) continue;
-            $data = maybe_unserialize( $row->content );
-            if ( is_array( $data ) && isset( $data['type'] ) ) {
-                $map[ $row->slug ] = $data['type'];
-            }
-        }
-    }
     $key = preg_replace( '#^option\|#', '', $slug );
-    return $map[ $key ] ?? null;
+    return aspera_acf_field_map()[ $key ] ?? null;
 }
 
 /**
@@ -693,6 +717,19 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
     // ── Post-niveau: dezelfde ACF-veldnaam meerdere keren opgeroepen ──────────
     // Bij het dupliceren van elementen worden veldverwijzingen makkelijk meegekopieerd.
     // Eén melding per post, niet per veld: de post is het aanknopingspunt voor controle.
+    // ── Post-niveau: verwijzing naar een ACF-veld dat niet meer bestaat ───────
+    // Een verwijderd of hernoemd veld levert geen foutmelding op: het element rendert
+    // leeg, en een conditie op zo'n veld vuurt nooit meer. Eén melding per veldnaam.
+    if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true ) ) {
+        foreach ( aspera_wpb_unknown_field_refs( $content ) as $field_name => $ref_count ) {
+            $violations[] = [
+                'tag'    => 'post',
+                'rule'   => 'unknown_acf_field',
+                'detail' => 'Veld "' . $field_name . '" wordt ' . $ref_count . ' keer opgeroepen maar bestaat niet (meer) als ACF-veld',
+            ];
+        }
+    }
+
     if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true )
          && ! aspera_wpb_duplicate_fields_exempt( $post ) ) {
         $dupes = aspera_wpb_duplicate_field_refs( $content );
@@ -792,6 +829,108 @@ function aspera_wpb_duplicate_field_refs( string $content ): array {
     return array_filter( array_count_values( $all_refs ), function ( $count ) {
         return $count > 1;
     } );
+}
+
+/**
+ * Ingebouwde UpSolution dynamic tags — géén ACF-velden.
+ *
+ * Deze namen komen in dezelfde {{...}}-notatie voor als ACF-veldverwijzingen, maar
+ * worden door het thema zelf ingevuld. Ze mogen nooit als onbekend veld gelden.
+ * Bron: us-core config/dynamic-values.php en de elementenconfiguratie.
+ */
+function aspera_us_dynamic_tags(): array {
+    return apply_filters( 'aspera_us_dynamic_tags', [
+        'site_title', 'site_icon', 'the_title', 'the_thumbnail', 'post_type_singular',
+        'post_type_plural', 'comment_count', 'post_count', 'user_count', 'favs_count',
+        'taxonomy_label_singular', 'taxonomy_label_plural', 'current_id', 'now',
+        'today', 'today_now', 'address', 'image', 'url', 'text', 'custom_field',
+        'dynamic_variable', 'us_tile_additional_image',
+    ] );
+}
+
+/**
+ * Geeft de ACF-veldverwijzingen in een post terug die naar een niet-bestaand veld wijzen.
+ *
+ * Verzamelt alle vier de verwijzingsvormen die in een template voorkomen:
+ *   1. key="veldnaam"                     — us_post_custom_field
+ *   2. {{veldnaam}}                       — dynamic tag in elk attribuut
+ *   3. link="..." (URL-encoded JSON)      — us_btn met type custom_field
+ *   4. conditions="..." (URL-encoded JSON) — WPBakery Custom Field Conditions
+ *
+ * Vorm 4 is het belangrijkst: een conditie op een verwijderd veld vuurt nooit meer,
+ * waardoor het omsloten element stil onzichtbaar blijft zonder foutmelding.
+ *
+ * Buiten beschouwing blijven option page-velden (globaal, eigen opslag), ingebouwde
+ * UpSolution dynamic tags en namen die met een underscore beginnen (WP-interne meta).
+ *
+ * Retourneert een map veldnaam => aantal voorkomens.
+ */
+function aspera_wpb_unknown_field_refs( string $content ): array {
+    $known = aspera_acf_field_map();
+    if ( empty( $known ) ) return [];   // geen ACF-velden bekend: niets te vergelijken
+
+    $field_patterns = apply_filters( 'aspera_field_patterns', [
+        '/\{\{([\w_]+)\}\}/',   // {{veldnaam}} — UpSolution/US
+        '/\bkey="([\w_]+)"/',   // key="veldnaam" — us_post_custom_field
+    ] );
+
+    preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $els, PREG_SET_ORDER );
+
+    $dynamic_tags = aspera_us_dynamic_tags();
+    $all_refs     = [];
+
+    foreach ( $els as $el ) {
+        $tag   = $el[1];
+        $attrs = $el[2];
+
+        $refs = [];
+        foreach ( $field_patterns as $pattern ) {
+            if ( preg_match_all( $pattern, $attrs, $f ) ) {
+                $refs = array_merge( $refs, array_filter( $f[1] ) );
+            }
+        }
+
+        if ( $tag === 'us_btn' && preg_match( '/\blink="([^"]+)"/', $attrs, $link_match ) ) {
+            $link_data = json_decode( urldecode( $link_match[1] ), true );
+            if ( isset( $link_data['type'], $link_data['custom_field'] )
+                 && $link_data['type'] === 'custom_field'
+                 && ! empty( $link_data['custom_field'] ) ) {
+                $refs[] = $link_data['custom_field'];
+            }
+        }
+
+        // Custom Field Conditions: cf_name_predefined (dropdown) of cf_name (handmatig)
+        if ( preg_match( '/\bconditions="([^"]+)"/', $attrs, $cond_match ) ) {
+            $decoded = json_decode( urldecode( $cond_match[1] ), true );
+            if ( is_array( $decoded ) ) {
+                foreach ( $decoded as $c ) {
+                    if ( ! is_array( $c ) ) continue;
+                    // Een conditie op iets anders dan een custom field (taxonomie, rol)
+                    // kan een stale cf_name uit de editor bevatten; die telt niet mee.
+                    if ( isset( $c['param'] ) && $c['param'] !== 'custom_field' ) continue;
+                    $name = $c['cf_name_predefined'] ?? $c['cf_name'] ?? '';
+                    if ( is_string( $name ) && $name !== '' ) {
+                        $refs[] = $name;
+                    }
+                }
+            }
+        }
+
+        $all_refs = array_merge( $all_refs, $refs );
+    }
+
+    $unknown = [];
+    foreach ( array_count_values( $all_refs ) as $name => $count ) {
+        $name = (string) $name;
+        if ( $name === '' || $name[0] === '_' ) continue;
+        if ( strpos( $name, 'option/' ) === 0 || strpos( $name, 'option|' ) === 0
+             || strpos( $name, 'opt_' ) === 0 ) continue;
+        if ( in_array( $name, $dynamic_tags, true ) ) continue;
+        if ( isset( $known[ $name ] ) ) continue;
+        $unknown[ $name ] = $count;
+    }
+
+    return $unknown;
 }
 
 /**
@@ -1769,7 +1908,7 @@ add_action( 'admin_menu', function () {
         'manage_options',
         ASPERA_ADMIN_PAGE_SLUG,
         'aspera_admin_page_render',
-        'dashicons-editor-textcolor',
+        'dashicons-rest-api',
         100.7
     );
 } );
@@ -2529,7 +2668,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
@@ -2752,6 +2891,7 @@ function aspera_get_rule_context(): array {
         'unexpected_columns_reverse' => [ 'label' => 'Onverwachte columns_reverse', 'explanation' => 'columns_reverse op een row zonder gescheiden beeld- en tekstkolom; heeft geen effect op de beeld/tekst-stapeling.', 'action' => 'Verwijder attribuut.' ],
         'animate_detected' => [ 'label' => 'Animate-attribuut gedetecteerd', 'explanation' => 'Element heeft animate-eigenschap; meestal performance-impact.', 'action' => 'Beoordeel of nodig; eventueel verwijderen.' ],
         'responsive_hide_detected' => [ 'label' => 'Responsive-hide attribuut', 'explanation' => 'Element heeft responsive_hide_at_*; layout-keuze om expliciet te zijn.', 'action' => 'Bevestigen of bewust.' ],
+        'unknown_acf_field' => [ 'label' => 'Verwijzing naar niet-bestaand ACF-veld', 'explanation' => 'Een element roept een ACF-veld op dat niet meer bestaat; het element blijft leeg en een conditie op dat veld vuurt nooit.', 'action' => 'Corrigeer de veldnaam of verwijder de verwijzing.' ],
         'duplicate_acf_fields' => [ 'label' => 'Duplicate ACF-veldwaarden', 'explanation' => 'Dezelfde ACF-veldnaam wordt binnen deze post meerdere keren opgeroepen; vaak het gevolg van het dupliceren van een element.', 'action' => 'Controleer of de herhaling bedoeld is; zo niet, koppel de kopie aan een eigen veld.' ],
 
         // ── Grid (us_header / us_grid_layout) ─────────────────────────────
@@ -9494,6 +9634,7 @@ add_action( 'rest_api_init', function () {
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
                 'duplicate_acf_fields'        => 'warning',
+                'unknown_acf_field'           => 'error',
 
                 // grid/validate — image:* (us_header only)
                 'image_lazy_loading_enabled'  => 'error',
