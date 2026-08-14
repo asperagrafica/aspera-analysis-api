@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 2.14.0
+ * Version: 3.0.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '2.14.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.0.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2191,6 +2191,26 @@ add_action( 'admin_post_aspera_save_checklist', function () {
     if ( ! aspera_user_is_administrator() ) wp_die( 'Onvoldoende rechten.' );
     check_admin_referer( 'aspera_save_checklist' );
 
+    $redirect = function ( string $flag ) {
+        wp_safe_redirect( add_query_arg(
+            [ 'page' => ASPERA_CHECKLIST_PAGE_SLUG, $flag => '1' ],
+            admin_url( 'admin.php' )
+        ) );
+        exit;
+    };
+
+    // Globale reset: wist alle vinkjes én alle negeer-keuzes, zodat de
+    // volledige lijst weer zichtbaar en ongevinkt is.
+    if ( isset( $_POST['aspera_reset'] ) ) {
+        update_option( ASPERA_CHECKLIST_OPTION, [
+            'checked'  => [],
+            'ignored'  => [],
+            'saved_at' => current_time( 'Y-m-d H:i' ),
+            'version'  => ASPERA_CHECKLIST_VERSION,
+        ], false );
+        $redirect( 'reset' );
+    }
+
     $valid   = array_flip( aspera_checklist_all_keys() );
     $sanit   = function ( $input ) use ( $valid ): array {
         $out = [];
@@ -2211,11 +2231,7 @@ add_action( 'admin_post_aspera_save_checklist', function () {
         'version'  => ASPERA_CHECKLIST_VERSION,
     ], false );
 
-    wp_safe_redirect( add_query_arg(
-        [ 'page' => ASPERA_CHECKLIST_PAGE_SLUG, 'saved' => '1' ],
-        admin_url( 'admin.php' )
-    ) );
-    exit;
+    $redirect( 'saved' );
 } );
 
 function aspera_checklist_page_render(): void {
@@ -2246,6 +2262,9 @@ function aspera_checklist_page_render(): void {
     if ( isset( $_GET['saved'] ) ) {
         echo '<div class="notice notice-success is-dismissible"><p>Checklist opgeslagen.</p></div>';
     }
+    if ( isset( $_GET['reset'] ) ) {
+        echo '<div class="notice notice-success is-dismissible"><p>Checklist gereset: alle vinkjes gewist en alle genegeerde items weer zichtbaar.</p></div>';
+    }
 
     ?>
     <style>
@@ -2274,7 +2293,10 @@ function aspera_checklist_page_render(): void {
         #aspera-checklist-page .aspera-cl-cat.is-all-ignored { display:none; }
         #aspera-checklist-page.show-ignored .aspera-cl-cat.is-all-ignored { display:block; }
         #aspera-checklist-page .aspera-cl-sticky { position:sticky; bottom:0; left:0; right:0; background:#f0f0f1; border-top:1px solid #c3c4c7; padding:10px 16px; margin:24px -20px 0; display:flex; align-items:center; justify-content:flex-end; gap:8px; box-shadow:0 -2px 6px rgba(0,0,0,0.04); z-index:50; }
-        #aspera-checklist-page .aspera-cl-sticky .aspera-cl-sticky-pct { margin-right:auto; font-size:13px; font-weight:700; }
+        #aspera-checklist-page .aspera-cl-sticky .aspera-cl-sticky-pct { margin-right:auto; font-size:13px; font-weight:700; order:1; }
+        #aspera-checklist-page .aspera-cl-reset { order:2; margin-right:8px; }
+        #aspera-checklist-page .aspera-cl-toggle-ignored { order:3; }
+        #aspera-checklist-page .aspera-cl-save { order:4; }
         #aspera-checklist-page .aspera-cl-toggle-ignored.is-active { background:#1d2327; color:#fff; border-color:#1d2327; }
     </style>
     <?php
@@ -2321,10 +2343,13 @@ function aspera_checklist_page_render(): void {
         echo '</div>';
     }
 
+    // Volgorde in de DOM: Opslaan staat vóór Resetten, zodat Opslaan de
+    // default submit blijft. De flex-order zet Resetten visueel links.
     echo '<div class="aspera-cl-sticky">';
     echo '<span class="aspera-cl-sticky-pct" style="color:' . esc_attr( $pct_color ) . ';">Voortgang: ' . (int) $pct . '%</span>';
     echo '<button type="button" class="button button-secondary aspera-cl-toggle-ignored"' . ( $ignored_count === 0 ? ' disabled' : '' ) . '>Toon genegeerd (<span class="aspera-cl-ignored-count">' . (int) $ignored_count . '</span>)</button>';
-    echo '<button type="submit" class="button button-primary">Opslaan</button>';
+    echo '<button type="submit" class="button button-primary aspera-cl-save">Opslaan</button>';
+    echo '<button type="submit" name="aspera_reset" value="1" class="button button-link-delete aspera-cl-reset" title="Wist alle vinkjes en maakt genegeerde items weer zichtbaar">Alles resetten</button>';
     echo '</div>';
 
     echo '</form>';
@@ -2407,6 +2432,13 @@ function aspera_checklist_page_script(): void {
         });
 
         page.addEventListener('click', function (e) {
+            if (e.target.closest('.aspera-cl-reset')) {
+                var msg = 'Alle vinkjes wissen en alle genegeerde items weer zichtbaar maken?\n\n'
+                        + 'De hele checklist begint daarna opnieuw. Dit kan niet ongedaan gemaakt worden.';
+                if (!window.confirm(msg)) e.preventDefault();
+                return;
+            }
+
             var btn = e.target.closest('.aspera-cl-ignore');
             if (btn) {
                 var row = btn.closest('.aspera-cl-item');
