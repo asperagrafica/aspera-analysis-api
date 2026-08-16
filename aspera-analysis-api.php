@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.2.0
+ * Version: 3.2.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.2.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.2.1' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2761,24 +2761,48 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             if ( ! $meta_key ) {
                 wp_send_json_error( 'meta_key ontbreekt.' );
             }
-            // Re-verify: bevestig dat meta_key nog steeds verweesd is
-            // (zelfde criterium als /meta/validate: bijbehorende _<key>=field_* bestaat
-            // én die field_key komt niet voor in actieve acf-field post_name's).
-            $field_key = $wpdb->get_var( $wpdb->prepare(
-                "SELECT meta_value FROM {$wpdb->postmeta}
-                 WHERE meta_key = %s AND meta_value LIKE 'field_%%' LIMIT 1",
+            // Re-verify: bevestig dat meta_key nergens meer legitiem in gebruik is.
+            // Zelfde criterium als /meta/validate: een bestaande field key is op zichzelf
+            // geen bewijs, want bij een slug-mismatch wijst de referentie naar een veld met
+            // een andere slug. Doorslaggevend is of de meta_key bij dat veld hoort, als
+            // exacte slug of als repeater-/flexible-rij ervan.
+            //
+            // Alle referenties worden gecontroleerd, niet alleen de eerste: dezelfde
+            // meta_key kan op verschillende posts naar verschillende velden wijzen, en de
+            // DELETE hieronder werkt site-breed op meta_key. Eén geldig gebruik blokkeert
+            // de hele actie.
+            $refs = $wpdb->get_col( $wpdb->prepare(
+                "SELECT DISTINCT meta_value FROM {$wpdb->postmeta}
+                 WHERE meta_key = %s AND meta_value LIKE 'field_%%'",
                 '_' . $meta_key
             ) );
-            if ( ! $field_key ) {
+            if ( empty( $refs ) ) {
                 wp_send_json_error( 'Verificatie mislukt: geen field_* referentie meer voor "' . $meta_key . '". Voer audit opnieuw uit.' );
             }
-            $field_key_active = (int) $wpdb->get_var( $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-field' AND post_status = 'publish' AND post_name = %s",
-                $field_key
-            ) );
-            if ( $field_key_active > 0 ) {
-                wp_send_json_error( 'Verificatie mislukt: meta_key "' . $meta_key . '" is weer in gebruik (actief ACF-veld). Verwijdering geannuleerd.' );
+            $acf_fields   = $wpdb->get_results(
+                "SELECT ID, post_parent, post_name AS field_key, post_excerpt AS field_slug
+                 FROM {$wpdb->posts}
+                 WHERE post_type = 'acf-field' AND post_status = 'publish'",
+                ARRAY_A
+            );
+            $fields_by_key = [];
+            $fields_by_id  = [];
+            foreach ( $acf_fields as $af ) {
+                if ( ! empty( $af['field_key'] ) ) {
+                    $fields_by_key[ $af['field_key'] ] = $af;
+                }
+                $fields_by_id[ (int) $af['ID'] ] = $af;
+            }
+            foreach ( $refs as $ref ) {
+                if ( ! isset( $fields_by_key[ $ref ] ) ) {
+                    continue;
+                }
+                if ( aspera_acf_meta_key_matches_field( $meta_key, $fields_by_key[ $ref ], $fields_by_id ) ) {
+                    wp_send_json_error(
+                        'Verificatie mislukt: meta_key "' . $meta_key . '" hoort bij het actieve ACF-veld "'
+                        . $fields_by_key[ $ref ]['field_slug'] . '". Verwijdering geannuleerd.'
+                    );
+                }
             }
             $del_data = (int) $wpdb->query( $wpdb->prepare(
                 "DELETE FROM {$wpdb->postmeta} WHERE meta_key = %s", $meta_key
