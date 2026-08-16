@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.1.0
+ * Version: 3.2.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.1.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.2.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -154,6 +154,67 @@ function aspera_acf_field_map(): array {
 function aspera_acf_field_type( string $slug ): ?string {
     $key = preg_replace( '#^option\|#', '', $slug );
     return aspera_acf_field_map()[ $key ] ?? null;
+}
+
+/**
+ * Bepaalt of een postmeta-key legitiem hoort bij het ACF-veld waarnaar zijn
+ * _-referentie wijst.
+ *
+ * Een bestaande field key is op zichzelf geen bewijs dat de meta-key klopt: bij een
+ * hernoemd, verwijderd of gedupliceerd veld blijft de oude meta-rij staan met een
+ * _-referentie die naar het overgebleven veld blijft wijzen. Zonder deze check telt
+ * zo'n rij als geldig.
+ *
+ * Top-level veld: de meta-key moet exact gelijk zijn aan de veldslug.
+ * Subveld van een repeater of flexible content: ACF slaat elke rij op als
+ * {parent_slug}_{index}_{child_slug}, recursief bij nesting. Het verwachte patroon
+ * wordt opgebouwd uit de werkelijke parent-keten van het veld en niet uit een losse
+ * regex, zodat een afwijkende naam niet toevallig als rij-key wordt gelezen.
+ *
+ * @param string $meta_key     Postmeta-key zonder underscore-prefix.
+ * @param array  $field        Rij uit de acf-field lijst (ID, post_parent, field_slug).
+ * @param array  $fields_by_id Alle acf-field rijen, geïndexeerd op ID.
+ */
+function aspera_acf_meta_key_matches_field( string $meta_key, array $field, array $fields_by_id ): bool {
+    $slug = (string) ( $field['field_slug'] ?? '' );
+    if ( $slug === '' ) {
+        return false;
+    }
+    if ( $meta_key === $slug ) {
+        return true;
+    }
+
+    // Parent-keten opbouwen zolang de parent zelf een acf-field is. Is de parent een
+    // acf-field-group (of onbekend), dan is het veld top-level en is er geen rij-vorm.
+    $chain  = [];
+    $cursor = $field;
+    $guard  = 0;
+    while ( $guard++ < 20 ) {
+        $parent_id = (int) ( $cursor['post_parent'] ?? 0 );
+        if ( $parent_id === 0 || ! isset( $fields_by_id[ $parent_id ] ) ) {
+            break;
+        }
+        $cursor      = $fields_by_id[ $parent_id ];
+        $parent_slug = (string) ( $cursor['field_slug'] ?? '' );
+        if ( $parent_slug === '' ) {
+            return false;
+        }
+        array_unshift( $chain, $parent_slug );
+    }
+
+    if ( empty( $chain ) ) {
+        return false;
+    }
+
+    $parts   = array_map(
+        static function ( $s ) {
+            return preg_quote( (string) $s, '/' );
+        },
+        array_merge( $chain, [ $slug ] )
+    );
+    $pattern = '/^' . implode( '_\d+_', $parts ) . '$/';
+
+    return (bool) preg_match( $pattern, $meta_key );
 }
 
 /**
@@ -3165,7 +3226,7 @@ function aspera_get_rules_per_category(): array {
         'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_enabled','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
         'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix' ],
         'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
-        'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates' ],
+        'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates','orphaned_meta_slug_mismatch','orphaned_meta_slug_mismatch_in_templates','stale_meta_field_key' ],
         'options_orphaned' => [ 'orphaned_option' ],
         'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
@@ -3225,6 +3286,9 @@ function aspera_get_rule_context(): array {
         // ── Orphaned ─────────────────────────────────────────────────────
         'orphaned_meta' => [ 'label' => 'Verweesde post-meta', 'explanation' => 'Een meta_key wordt nergens meer in field groups, templates of code gerefereerd; alleen historische data in postmeta.', 'action' => 'Beoordeel of de meta verwijderd kan; gebruik fix-button om alle rijen te verwijderen.' ],
         'orphaned_meta_in_templates' => [ 'label' => 'Verweesde meta in templates', 'explanation' => 'Een meta_key komt nog voor in WPBakery-templates ondanks dat de field group hem niet meer kent.', 'action' => 'Verwijder de referentie uit de template eerst, dan meta opruimen.' ],
+        'orphaned_meta_slug_mismatch' => [ 'label' => 'Meta-key hoort niet bij zijn veld', 'explanation' => 'De _-referentie wijst naar een bestaand ACF-veld, maar de meta_key komt niet overeen met de slug van dat veld en is ook geen repeater- of flexible-rij ervan. Ontstaat bij een hernoemd, verwijderd of gedupliceerd veld: de oude meta-rij blijft achter met een referentie naar het overgebleven veld.', 'action' => 'Controleer of de data nog ergens gebruikt wordt; gebruik de fix-button om de rijen en de _-referentie te verwijderen.' ],
+        'orphaned_meta_slug_mismatch_in_templates' => [ 'label' => 'Afwijkende meta-key in templates', 'explanation' => 'Een meta_key hoort niet bij het veld waarnaar zijn referentie wijst, maar komt nog wel voor in WPBakery-templates.', 'action' => 'Verwijder of corrigeer de referentie in de template eerst, dan pas de meta opruimen.' ],
+        'stale_meta_field_key' => [ 'label' => 'Verouderde field key referentie', 'explanation' => 'Een veld met deze slug bestaat nog, maar de _-referentie wijst naar een field key die niet meer bestaat. ACF valt dan terug op naam-lookup, waardoor het veld meestal blijft werken maar de koppeling niet meer expliciet is.', 'action' => 'Werk de _-referentie bij naar de actuele field key van het veld met deze slug.' ],
         'orphaned_table' => [ 'label' => 'Verweesde database-tabel', 'explanation' => 'Een tabel hoort bij een plugin/feature die niet meer actief is.', 'action' => 'Bevestig dat de tabel niet meer nodig is en drop hem.' ],
         'unknown_table' => [ 'label' => 'Onbekende database-tabel', 'explanation' => 'Een tabel is niet herkend uit de Aspera-whitelist; mogelijk onbekende plugin of legacy.', 'action' => 'Onderzoek herkomst en classificeer (governed/orphaned).' ],
         'orphaned_post_type' => [ 'label' => 'Verweesde posts van inactief post-type', 'explanation' => 'Posts in een post-type dat niet meer geregistreerd is.', 'action' => 'Onderzoek herkomst; verwijderen of post-type herregistreren.' ],
@@ -6789,8 +6853,10 @@ add_action( 'rest_api_init', function () {
             // 1. Actieve ACF field keys ophalen uit post_name van acf-field posts
             //    (post_name = field key zoals field_62c1766c295ed;
             //     post_excerpt = veldslug zoals bu_cpt_links_1)
+            //    ID en post_parent zijn nodig om subvelden van repeaters en flexible
+            //    content te herkennen, zie aspera_acf_meta_key_matches_field().
             $active_fields = $wpdb->get_results(
-                "SELECT post_name AS field_key, post_excerpt AS field_slug
+                "SELECT ID, post_parent, post_name AS field_key, post_excerpt AS field_slug
                  FROM {$wpdb->posts}
                  WHERE post_type = 'acf-field'
                    AND post_status = 'publish'
@@ -6800,6 +6866,15 @@ add_action( 'rest_api_init', function () {
             $active_field_keys  = array_column( $active_fields, 'field_key' );
             $active_field_slugs = array_flip( array_filter( array_column( $active_fields, 'field_slug' ) ) );
             $active_field_keys  = array_values( array_filter( $active_field_keys ) );
+
+            $field_by_key = [];
+            $field_by_id  = [];
+            foreach ( $active_fields as $af ) {
+                if ( ! empty( $af['field_key'] ) ) {
+                    $field_by_key[ $af['field_key'] ] = $af;
+                }
+                $field_by_id[ (int) $af['ID'] ] = $af;
+            }
 
             // 2. Alle meta_keys met ACF-herkomst ophalen:
             //    - niet _ prefixed
@@ -6816,32 +6891,25 @@ add_action( 'rest_api_init', function () {
                 ARRAY_A
             );
 
-            // 3. Per key bepalen: actief ACF-veld of orphaned
+            // 3. Per key bepalen: geldig, slug-mismatch, stale referentie of orphaned
             $orphaned       = [];
+            $mismatched     = [];
+            $stale_refs     = [];
             $valid_count    = 0;
             $template_types = [
                 'us_content_template', 'us_page_block',
                 'us_grid_layout',      'us_header',
             ];
 
-            foreach ( $rows as $row ) {
-                $key       = $row['meta_key'];
-                $field_key = $row['field_key'];
-
-                // Actief ACF-veld → overslaan (op field key of op veldslug)
-                if ( in_array( $field_key, $active_field_keys, true ) || isset( $active_field_slugs[ $key ] ) ) {
-                    $valid_count++;
-                    continue;
-                }
-
-                // Orphaned: field_key bestaat niet meer in actieve ACF velden
-                $row_count = (int) $wpdb->get_var( $wpdb->prepare(
+            $count_rows = static function ( string $key ) use ( $wpdb ): int {
+                return (int) $wpdb->get_var( $wpdb->prepare(
                     "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = %s",
                     $key
                 ) );
+            };
 
-                // Check aanwezigheid in template post_content / post_excerpt
-                $in_templates = false;
+            // Aanwezigheid in template post_content / post_excerpt
+            $in_templates_fn = static function ( string $key ) use ( $wpdb, $template_types ): bool {
                 foreach ( $template_types as $type ) {
                     $like  = '%' . $wpdb->esc_like( $key ) . '%';
                     $found = (int) $wpdb->get_var( $wpdb->prepare(
@@ -6852,10 +6920,56 @@ add_action( 'rest_api_init', function () {
                         $type, $like, $like
                     ) );
                     if ( $found > 0 ) {
-                        $in_templates = true;
-                        break;
+                        return true;
                     }
                 }
+                return false;
+            };
+
+            foreach ( $rows as $row ) {
+                $key       = $row['meta_key'];
+                $field_key = $row['field_key'];
+
+                if ( isset( $field_by_key[ $field_key ] ) ) {
+                    // De referentie wijst naar een bestaand veld. Dat alleen is niet
+                    // genoeg: de meta_key moet ook bij dát veld horen, als exacte slug
+                    // of als repeater-/flexible-rij daarvan.
+                    if ( aspera_acf_meta_key_matches_field( $key, $field_by_key[ $field_key ], $field_by_id ) ) {
+                        $valid_count++;
+                        continue;
+                    }
+
+                    $in_templates = $in_templates_fn( $key );
+                    $mismatched[] = [
+                        'meta_key'      => $key,
+                        'field_key'     => $field_key,
+                        'expected_slug' => (string) ( $field_by_key[ $field_key ]['field_slug'] ?? '' ),
+                        'rows'          => $count_rows( $key ),
+                        'in_templates'  => $in_templates,
+                        'advies'        => $in_templates
+                            ? 'onderzoek vereist, key gevonden in templates'
+                            : 'verwijderen na akkoord',
+                    ];
+                    continue;
+                }
+
+                if ( isset( $active_field_slugs[ $key ] ) ) {
+                    // Een veld met deze slug bestaat nog, maar de _-referentie wijst naar
+                    // een field key die niet meer bestaat. De data is bruikbaar zolang ACF
+                    // op naam terugvalt; de referentie zelf is verouderd.
+                    $stale_refs[] = [
+                        'meta_key'  => $key,
+                        'field_key' => $field_key,
+                        'rows'      => $count_rows( $key ),
+                        'advies'    => 'referentie bijwerken naar de actuele field key',
+                    ];
+                    continue;
+                }
+
+                // Orphaned: field_key bestaat niet meer in actieve ACF velden
+                $row_count = $count_rows( $key );
+
+                $in_templates = $in_templates_fn( $key );
 
                 $orphaned[] = [
                     'meta_key'     => $key,
@@ -6869,10 +6983,16 @@ add_action( 'rest_api_init', function () {
             }
 
             return [
-                'status'   => empty( $orphaned ) ? 'ok' : 'issues_found',
-                'orphaned' => $orphaned,
+                'status'     => ( empty( $orphaned ) && empty( $mismatched ) && empty( $stale_refs ) )
+                    ? 'ok'
+                    : 'issues_found',
+                'orphaned'   => $orphaned,
+                'mismatched' => $mismatched,
+                'stale_refs' => $stale_refs,
                 'summary'  => [
                     'orphaned_keys'    => count( $orphaned ),
+                    'mismatched_keys'  => count( $mismatched ),
+                    'stale_ref_keys'   => count( $stale_refs ),
                     'valid_keys'       => $valid_count,
                     'total_acf_fields' => count( $active_field_keys ),
                 ],
@@ -10241,6 +10361,9 @@ add_action( 'rest_api_init', function () {
                 // meta/validate
                 'orphaned_meta'                          => 'warning',
                 'orphaned_meta_in_templates'             => 'error',
+                'orphaned_meta_slug_mismatch'            => 'warning',
+                'orphaned_meta_slug_mismatch_in_templates' => 'error',
+                'stale_meta_field_key'                   => 'observation',
 
                 // options/validate
                 'orphaned_option'                        => 'warning',
@@ -10856,6 +10979,40 @@ add_action( 'rest_api_init', function () {
                         ];
                     }
                     $meta_violations[] = $entry;
+                }
+
+                // Meta-key wijst naar een bestaand veld, maar hoort niet bij dat veld
+                foreach ( $meta_val['mismatched'] ?? [] as $m ) {
+                    $rule = $m['in_templates']
+                        ? 'orphaned_meta_slug_mismatch_in_templates'
+                        : 'orphaned_meta_slug_mismatch';
+                    $sev   = $severity_map[ $rule ] ?? 'warning';
+                    $entry = [
+                        'rule'     => $rule,
+                        'severity' => $sev,
+                        'detail'   => $m['meta_key'] . ' verwijst naar ' . $m['field_key']
+                            . ' (veld "' . $m['expected_slug'] . '"), ' . $m['rows'] . ' rijen'
+                            . ( $m['in_templates'] ? ', gevonden in templates' : '' ),
+                    ];
+                    if ( ! $m['in_templates'] ) {
+                        $entry['proposed_fix'] = [
+                            'fixable'  => true,
+                            'action'   => 'delete_orphaned_meta',
+                            'meta_key' => $m['meta_key'],
+                            'rows'     => (int) $m['rows'],
+                        ];
+                    }
+                    $meta_violations[] = $entry;
+                }
+
+                // Verouderde field key referentie terwijl het veld met deze slug nog bestaat
+                foreach ( $meta_val['stale_refs'] ?? [] as $m ) {
+                    $meta_violations[] = [
+                        'rule'     => 'stale_meta_field_key',
+                        'severity' => $severity_map['stale_meta_field_key'] ?? 'observation',
+                        'detail'   => $m['meta_key'] . ' verwijst naar niet-bestaande field key '
+                            . $m['field_key'] . ' (' . $m['rows'] . ' rijen)',
+                    ];
                 }
             }
             $categories['meta_orphaned'] = [
