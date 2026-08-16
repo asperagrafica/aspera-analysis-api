@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.0.0
+ * Version: 3.1.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.0.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.1.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -2016,7 +2016,7 @@ function aspera_admin_page_pdf_export(): void {
 // hernoemen of hergebruiken, anders verschuiven bestaande vinkjes.
 
 const ASPERA_CHECKLIST_PAGE_SLUG = 'aspera-launch-checklist';
-const ASPERA_CHECKLIST_VERSION   = '1.0.0';
+const ASPERA_CHECKLIST_VERSION   = '1.1.0';
 const ASPERA_CHECKLIST_OPTION    = 'aspera_launch_checklist';
 
 /**
@@ -2102,6 +2102,7 @@ function aspera_checklist_definition(): array {
             'seo_sitemap'        => 'Sitemap toevoegen',
             'seo_redirects'      => 'Links doorverwijzen',
             'seo_burst'          => 'Burst installeren',
+            'seo_burst_console'  => 'Burst koppelen aan Search Console',
             'seo_schema_key'     => 'Schema instellen voor key-pagina’s',
             'seo_robots'         => 'Robots.txt aanmaken',
         ],
