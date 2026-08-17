@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.2.1
+ * Version: 3.2.2
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -782,11 +782,21 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
     // Een verwijderd of hernoemd veld levert geen foutmelding op: het element rendert
     // leeg, en een conditie op zo'n veld vuurt nooit meer. Eén melding per veldnaam.
     if ( in_array( $post_type, [ 'page', 'us_content_template', 'us_page_block' ], true ) ) {
-        foreach ( aspera_wpb_unknown_field_refs( $content ) as $field_name => $ref_count ) {
+        foreach ( aspera_wpb_unknown_field_refs( $content ) as $field_name => $ref ) {
+            // Per soort verwijzing en element benoemen waar het veld wordt ingezet,
+            // zodat de melding zonder handmatig zoeken naar de plek in het template leidt.
+            $parts = [];
+            foreach ( $ref['contexts'] as $context => $context_count ) {
+                list( $kind, $tag ) = explode( '|', $context, 2 );
+                $parts[] = $context_count . 'x ' . aspera_wpb_ref_kind_label( $kind ) . ' op ' . $tag;
+            }
+
             $violations[] = [
                 'tag'    => 'post',
                 'rule'   => 'unknown_acf_field',
-                'detail' => 'Veld "' . $field_name . '" wordt ' . $ref_count . ' keer opgeroepen maar bestaat niet (meer) als ACF-veld',
+                'detail' => 'Veld "' . $field_name . '" bestaat niet (meer) als ACF-veld. '
+                            . $ref['count'] . ' ' . ( $ref['count'] === 1 ? 'verwijzing' : 'verwijzingen' )
+                            . ': ' . implode( ', ', $parts ),
             ];
         }
     }
@@ -924,7 +934,8 @@ function aspera_us_dynamic_tags(): array {
  * Buiten beschouwing blijven option page-velden (globaal, eigen opslag), ingebouwde
  * UpSolution dynamic tags en namen die met een underscore beginnen (WP-interne meta).
  *
- * Retourneert een map veldnaam => aantal voorkomens.
+ * Retourneert een map veldnaam => [ 'count' => aantal, 'contexts' => [ 'soort|tag' => aantal ] ],
+ * zodat de melding kan benoemen waar de verwijzing staat en in welke vorm.
  */
 function aspera_wpb_unknown_field_refs( string $content ): array {
     $known = aspera_acf_field_map();
@@ -935,19 +946,28 @@ function aspera_wpb_unknown_field_refs( string $content ): array {
         '/\bkey="([\w_]+)"/',   // key="veldnaam" — us_post_custom_field
     ] );
 
+    // Soort verwijzing per patroon. Patronen die via het filter zijn toegevoegd
+    // hebben geen bekend soort en vallen terug op 'element'.
+    $pattern_kinds = [
+        '/\{\{([\w_]+)\}\}/' => 'dynamic_tag',
+        '/\bkey="([\w_]+)"/' => 'field_element',
+    ];
+
     preg_match_all( '/\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]/', $content, $els, PREG_SET_ORDER );
 
     $dynamic_tags = aspera_us_dynamic_tags();
-    $all_refs     = [];
+    $all_refs     = [];   // losse verwijzingen: [ 'name' => …, 'kind' => …, 'tag' => … ]
 
     foreach ( $els as $el ) {
         $tag   = $el[1];
         $attrs = $el[2];
 
-        $refs = [];
         foreach ( $field_patterns as $pattern ) {
             if ( preg_match_all( $pattern, $attrs, $f ) ) {
-                $refs = array_merge( $refs, array_filter( $f[1] ) );
+                $kind = $pattern_kinds[ $pattern ] ?? 'element';
+                foreach ( array_filter( $f[1] ) as $name ) {
+                    $all_refs[] = [ 'name' => $name, 'kind' => $kind, 'tag' => $tag ];
+                }
             }
         }
 
@@ -956,7 +976,7 @@ function aspera_wpb_unknown_field_refs( string $content ): array {
             if ( isset( $link_data['type'], $link_data['custom_field'] )
                  && $link_data['type'] === 'custom_field'
                  && ! empty( $link_data['custom_field'] ) ) {
-                $refs[] = $link_data['custom_field'];
+                $all_refs[] = [ 'name' => $link_data['custom_field'], 'kind' => 'btn_link', 'tag' => $tag ];
             }
         }
 
@@ -969,29 +989,70 @@ function aspera_wpb_unknown_field_refs( string $content ): array {
                     // Een conditie op iets anders dan een custom field (taxonomie, rol)
                     // kan een stale cf_name uit de editor bevatten; die telt niet mee.
                     if ( isset( $c['param'] ) && $c['param'] !== 'custom_field' ) continue;
-                    $name = $c['cf_name_predefined'] ?? $c['cf_name'] ?? '';
-                    if ( is_string( $name ) && $name !== '' ) {
-                        $refs[] = $name;
+                    $name = aspera_wpb_condition_field_name( $c );
+                    if ( $name !== '' ) {
+                        $all_refs[] = [ 'name' => $name, 'kind' => 'condition', 'tag' => $tag ];
                     }
                 }
             }
         }
-
-        $all_refs = array_merge( $all_refs, $refs );
     }
 
     $unknown = [];
-    foreach ( array_count_values( $all_refs ) as $name => $count ) {
-        $name = (string) $name;
+    foreach ( $all_refs as $ref ) {
+        $name = (string) $ref['name'];
         if ( $name === '' || $name[0] === '_' ) continue;
         if ( strpos( $name, 'option/' ) === 0 || strpos( $name, 'option|' ) === 0
              || strpos( $name, 'opt_' ) === 0 ) continue;
         if ( in_array( $name, $dynamic_tags, true ) ) continue;
         if ( isset( $known[ $name ] ) ) continue;
-        $unknown[ $name ] = $count;
+
+        if ( ! isset( $unknown[ $name ] ) ) {
+            $unknown[ $name ] = [ 'count' => 0, 'contexts' => [] ];
+        }
+        $context = $ref['kind'] . '|' . $ref['tag'];
+        $unknown[ $name ]['count']++;
+        $unknown[ $name ]['contexts'][ $context ] = ( $unknown[ $name ]['contexts'][ $context ] ?? 0 ) + 1;
     }
 
     return $unknown;
+}
+
+/**
+ * Bepaalt de veldnaam uit één WPBakery Custom Field Condition.
+ *
+ * De select `cf_name_predefined` (us-core `config/elements_conditional_options.php`)
+ * kent twee waarden die géén veldnaam zijn:
+ *   'custom' — de gebruiker typt de naam zelf, die staat dan in `cf_name`
+ *   '-'      — nog niets gekozen, dus geen veldverwijzing
+ * Spiegelt de themalogica in us-core `functions/helpers.php`.
+ *
+ * Retourneert een lege string wanneer de conditie naar geen enkel veld verwijst.
+ */
+function aspera_wpb_condition_field_name( array $c ): string {
+    $name = isset( $c['cf_name_predefined'] ) && is_string( $c['cf_name_predefined'] )
+        ? $c['cf_name_predefined'] : '';
+
+    if ( $name === 'custom' || $name === '' ) {
+        $name = isset( $c['cf_name'] ) && is_string( $c['cf_name'] ) ? $c['cf_name'] : '';
+    }
+
+    return $name === '-' ? '' : $name;
+}
+
+/**
+ * Nederlandse omschrijving van een verwijzingssoort, voor gebruik in violation-details.
+ */
+function aspera_wpb_ref_kind_label( string $kind ): string {
+    $labels = [
+        'dynamic_tag'   => 'dynamic tag',
+        'field_element' => 'key-attribuut',
+        'btn_link'      => 'knoplink',
+        'condition'     => 'conditionele weergaveregel',
+        'element'       => 'verwijzing',
+    ];
+
+    return $labels[ $kind ] ?? 'verwijzing';
 }
 
 /**
@@ -4999,8 +5060,9 @@ add_action( 'rest_api_init', function () {
                     $decoded = json_decode( urldecode( $cond[1] ), true );
                     if ( is_array( $decoded ) ) {
                         $conditions = array_map( function ( $c ) {
+                            $field = is_array( $c ) ? aspera_wpb_condition_field_name( $c ) : '';
                             return array_filter( [
-                                'field'    => $c['cf_name_predefined'] ?? $c['cf_name'] ?? null,
+                                'field'    => $field !== '' ? $field : null,
                                 'mode'     => $c['cf_mode'] ?? null,
                                 'value'    => $c['cf_value'] ?? null,
                                 'param'    => $c['param'] ?? null,
