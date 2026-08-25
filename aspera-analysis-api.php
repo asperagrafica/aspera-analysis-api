@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.4.1
+ * Version: 3.4.2
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.4.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.4.2' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -8904,6 +8904,7 @@ add_action( 'rest_api_init', function () {
                 'mfp-close',                  // Magnific Popup — idem
                 'mfp-content',               // Magnific Popup — idem
                 'mfp-wrap',                  // Magnific Popup — idem
+                'mfp-bottom-bar',            // Magnific Popup — idem
             ];
 
             // Prefix-patronen die als observation gerapporteerd worden (niet als warning)
@@ -10486,7 +10487,7 @@ add_action( 'rest_api_init', function () {
                 'wrong_page_format_multi'                => 'observation',
 
                 // theme/check
-                'wrong_active_theme'                     => 'warning',
+                'wrong_active_theme'                     => 'observation',
                 'impreza_license_inactive'               => 'critical',
                 'unauthorized_installed_theme'           => 'warning',
                 'theme_recaptcha_site_key_missing'       => 'critical',
@@ -11251,7 +11252,7 @@ add_action( 'rest_api_init', function () {
             if ( ! $is_aspera ) {
                 $theme_violations[] = [
                     'rule'     => 'wrong_active_theme',
-                    'severity' => 'warning',
+                    'severity' => 'observation',
                     'detail'   => 'Actief thema: ' . $theme_name . ' (' . $stylesheet . ')',
                 ];
             }
