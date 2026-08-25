@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.2.2
+ * Version: 3.3.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -3298,7 +3298,7 @@ function aspera_get_rules_per_category(): array {
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
-        'plugins' => [ 'extra_plugin' ],
+        'plugins' => [ 'extra_plugin','maintenance_mode_active' ],
         'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover' ],
         'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta' ],
         'css' => [ 'unused_css_class','wrong_css_prefix' ],
@@ -3475,6 +3475,7 @@ function aspera_get_rule_context(): array {
 
         // ── Plugins ───────────────────────────────────────────────────────
         'extra_plugin' => [ 'label' => 'Extra plugin actief', 'explanation' => 'Plugin niet in Aspera-whitelist; bewust of legacy?', 'action' => 'Beoordeel of plugin nodig is, anders deactiveren/verwijderen.' ],
+        'maintenance_mode_active' => [ 'label' => 'Maintenance mode staat aan', 'explanation' => 'Let op: maintenance mode staat nog aan. De site is niet publiek bereikbaar.', 'action' => 'Deactiveer Slim Maintenance Mode zodra de werkzaamheden klaar zijn.' ],
 
         // ── CPT ───────────────────────────────────────────────────────────
         'missing_rest' => [ 'label' => 'CPT zonder REST-API support', 'explanation' => 'show_in_rest=false; CPT niet via REST/Gutenberg/MCP toegankelijk.', 'action' => 'CPT-registratie > zet show_in_rest op true.' ],
@@ -6820,11 +6821,14 @@ add_action( 'rest_api_init', function () {
             // Burst: gratis variant is ook acceptabel
             // Redis Object Cache: optioneel, hosting-afhankelijk, geen verplichting op elke site
             // Duplicator: migratie-/backuptool, situationeel ingezet, gratis en Pro-variant
+            // Slim Maintenance Mode: bewust ingezet tijdens werkzaamheden; niet als extra plugin
+            // flaggen, maar wel apart waarschuwen zodra hij actief is (maintenance_mode_active)
             $whitelist_slugs   = array_keys( $essential );
             $whitelist_slugs[] = 'burst-statistics';
             $whitelist_slugs[] = 'redis-cache';
             $whitelist_slugs[] = 'duplicator';
             $whitelist_slugs[] = 'duplicator-pro';
+            $whitelist_slugs[] = 'slim-maintenance-mode';
 
             $known_status = [];
             foreach ( $essential as $slug => $name ) {
@@ -6901,10 +6905,16 @@ add_action( 'rest_api_init', function () {
                 ];
             }
 
+            // ─── Maintenance mode ──────────────────────────────────────────
+            // Slim Maintenance Mode kent geen eigen instelling: actief = maintenance aan.
+            // Geïnstalleerd maar inactief is de normale toestand en levert geen melding op.
+            $maintenance_active = ! empty( $installed['slim-maintenance-mode']['active'] );
+
             $response = [
-                'status'          => empty( $extra ) ? 'ok' : 'extra_plugins_found',
-                'known_plugins'   => $known_status,
-                'extra_plugins'   => $extra,
+                'status'             => empty( $extra ) ? 'ok' : 'extra_plugins_found',
+                'known_plugins'      => $known_status,
+                'extra_plugins'      => $extra,
+                'maintenance_active' => $maintenance_active,
             ];
 
             if ( $woocommerce !== null ) {
@@ -7350,6 +7360,7 @@ add_action( 'rest_api_init', function () {
                 'aiowps_', 'burst_', 'wpmailsmtp_', 'wpo_',
                 'yoast_', 'redirection_', 'mwai_', 'tm_',
                 'actionscheduler_', 'us_filter_',
+                'us_mcp_', // UpSolution MCP-connector (OAuth clients/codes/tokens)
                 'wc_', // WooCommerce HPOS + analytics tabellen
             ];
 
@@ -10364,6 +10375,7 @@ add_action( 'rest_api_init', function () {
 
                 // plugins/validate
                 'extra_plugin'                => 'observation',
+                'maintenance_mode_active'     => 'warning',
 
                 // cpt/validate
                 'missing_rest'                => 'warning',
@@ -10729,6 +10741,13 @@ add_action( 'rest_api_init', function () {
                         'rule'     => 'extra_plugin',
                         'severity' => 'observation',
                         'detail'   => $p['name'] ?? $p['slug'] ?? '',
+                    ];
+                }
+                if ( ! empty( $plugins['maintenance_active'] ) ) {
+                    $plugin_violations[] = [
+                        'rule'     => 'maintenance_mode_active',
+                        'severity' => 'warning',
+                        'detail'   => 'Slim Maintenance Mode is actief; site niet publiek bereikbaar',
                     ];
                 }
             }
