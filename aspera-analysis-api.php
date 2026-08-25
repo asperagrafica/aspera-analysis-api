@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.3.0
+ * Version: 3.4.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -2138,7 +2138,7 @@ function aspera_admin_page_pdf_export(): void {
 // hernoemen of hergebruiken, anders verschuiven bestaande vinkjes.
 
 const ASPERA_CHECKLIST_PAGE_SLUG = 'aspera-launch-checklist';
-const ASPERA_CHECKLIST_VERSION   = '1.1.0';
+const ASPERA_CHECKLIST_VERSION   = '1.2.0';
 const ASPERA_CHECKLIST_OPTION    = 'aspera_launch_checklist';
 
 /**
@@ -2219,6 +2219,7 @@ function aspera_checklist_definition(): array {
             'seo_titel_tagline'  => 'Site titel en tagline',
             'seo_indexering'     => 'Google Indexering',
             'seo_yoast'          => 'Yoast configuratie',
+            'seo_meta_uniek'     => 'Unieke metatitel en omschrijving voor primaire pagina’s',
             'seo_noindex'        => 'No-index pagina’s',
             'seo_search_console' => 'Search Console configuratie',
             'seo_sitemap'        => 'Sitemap toevoegen',
@@ -2252,7 +2253,7 @@ function aspera_checklist_definition(): array {
         ],
         'Optioneel' => [
             'opt_yoast_acf'          => 'Yoast ACF configuratie',
-            'opt_burst_ga'           => 'Burst / Google Analytics configuratie',
+            'opt_burst_ga'           => 'Google Analytics configuratie',
             'opt_dns_forward'        => 'DNS forward controle',
             'opt_wp_enqueue'         => 'WP Enqueue script toevoegen',
             'opt_afbeeldingformaten' => 'Afbeeldingformaten thema verwijderen',
