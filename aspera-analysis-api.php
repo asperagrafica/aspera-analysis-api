@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.5.0
+ * Version: 3.6.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.5.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.6.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1371,11 +1371,200 @@ function aspera_delete_posts_by_type( string $post_type ): int {
 }
 
 /**
+ * Maximum aantal rijen dat nog in een backup-option wordt vastgelegd voordat
+ * een taxonomy wordt opgeruimd. Daarboven zou de option tientallen megabytes
+ * worden; de opruiming gaat dan door zonder vangnet en meldt dat expliciet.
+ */
+if ( ! defined( 'ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS' ) ) {
+    define( 'ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS', 20000 );
+}
+
+/**
+ * Verzamelt alle plekken die naar een taxonomy-slug verwijzen: post_content,
+ * us_grid_layout-excerpts, ACF field group-locatieregels, ACF taxonomy-velden,
+ * nav menu items en themabestanden.
+ *
+ * Gedeeld tussen /taxonomy/validate (detectie) en de fix-action
+ * 'delete_orphaned_taxonomy' (server-side hercontrole). Beide moeten exact
+ * hetzelfde criterium hanteren: wordt de detectie hier aangepast en de
+ * hercontrole niet, dan biedt de audit een Fix-knop aan die de handler
+ * vervolgens weigert (zie handboek sectie 8).
+ *
+ * @param array<string,string|null>|null $theme_file_cache Vooraf ingelezen themabestanden
+ *                                                        (bestandsnaam => inhoud of null).
+ *                                                        Null: de functie leest ze zelf.
+ * @return array<int,array<string,mixed>>
+ */
+function aspera_taxonomy_references( string $taxonomy, ?array $theme_file_cache = null ): array {
+    global $wpdb;
+
+    // ACF-interne post types leveren geen echte verwijzing op via post_content —
+    // de veld- en groepsdefinities worden hieronder gericht gecontroleerd.
+    $acf_internal_types = [
+        'acf-taxonomy', 'acf-post-type', 'acf-field-group', 'acf-field',
+        'acf-ui-options-page',
+    ];
+
+    if ( $theme_file_cache === null ) {
+        $theme_dir        = get_stylesheet_directory();
+        $theme_file_cache = [];
+        foreach ( [ 'style.css', 'functions.php', 'custom.css' ] as $tf ) {
+            $tf_path = $theme_dir . '/' . $tf;
+            $theme_file_cache[ $tf ] = file_exists( $tf_path ) ? file_get_contents( $tf_path ) : null;
+        }
+    }
+
+    $references = [];
+    $like       = '%' . $wpdb->esc_like( $taxonomy ) . '%';
+
+    // Check 1: post_content referenties (alle relevante post types)
+    $content_refs = $wpdb->get_results( $wpdb->prepare(
+        "SELECT ID, post_type, post_title FROM {$wpdb->posts}
+         WHERE post_status IN ('publish','draft','private')
+         AND post_content LIKE %s",
+        $like
+    ) );
+    foreach ( $content_refs as $ref ) {
+        if ( in_array( $ref->post_type, $acf_internal_types, true ) ) continue;
+        $references[] = [
+            'location'   => 'post_content',
+            'post_id'    => (int) $ref->ID,
+            'post_type'  => $ref->post_type,
+            'post_title' => $ref->post_title,
+        ];
+    }
+
+    // Check 2: post_excerpt (us_grid_layout)
+    $excerpt_refs = $wpdb->get_results( $wpdb->prepare(
+        "SELECT ID, post_title FROM {$wpdb->posts}
+         WHERE post_type = 'us_grid_layout'
+         AND post_excerpt LIKE %s",
+        $like
+    ) );
+    foreach ( $excerpt_refs as $ref ) {
+        $references[] = [
+            'location'   => 'post_excerpt (grid layout)',
+            'post_id'    => (int) $ref->ID,
+            'post_title' => $ref->post_title,
+        ];
+    }
+
+    // Check 3: ACF field group locatieregels
+    $fg_refs = $wpdb->get_results( $wpdb->prepare(
+        "SELECT ID, post_title FROM {$wpdb->posts}
+         WHERE post_type = 'acf-field-group'
+         AND post_content LIKE %s",
+        $like
+    ) );
+    foreach ( $fg_refs as $ref ) {
+        $references[] = [
+            'location'   => 'acf-field-group (location rule)',
+            'post_id'    => (int) $ref->ID,
+            'post_title' => $ref->post_title,
+        ];
+    }
+
+    // Check 4: ACF taxonomy-type velden
+    $field_refs = $wpdb->get_results( $wpdb->prepare(
+        "SELECT ID, post_title, post_excerpt FROM {$wpdb->posts}
+         WHERE post_type = 'acf-field'
+         AND post_content LIKE %s
+         AND post_content LIKE '%%\"taxonomy\"%%'",
+        $like
+    ) );
+    foreach ( $field_refs as $ref ) {
+        $references[] = [
+            'location'   => 'acf-field (taxonomy field type)',
+            'post_id'    => (int) $ref->ID,
+            'field_slug' => $ref->post_excerpt,
+            'post_title' => $ref->post_title,
+        ];
+    }
+
+    // Check 5: Nav menu items
+    $nav_refs = $wpdb->get_results( $wpdb->prepare(
+        "SELECT p.ID, p.post_title FROM {$wpdb->posts} p
+         JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
+         WHERE p.post_type = 'nav_menu_item'
+         AND pm.meta_key = '_menu_item_object'
+         AND pm.meta_value = %s",
+        $taxonomy
+    ) );
+    foreach ( $nav_refs as $ref ) {
+        $references[] = [
+            'location'   => 'nav_menu_item',
+            'post_id'    => (int) $ref->ID,
+            'post_title' => $ref->post_title,
+        ];
+    }
+
+    // Check 6: Theme bestanden (uit cache)
+    $theme_files_hit = [];
+    foreach ( $theme_file_cache as $file => $content ) {
+        if ( $content !== null && strpos( $content, $taxonomy ) !== false ) {
+            $theme_files_hit[] = $file;
+        }
+    }
+    if ( ! empty( $theme_files_hit ) ) {
+        $references[] = [
+            'location' => 'theme_files',
+            'files'    => $theme_files_hit,
+        ];
+    }
+
+    return $references;
+}
+
+/**
+ * Legt de rijen vast die bij het opruimen van een taxonomy verdwijnen, in een
+ * option met autoload=no. De opruiming is daarmee met de hand terug te zetten;
+ * zonder dit vangnet is hij definitief.
+ *
+ * @return string|null Optienaam, of null wanneer er niets vast te leggen viel
+ *                     of de omvang boven ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS lag.
+ */
+function aspera_taxonomy_snapshot( string $taxonomy_slug, array $term_ids, array $tt_ids ): ?string {
+    global $wpdb;
+
+    if ( empty( $term_ids ) ) return null;
+
+    $ids_in   = implode( ',', array_map( 'intval', $term_ids ) );
+    $ttids_in = implode( ',', array_map( 'intval', $tt_ids ) );
+
+    $rows = [
+        'terms'              => $wpdb->get_results( "SELECT * FROM {$wpdb->terms} WHERE term_id IN ($ids_in)", ARRAY_A ),
+        'term_taxonomy'      => $wpdb->get_results( "SELECT * FROM {$wpdb->term_taxonomy} WHERE term_taxonomy_id IN ($ttids_in)", ARRAY_A ),
+        'termmeta'           => $wpdb->get_results( "SELECT * FROM {$wpdb->termmeta} WHERE term_id IN ($ids_in)", ARRAY_A ),
+        'term_relationships' => $wpdb->get_results( "SELECT * FROM {$wpdb->term_relationships} WHERE term_taxonomy_id IN ($ttids_in)", ARRAY_A ),
+    ];
+
+    $total = 0;
+    foreach ( $rows as $set ) {
+        $total += count( (array) $set );
+    }
+    if ( $total > ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS ) return null;
+
+    $option = 'aspera_taxonomy_backup_' . $taxonomy_slug;
+    update_option( $option, [
+        'taxonomy'       => $taxonomy_slug,
+        'created'        => current_time( 'mysql' ),
+        'plugin_version' => ASPERA_ANALYSIS_API_VERSION,
+        'row_count'      => $total,
+        'rows'           => $rows,
+    ], false );
+
+    return $option;
+}
+
+/**
  * Verwijdert alle terms/term_taxonomy/termmeta/term_relationships voor een
  * niet-geregistreerde taxonomy (hard delete). Gedeeld tussen de fix-actions
  * 'delete_orphaned_taxonomy' en 'delete_orphaned_taxonomy_and_posts'.
  *
- * @return array{terms:int,relationships:int}
+ * Legt vooraf een backup-option vast (zie aspera_taxonomy_snapshot()). Posts
+ * blijven ongemoeid: alleen hun koppeling met deze taxonomy verdwijnt.
+ *
+ * @return array{terms:int,relationships:int,snapshot_option:string|null}
  */
 function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
     global $wpdb;
@@ -1385,6 +1574,9 @@ function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
     ) );
     $term_ids          = array_map( fn( $r ) => (int) $r->term_id, $rows );
     $term_taxonomy_ids = array_map( fn( $r ) => (int) $r->term_taxonomy_id, $rows );
+
+    // Vangnet vóór de eerste DELETE: hierna is er niets meer om vast te leggen.
+    $snapshot_option = aspera_taxonomy_snapshot( $taxonomy_slug, $term_ids, $term_taxonomy_ids );
 
     $relationships_deleted = 0;
     if ( ! empty( $term_taxonomy_ids ) ) {
@@ -1400,7 +1592,11 @@ function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
         $ids_in = implode( ',', $term_ids );
         $wpdb->query( "DELETE FROM {$wpdb->terms} WHERE term_id IN ($ids_in) AND term_id NOT IN (SELECT term_id FROM {$wpdb->term_taxonomy})" );
     }
-    return [ 'terms' => count( $term_ids ), 'relationships' => $relationships_deleted ];
+    return [
+        'terms'           => count( $term_ids ),
+        'relationships'   => $relationships_deleted,
+        'snapshot_option' => $snapshot_option,
+    ];
 }
 
 /**
@@ -3189,15 +3385,32 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             if ( ! $taxonomy_slug ) {
                 wp_send_json_error( 'taxonomy_slug ontbreekt.' );
             }
-            // Re-verify: taxonomy mag niet (weer) geregistreerd zijn.
+            // Re-verify 1: taxonomy mag niet (weer) geregistreerd zijn.
             if ( taxonomy_exists( $taxonomy_slug ) ) {
                 wp_send_json_error( 'Taxonomy "' . $taxonomy_slug . '" is weer geregistreerd — verwijdering geweigerd.' );
+            }
+            // Re-verify 2: dezelfde referentie-check als /taxonomy/validate.
+            // De fix wordt sinds v3.6.0 ook aangeboden wanneer er nog posts aan
+            // hangen; dan is het ontbreken van verwijzingen de enige waarborg
+            // dat er niets kapotgaat.
+            $tax_refs = aspera_taxonomy_references( $taxonomy_slug );
+            if ( ! empty( $tax_refs ) ) {
+                $ref_locations = array_unique( array_map( fn( $r ) => $r['location'] ?? 'onbekend', $tax_refs ) );
+                wp_send_json_error(
+                    'Taxonomy "' . $taxonomy_slug . '" wordt nog gerefereerd op ' . count( $tax_refs )
+                    . ' plek(ken) (' . implode( ', ', $ref_locations ) . ') — verwijdering geweigerd.'
+                );
             }
             $tax_result = aspera_delete_taxonomy_data( $taxonomy_slug );
             if ( $tax_result['terms'] === 0 ) {
                 wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" had geen terms meer (al opgeruimd?).' ] );
             }
-            wp_send_json_success( [ 'message' => 'Taxonomy "' . $taxonomy_slug . '" verwijderd (' . $tax_result['terms'] . ' terms).' ] );
+            $tax_message = 'Taxonomy "' . $taxonomy_slug . '" opgeruimd: ' . $tax_result['terms']
+                           . ' terms en ' . $tax_result['relationships'] . ' koppeling(en) verwijderd, posts ongemoeid.';
+            $tax_message .= $tax_result['snapshot_option']
+                ? ' Backup in option "' . $tax_result['snapshot_option'] . '".'
+                : ' Let op: geen backup vastgelegd (te veel rijen).';
+            wp_send_json_success( [ 'message' => $tax_message ] );
             break;
 
         case 'delete_orphaned_taxonomy_and_posts':
@@ -4245,6 +4458,12 @@ function aspera_dashboard_widget_render(): void {
                                 echo 'allow null inschakelen op page-link <code>' . esc_html( $fix['label'] ?? $fix['field_key'] ?? '' ) . '</code>';
                             } elseif ( $fa === 'disable_wpb_modules' ) {
                                 echo 'alle WPBakery Module Manager modules uitschakelen';
+                            } elseif ( $fa === 'delete_orphaned_taxonomy' ) {
+                                echo 'taxonomy <code>' . esc_html( $fix['taxonomy_slug'] ?? '' ) . '</code> opruimen';
+                                if ( ! empty( $fix['keep_posts'] ) ) {
+                                    echo ' (' . (int) ( $fix['terms'] ?? 0 ) . ' terms, ' . (int) ( $fix['relationships'] ?? 0 )
+                                         . ' koppelingen; ' . (int) ( $fix['linked_posts_count'] ?? 0 ) . ' posts blijven bestaan)';
+                                }
                             } elseif ( $fa === 'delete_orphaned_taxonomy_and_posts' ) {
                                 echo 'taxonomy <code>' . esc_html( $fix['taxonomy_slug'] ?? '' ) . '</code> + posts van type <code>' . esc_html( $fix['post_type'] ?? '' ) . '</code> verwijderen';
                             } elseif ( $fa === 'delete_orphaned_post_type_posts' ) {
@@ -4874,7 +5093,15 @@ function aspera_dashboard_widget_script(): void {
                 } else if (fix.action === 'drop_orphaned_table') {
                     msg += 'Tabel "' + fix.table + '" wordt onomkeerbaar gedropt (DROP TABLE).\n\nPlugin: ' + (fix.plugin_slug || 'onbekend') + '\n\nDeze actie is NIET terug te draaien.';
                 } else if (fix.action === 'delete_orphaned_taxonomy') {
-                    msg += 'Taxonomy "' + fix.taxonomy_slug + '" verwijderen: alle terms, termmeta en relaties worden onomkeerbaar verwijderd.';
+                    if (fix.keep_posts) {
+                        msg += 'Taxonomy "' + fix.taxonomy_slug + '" opruimen.\n\n'
+                             + fix.terms + ' terms en ' + fix.relationships + ' koppeling(en) worden verwijderd.\n'
+                             + 'De ' + fix.linked_posts_count + ' gekoppelde post(s) blijven bestaan; alleen hun koppeling met deze taxonomy verdwijnt.\n\n'
+                             + 'Er wordt vooraf een backup weggeschreven naar de option "aspera_taxonomy_backup_' + fix.taxonomy_slug + '".';
+                    } else {
+                        msg += 'Taxonomy "' + fix.taxonomy_slug + '" verwijderen: alle terms, termmeta en relaties worden verwijderd.\n\n'
+                             + 'Er wordt vooraf een backup weggeschreven naar de option "aspera_taxonomy_backup_' + fix.taxonomy_slug + '".';
+                    }
                 } else if (fix.action === 'enable_page_link_allow_null') {
                     msg += 'Allow null inschakelen op page-link "' + (fix.label || fix.field_key) + '".\n\nHet veld kan daarna leeggelaten worden.';
                 } else if (fix.action === 'disable_wpb_modules') {
@@ -9999,12 +10226,6 @@ add_action( 'rest_api_init', function () {
                 'wpconsent_category'     => 'WPConsent',
             ];
 
-            // ── ACF-interne post types — uitsluiten van referentie-checks ─
-            $acf_internal_types = [
-                'acf-taxonomy', 'acf-post-type', 'acf-field-group', 'acf-field',
-                'acf-ui-options-page',
-            ];
-
             // ── 1. Alle taxonomieën uit de database ──────────────────────
             $db_taxonomies = $wpdb->get_col(
                 "SELECT DISTINCT taxonomy FROM {$wpdb->term_taxonomy}"
@@ -10030,105 +10251,9 @@ add_action( 'rest_api_init', function () {
                 if ( taxonomy_exists( $taxonomy ) ) continue;
 
                 // ── Taxonomy is NIET geregistreerd — referenties checken ─
-
-                $references = [];
-                $esc_tax    = $wpdb->esc_like( $taxonomy );
-                $like       = '%' . $esc_tax . '%';
-
-                // Check 1: post_content referenties (alle relevante post types)
-                $content_refs = $wpdb->get_results( $wpdb->prepare(
-                    "SELECT ID, post_type, post_title FROM {$wpdb->posts}
-                     WHERE post_status IN ('publish','draft','private')
-                     AND post_content LIKE %s",
-                    $like
-                ) );
-                foreach ( $content_refs as $ref ) {
-                    if ( in_array( $ref->post_type, $acf_internal_types, true ) ) continue;
-                    $references[] = [
-                        'location'   => 'post_content',
-                        'post_id'    => (int) $ref->ID,
-                        'post_type'  => $ref->post_type,
-                        'post_title' => $ref->post_title,
-                    ];
-                }
-
-                // Check 2: post_excerpt (us_grid_layout)
-                $excerpt_refs = $wpdb->get_results( $wpdb->prepare(
-                    "SELECT ID, post_title FROM {$wpdb->posts}
-                     WHERE post_type = 'us_grid_layout'
-                     AND post_excerpt LIKE %s",
-                    $like
-                ) );
-                foreach ( $excerpt_refs as $ref ) {
-                    $references[] = [
-                        'location'   => 'post_excerpt (grid layout)',
-                        'post_id'    => (int) $ref->ID,
-                        'post_title' => $ref->post_title,
-                    ];
-                }
-
-                // Check 3: ACF field group locatieregels
-                $fg_refs = $wpdb->get_results( $wpdb->prepare(
-                    "SELECT ID, post_title FROM {$wpdb->posts}
-                     WHERE post_type = 'acf-field-group'
-                     AND post_content LIKE %s",
-                    $like
-                ) );
-                foreach ( $fg_refs as $ref ) {
-                    $references[] = [
-                        'location'   => 'acf-field-group (location rule)',
-                        'post_id'    => (int) $ref->ID,
-                        'post_title' => $ref->post_title,
-                    ];
-                }
-
-                // Check 4: ACF taxonomy-type velden
-                $field_refs = $wpdb->get_results( $wpdb->prepare(
-                    "SELECT ID, post_title, post_excerpt FROM {$wpdb->posts}
-                     WHERE post_type = 'acf-field'
-                     AND post_content LIKE %s
-                     AND post_content LIKE '%%\"taxonomy\"%%'",
-                    $like
-                ) );
-                foreach ( $field_refs as $ref ) {
-                    $references[] = [
-                        'location'   => 'acf-field (taxonomy field type)',
-                        'post_id'    => (int) $ref->ID,
-                        'field_slug' => $ref->post_excerpt,
-                        'post_title' => $ref->post_title,
-                    ];
-                }
-
-                // Check 5: Nav menu items
-                $nav_refs = $wpdb->get_results( $wpdb->prepare(
-                    "SELECT p.ID, p.post_title FROM {$wpdb->posts} p
-                     JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
-                     WHERE p.post_type = 'nav_menu_item'
-                     AND pm.meta_key = '_menu_item_object'
-                     AND pm.meta_value = %s",
-                    $taxonomy
-                ) );
-                foreach ( $nav_refs as $ref ) {
-                    $references[] = [
-                        'location'   => 'nav_menu_item',
-                        'post_id'    => (int) $ref->ID,
-                        'post_title' => $ref->post_title,
-                    ];
-                }
-
-                // Check 6: Theme bestanden (uit cache)
-                $theme_files_hit = [];
-                foreach ( $theme_file_cache as $file => $content ) {
-                    if ( $content !== null && strpos( $content, $taxonomy ) !== false ) {
-                        $theme_files_hit[] = $file;
-                    }
-                }
-                if ( ! empty( $theme_files_hit ) ) {
-                    $references[] = [
-                        'location' => 'theme_files',
-                        'files'    => $theme_files_hit,
-                    ];
-                }
+                // Gedeelde helper: de fix-action delete_orphaned_taxonomy voert
+                // exact dezelfde check uit als server-side hercontrole.
+                $references = aspera_taxonomy_references( $taxonomy, $theme_file_cache );
 
                 // ── Term info ophalen ────────────────────────────────────
                 $terms = $wpdb->get_results( $wpdb->prepare(
@@ -10292,6 +10417,29 @@ add_action( 'rest_api_init', function () {
                                 'description'   => 'Taxonomy "' . $taxonomy . '" + ' . count( $linked_posts ) . ' post(s) van type "' . $dep_post_type . '" verwijderen (herkomst: ' . $known_pt[ $dep_post_type ]['plugin'] . ', plugin inactief)',
                             ];
                         }
+                    }
+
+                    // Geen dead-plugin herkomst gevonden? Dan blijven de posts
+                    // staan en is alleen de taxonomy-data verweesd: terms en
+                    // koppelingen weg, posts ongemoeid. Alleen aanbieden zolang
+                    // niets meer naar de taxonomy verwijst (per definitie zo bij
+                    // deze status) en er geen bekende plugin-herkomst is — een
+                    // tijdelijk gedeactiveerde plugin mag geen koppelingen
+                    // verliezen die na heractivering weer nodig zijn.
+                    if ( ! isset( $violation_entry['proposed_fix'] )
+                         && ( $known_plugins[ $taxonomy ] ?? null ) === null ) {
+                        $violation_entry['proposed_fix'] = [
+                            'fixable'            => true,
+                            'action'             => 'delete_orphaned_taxonomy',
+                            'taxonomy_slug'      => $taxonomy,
+                            'keep_posts'         => true,
+                            'terms'              => $term_count,
+                            'relationships'      => $total_rels,
+                            'linked_posts_count' => count( $linked_posts ),
+                            'description'        => 'Taxonomy "' . $taxonomy . '" opruimen: ' . $term_count . ' terms en '
+                                                    . $total_rels . ' koppeling(en) verwijderen; '
+                                                    . count( $linked_posts ) . ' gekoppelde post(s) blijven bestaan',
+                        ];
                     }
                 }
                 $violations[] = $violation_entry;
