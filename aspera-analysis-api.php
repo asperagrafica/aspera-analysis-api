@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.8.0
+ * Version: 3.9.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.8.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.9.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -898,6 +898,41 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_image',
                     'detail' => 'image="' . $image . '" — hardcoded media-ID; gebruik {{veldslug}} of een ACF-veldverwijzing',
                     'location' => $current_location ];
+            }
+
+            // ─── us_image_wrong_size ──────────────────────────────────
+            // "full" is de enige toegestane waarde. Afgeleide us_*-formaten
+            // verwijzen naar theme-registraties die niet meer bestaan zodra de
+            // Additional Image Sizes zijn opgeschoond (zie image_sizes_registered);
+            // de verwijzing is dan dood en het element toont afwijkend.
+            $img_size = $attr( 'size' );
+            if ( $img_size === null ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'us_image_wrong_size',
+                    'detail' => 'size-attribuut ontbreekt — enige toegestane waarde is "full"',
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'   => true,
+                        'action'    => 'add_attribute',
+                        'attribute' => 'size',
+                        'value'     => 'full',
+                        'before'    => $full_sc,
+                        'after'     => substr( $full_sc, 0, -1 ) . ' size="full"]',
+                    ] ];
+            } elseif ( $img_size !== 'full' ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'us_image_wrong_size',
+                    'detail' => 'size="' . $img_size . '" — enige toegestane waarde is "full"'
+                                . ( strpos( $img_size, 'us_' ) === 0
+                                    ? '; verwijst naar een theme-registratie die na het opschonen van Additional Image Sizes niet meer bestaat'
+                                    : '' ),
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'   => true,
+                        'action'    => 'replace_value',
+                        'attribute' => 'size',
+                        'value'     => 'full',
+                        'before'    => $full_sc,
+                        'after'     => str_replace( 'size="' . $img_size . '"', 'size="full"', $full_sc ),
+                    ] ];
             }
         }
 
@@ -2467,6 +2502,7 @@ function aspera_site_health_test(): array {
         'naming'           => 'Naamgevingsconventies',
         'theme_check'   => 'Framework configuratie',
         'wp_settings'   => 'WP Core configuratie',
+        'media'         => 'Media-instellingen',
         'cache'         => 'Cache',
     ];
 
@@ -3804,6 +3840,15 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
                     return [ 'url' => admin_url( 'themes.php' ), 'title' => 'Themes' ];
             }
 
+        case 'media':
+            switch ( $rule ) {
+                case 'wp_image_size_nonzero':
+                case 'wp_thumbnail_crop_enabled':
+                    return [ 'url' => admin_url( 'options-media.php' ), 'title' => 'Media settings' ];
+                default:
+                    return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Framework theme options' ];
+            }
+
         case 'wpb_modules':
             if ( $rule === 'beheerder_post_types_not_disabled' ) {
                 return [ 'url' => admin_url( 'admin.php?page=vc-roles' ), 'title' => 'WPBakery Role Manager' ];
@@ -3848,8 +3893,8 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field' ],
-        'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
+        'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size','hardcoded_border_radius' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
         'plugins' => [ 'extra_plugin','maintenance_mode_active' ],
@@ -3871,6 +3916,7 @@ function aspera_get_rules_per_category(): array {
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
         'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing' ],
+        'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
     ];
@@ -3945,6 +3991,7 @@ function aspera_get_rule_context(): array {
         // ── Hardcoded content ─────────────────────────────────────────────
         'hardcoded_label' => [ 'label' => 'Hardcoded button-label in shortcode', 'explanation' => 'Een button heeft een vaste tekst i.p.v. via ACF-veld; niet vertaalbaar of beheerbaar via dashboard.', 'action' => 'Vervang door us_post_custom_field shortcode met ACF-koppeling.' ],
         'hardcoded_image' => [ 'label' => 'Hardcoded afbeelding (us_image)', 'explanation' => 'Image-shortcode heeft vaste image_id in plaats van ACF.', 'action' => 'Vervang door ACF-gekoppelde image, of zet via us_image image="{{acf_field}}".' ],
+        'us_image_wrong_size' => [ 'label' => 'us_image met afwijkende size', 'explanation' => 'Het size-attribuut wijkt af van "full" of ontbreekt. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size="full" op het us_image element.' ],
         'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
         'hardcoded_text' => [ 'label' => 'Hardcoded tekst in shortcode', 'explanation' => 'Tekst is vast in shortcode i.p.v. via ACF.', 'action' => 'Vervang door ACF-veld referentie.' ],
         'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
@@ -3990,6 +4037,11 @@ function aspera_get_rule_context(): array {
         'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
         'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Het framework theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul site_key in.' ],
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
+        'image_sizes_registered' => [ 'label' => 'Additional image sizes geregistreerd', 'explanation' => 'Theme Options registreert extra afbeeldingsformaten. Elk formaat levert per upload een extra bestand op in de uploads-map; de map groeit onnodig en de formaten worden zelden gebruikt.', 'action' => 'Verwijder alle registraties uit Theme Options > Image Sizes. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
+        'big_image_threshold_wrong' => [ 'label' => 'Big image threshold afwijkend', 'explanation' => 'WordPress schaalt uploads terug tot deze breedte. De default 2560px levert onnodig zware originelen op.', 'action' => 'Zet big_image_size_threshold op 1600px in Theme Options > More Options.' ],
+        'delete_unused_images_disabled' => [ 'label' => 'Delete unused image thumbnails uit', 'explanation' => 'Bij het verwijderen van een afbeelding blijven de gegenereerde thumbnails achter in de uploads-map.', 'action' => 'Zet "Delete unused image thumbnails" aan in Theme Options > More Options.' ],
+        'wp_image_size_nonzero' => [ 'label' => 'WP image size niet op nul', 'explanation' => 'Een of meer image sizes in Settings > Media staan op een waarde ongelijk nul. WordPress genereert dan per upload een afgeleid bestand per formaat.', 'action' => 'Zet Thumbnail, Medium en Large in Settings > Media alle op 0. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
+        'wp_thumbnail_crop_enabled' => [ 'label' => 'Thumbnail crop aangevinkt', 'explanation' => 'De thumbnail wordt naar exacte afmetingen bijgesneden in plaats van proportioneel geschaald.', 'action' => 'Vink "Crop thumbnail to exact dimensions" uit in Settings > Media.' ],
         'permalink_structure_invalid' => [ 'label' => 'Permalink-structuur niet conform', 'explanation' => 'Permalink-structure is iets anders dan /%postname%/ of /%category%/%postname%/.', 'action' => 'Settings > Permalinks > kies "Post name".' ],
         'posts_per_page_invalid' => [ 'label' => 'Posts per pagina afwijkend', 'explanation' => 'Settings > Reading > Blog pages show at most ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
         'posts_per_rss_invalid' => [ 'label' => 'Syndication feed-aantal afwijkend', 'explanation' => 'Syndication feeds show ≠ 12.', 'action' => 'Settings > Reading > stel in op 12.' ],
@@ -4090,7 +4142,8 @@ function aspera_get_rule_context(): array {
         'image_missing_homepage_link' => [ 'label' => 'Header-image zonder homepage-link', 'explanation' => 'Logo-image klikt niet naar home.', 'action' => 'Voeg homepage-link toe.' ],
         'image_has_ratio' => [ 'label' => 'Header-image met ratio-attribuut', 'explanation' => 'Image-ratio is gezet; overschrijft natural ratio.', 'action' => 'Verwijder ratio.' ],
         'image_has_style' => [ 'label' => 'Header-image met style-attribuut', 'explanation' => 'Image heeft inline style.', 'action' => 'Verwijder.' ],
-        'image_wrong_size' => [ 'label' => 'Header-image verkeerde grootte', 'explanation' => 'Image-size attribuut afwijkend van conventie.', 'action' => 'Pas size-attribuut aan.' ],
+        'image_wrong_size' => [ 'label' => 'Image met afwijkende size', 'explanation' => 'Het size-attribuut van een image-element in een header of post layout wijkt af van "full", ontbreekt of is leeg. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size op "full" in de header- of grid-builder.' ],
+        'hardcoded_border_radius' => [ 'label' => 'Post layout met hardcoded border-radius', 'explanation' => 'De grid layout zet een vaste border-radius in plaats van de site-variabele; de afronding loopt uit de pas zodra de thema-waarde wijzigt.', 'action' => 'Zet border_radius op var(--site-border-radius), of op 0 wanneer de layout bewust geen afronding heeft.' ],
 
         // ── Header config ─────────────────────────────────────────────────
         'custom_breakpoint_invalid_order' => [ 'label' => 'Custom breakpoint volgorde ongeldig', 'explanation' => 'Header custom-breakpoint logischerwijs niet in volgorde.', 'action' => 'Header builder > breakpoints > pas volgorde aan.' ],
@@ -4152,6 +4205,7 @@ function aspera_dashboard_widget_render(): void {
         'naming'           => 'Naamgevingsconventies',
         'theme_check'      => 'Framework configuratie',
         'wp_settings'      => 'WP Core configuratie',
+        'media'            => 'Media-instellingen',
         'cache'            => 'Cache',
     ];
 
@@ -8465,7 +8519,8 @@ add_action( 'rest_api_init', function () {
      * - image_missing_homepage_link   — image:* (us_header) link is niet {"type":"homepage"}
      * - image_has_ratio               — image:* (us_header) has_ratio = 1
      * - image_has_style               — image:* (us_header) style is niet leeg
-     * - image_wrong_size              — image:* (us_header) size is niet "full"
+     * - image_wrong_size              — image:* (us_header + us_grid_layout) size is niet "full", ontbreekt of is leeg
+     * - hardcoded_border_radius       — default.options.border_radius (us_grid_layout) is een hardcoded lengte
      */
     register_rest_route( 'aspera/v1', '/grid/validate', [
         'methods'             => 'GET',
@@ -8645,12 +8700,29 @@ add_action( 'rest_api_init', function () {
                             ];
                         }
 
-                        // image_wrong_size — size moet "full" zijn
-                        if ( ( $element['size'] ?? '' ) !== 'full' ) {
+                    }
+
+                    // ─── image_wrong_size (us_header + us_grid_layout) ───────
+                    // "full" is de enige toegestane waarde. Afgeleide us_*-formaten
+                    // verwijzen naar theme-registraties die na het opschonen van de
+                    // Additional Image Sizes niet meer bestaan (zie image_sizes_registered);
+                    // de verwijzing is dan dood en de afbeelding toont afwijkend.
+                    if ( $element_type === 'image' ) {
+                        $img_size = $element['size'] ?? null;
+                        if ( $img_size === null || $img_size === '' ) {
                             $violations[] = [
                                 'element' => $element_key,
                                 'rule'    => 'image_wrong_size',
-                                'detail'  => 'size="' . ( $element['size'] ?? '' ) . '" — enige toegestane waarde is "full"',
+                                'detail'  => 'size ontbreekt of is leeg — enige toegestane waarde is "full"',
+                            ];
+                        } elseif ( $img_size !== 'full' ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'image_wrong_size',
+                                'detail'  => 'size="' . $img_size . '" — enige toegestane waarde is "full"'
+                                             . ( strpos( (string) $img_size, 'us_' ) === 0
+                                                 ? '; verwijst naar een theme-registratie die na het opschonen van Additional Image Sizes niet meer bestaat'
+                                                 : '' ),
                             ];
                         }
                     }
@@ -8772,6 +8844,21 @@ add_action( 'rest_api_init', function () {
                             'element' => $element_key,
                             'rule'    => 'responsive_hide_detected',
                             'detail'  => 'verborgen op: ' . implode( ', ', $el_hide_bps ),
+                        ];
+                    }
+                }
+
+                // ─── hardcoded_border_radius (us_grid_layout, default.options) ──
+                // Post layouts moeten de site-brede radius-variabele erven; een
+                // hardcoded lengte loopt uit de pas zodra de thema-waarde wijzigt.
+                if ( $post->post_type === 'us_grid_layout' ) {
+                    $radius = (string) ( $data['default']['options']['border_radius'] ?? '' );
+                    if ( $radius !== '' && (float) $radius != 0
+                         && $radius !== 'var(--site-border-radius)' ) {
+                        $violations[] = [
+                            'element' => 'default.options',
+                            'rule'    => 'hardcoded_border_radius',
+                            'detail'  => 'border_radius="' . $radius . '" — hardcoded waarde; gebruik var(--site-border-radius)',
                         ];
                     }
                 }
@@ -10908,13 +10995,22 @@ add_action( 'rest_api_init', function () {
                 'duplicate_acf_fields'        => 'warning',
                 'unused_acf_field'            => 'warning',
                 'unknown_acf_field'           => 'error',
+                'us_image_wrong_size'         => 'warning',
 
                 // grid/validate — image:* (us_header only)
                 'image_lazy_loading_enabled'  => 'error',
                 'image_missing_homepage_link' => 'error',
                 'image_has_ratio'             => 'error',
                 'image_has_style'             => 'error',
-                'image_wrong_size'            => 'error',
+                'image_wrong_size'            => 'warning',
+                'hardcoded_border_radius'     => 'warning',
+
+                // media — framework + WP core media-instellingen
+                'image_sizes_registered'        => 'warning',
+                'big_image_threshold_wrong'     => 'warning',
+                'delete_unused_images_disabled' => 'warning',
+                'wp_image_size_nonzero'         => 'warning',
+                'wp_thumbnail_crop_enabled'     => 'warning',
 
                 // colors/validate
                 'deprecated_hex_var'          => 'observation',
@@ -11153,6 +11249,7 @@ add_action( 'rest_api_init', function () {
                 'acf_locations'    =>   5,
                 'theme_check'      =>   5,
                 'wp_settings'      =>  10,
+                'media'            =>  10,
                 'cache'            =>   5,
             ];
 
@@ -11918,6 +12015,95 @@ add_action( 'rest_api_init', function () {
             $categories['theme_check'] = [
                 'violation_count' => count( $theme_violations ),
                 'violations'      => $theme_violations,
+                'error'           => null,
+            ];
+
+            // ── 24b. Media-instellingen ──────────────────────────────────
+            // Framework (Theme Options) en WP core (Settings > Media) samen:
+            // beide bepalen hoeveel afgeleide bestanden elke upload oplevert.
+            $media_violations = [];
+
+            $media_raw  = get_option( 'usof_options_Impreza', [] );
+            $media_opts = is_array( $media_raw ) ? $media_raw : ( is_string( $media_raw ) ? maybe_unserialize( $media_raw ) : [] );
+            if ( is_array( $media_opts ) && ! empty( $media_opts ) ) {
+
+                // image_sizes_registered — img_size moet leeg zijn
+                $img_sizes = $media_opts['img_size'] ?? [];
+                if ( is_array( $img_sizes ) && ! empty( $img_sizes ) ) {
+                    $size_list = [];
+                    foreach ( $img_sizes as $sz ) {
+                        if ( ! is_array( $sz ) ) continue;
+                        $size_list[] = ( $sz['width'] ?? '?' ) . '×' . ( $sz['height'] ?? '?' )
+                                       . ( ! empty( $sz['crop'] ) ? ' (crop)' : '' );
+                    }
+                    $media_violations[] = [
+                        'rule'     => 'image_sizes_registered',
+                        'severity' => 'warning',
+                        'detail'   => 'img_size bevat ' . count( $img_sizes ) . ' registratie(s) — '
+                                      . implode( ', ', $size_list )
+                                      . ' — additional image sizes zijn verboden; elke registratie levert per upload een extra bestand in uploads/',
+                    ];
+                }
+
+                // big_image_threshold_wrong — moet exact "1600px" zijn
+                $threshold = (string) ( $media_opts['big_image_size_threshold'] ?? '' );
+                if ( $threshold !== '1600px' ) {
+                    $media_violations[] = [
+                        'rule'     => 'big_image_threshold_wrong',
+                        'severity' => 'warning',
+                        'detail'   => 'big_image_size_threshold="' . $threshold . '" (verwacht: "1600px")',
+                    ];
+                }
+
+                // delete_unused_images_disabled — moet aan staan
+                if ( ( $media_opts['delete_unused_images'] ?? 0 ) != 1 ) {
+                    $media_violations[] = [
+                        'rule'     => 'delete_unused_images_disabled',
+                        'severity' => 'warning',
+                        'detail'   => 'delete_unused_images staat uit — verwijderde afbeeldingen laten hun thumbnails achter in uploads/',
+                    ];
+                }
+            }
+
+            // wp_image_size_nonzero — alle zichtbare WP core image sizes moeten 0 zijn.
+            // medium_large_size_w blijft bewust buiten scope: die heeft geen UI-veld
+            // in Settings > Media en is dus niet door de beheerder op te lossen.
+            $wp_image_sizes = [
+                'thumbnail_size_w' => 'Thumbnail width',
+                'thumbnail_size_h' => 'Thumbnail height',
+                'medium_size_w'    => 'Medium max width',
+                'medium_size_h'    => 'Medium max height',
+                'large_size_w'     => 'Large max width',
+                'large_size_h'     => 'Large max height',
+            ];
+            $nonzero_sizes = [];
+            foreach ( $wp_image_sizes as $opt_key => $opt_label ) {
+                $opt_val = (int) get_option( $opt_key, 0 );
+                if ( $opt_val !== 0 ) {
+                    $nonzero_sizes[] = $opt_label . '=' . $opt_val;
+                }
+            }
+            if ( ! empty( $nonzero_sizes ) ) {
+                $media_violations[] = [
+                    'rule'     => 'wp_image_size_nonzero',
+                    'severity' => 'warning',
+                    'detail'   => implode( ', ', $nonzero_sizes )
+                                  . ' — alle image sizes in Settings > Media moeten 0 zijn; elk formaat levert per upload een extra bestand in uploads/',
+                ];
+            }
+
+            // wp_thumbnail_crop_enabled — crop moet uitgevinkt zijn
+            if ( ! empty( get_option( 'thumbnail_crop', '' ) ) ) {
+                $media_violations[] = [
+                    'rule'     => 'wp_thumbnail_crop_enabled',
+                    'severity' => 'warning',
+                    'detail'   => 'thumbnail_crop staat aan — "Crop thumbnail to exact dimensions" moet uitgevinkt zijn',
+                ];
+            }
+
+            $categories['media'] = [
+                'violation_count' => count( $media_violations ),
+                'violations'      => $media_violations,
                 'error'           => null,
             ];
 
