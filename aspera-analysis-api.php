@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.10.0
+ * Version: 3.11.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.10.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.11.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3883,6 +3883,7 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
                 case 'theme_additional_settings_enabled':
                 case 'theme_schema_markup_disabled':
                 case 'theme_sidebar_titlebar_enabled':
+                case 'theme_gfonts_merge_disabled':
                     return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Framework theme options' ];
                 default:
                     return [ 'url' => admin_url( 'themes.php' ), 'title' => 'Themes' ];
@@ -3963,7 +3964,7 @@ function aspera_get_rules_per_category(): array {
         'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
-        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled' ],
+        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled','theme_gfonts_merge_disabled' ],
         'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
@@ -4087,6 +4088,7 @@ function aspera_get_rule_context(): array {
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
         'image_sizes_registered' => [ 'label' => 'Additional image sizes geregistreerd', 'explanation' => 'Theme Options registreert extra afbeeldingsformaten. Elk formaat levert per upload een extra bestand op in de uploads-map; de map groeit onnodig en de formaten worden zelden gebruikt.', 'action' => 'Verwijder alle registraties uit Theme Options > Image Sizes. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
         'theme_optimize_assets_disabled' => [ 'label' => 'Optimize JS and CSS size uit', 'explanation' => 'Het framework bundelt en verkleint JS en CSS niet; elke pagina laadt losse, ongecomprimeerde assets.', 'action' => 'Framework > Theme Options > Advanced > zet "Optimize JS and CSS size" aan.' ],
+        'theme_gfonts_merge_disabled' => [ 'label' => 'Google Fonts niet samengevoegd', 'explanation' => 'Optimize JS and CSS size staat aan, maar de Google Fonts CSS wordt als apart bestand geladen; dat kost een extra request bovenop de gebundelde stylesheet.', 'action' => 'Framework > Theme Options > Advanced > zet "Merge Google Fonts styles into single CSS file" aan.' ],
         'theme_additional_settings_enabled' => [ 'label' => 'Additional Settings aan', 'explanation' => 'De Additional Settings metabox voegt per post extra velden toe (tile-kleuren, custom link, images) die buiten de ACF-structuur vallen en tot ongecontroleerde per-post afwijkingen leiden.', 'action' => 'Framework > Theme Options > Advanced > zet "Additional Settings" uit.' ],
         'theme_sidebar_titlebar_enabled' => [ 'label' => 'Titlebars & Sidebars aan', 'explanation' => 'Het framework voegt titlebar- en sidebar-instellingen toe per post type en per pagina. Aspera-sites bouwen die zones in de header en met page blocks, dus de optie voegt alleen ongebruikte instellingen toe.', 'action' => 'Framework > Theme Options > Advanced > zet "Titlebars & Sidebars" uit, tenzij de site ze bewust gebruikt.' ],
         'theme_schema_markup_disabled' => [ 'label' => 'Schema.org markup uit', 'explanation' => 'Het framework geeft geen schema.org structured data mee; zoekmachines missen de gestructureerde context van de pagina.', 'action' => 'Framework > Theme Options > Advanced > zet "Schema.org markup" aan.' ],
@@ -11228,6 +11230,7 @@ add_action( 'rest_api_init', function () {
                 'theme_additional_settings_enabled'      => 'warning',
                 'theme_schema_markup_disabled'           => 'warning',
                 'theme_sidebar_titlebar_enabled'         => 'observation',
+                'theme_gfonts_merge_disabled'            => 'warning',
                 'search_engine_noindex'                  => aspera_host_is_subdomain() ? 'warning' : 'critical',
                 'missing_favicon'                        => 'warning',
                 'permalink_structure_invalid'            => 'critical',
@@ -12085,6 +12088,16 @@ add_action( 'rest_api_init', function () {
                         'rule'     => 'theme_optimize_assets_disabled',
                         'severity' => 'warning',
                         'detail'   => 'optimize_assets staat uit in theme options — JS en CSS worden niet gebundeld en verkleind',
+                    ];
+
+                } elseif ( empty( $adv_opts['include_gfonts_css'] ) ) {
+                    // include_gfonts_css hangt onder optimize_assets (show_if in het
+                    // framework): zonder bundeling is de optie niet zichtbaar en
+                    // daarmee ook niet te beoordelen.
+                    $theme_violations[] = [
+                        'rule'     => 'theme_gfonts_merge_disabled',
+                        'severity' => 'warning',
+                        'detail'   => 'include_gfonts_css staat uit terwijl optimize_assets aan staat — Google Fonts CSS wordt als apart bestand geladen',
                     ];
                 }
 
