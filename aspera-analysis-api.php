@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.11.0
+ * Version: 3.12.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.11.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.12.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3947,7 +3947,7 @@ function aspera_get_rules_per_category(): array {
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
         'plugins' => [ 'extra_plugin','maintenance_mode_active' ],
-        'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover' ],
+        'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover','cpt_slug_missing_suffix','cpt_can_export_enabled','plural_singular_identical' ],
         'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta' ],
         'css' => [ 'unused_css_class','wrong_css_prefix' ],
         'nav' => [ 'unused_nav_menu','broken_menu_reference','invalid_menu_name','mismatched_menu_placement','external_link_no_target_blank','page_not_in_menu','custom_menu_label' ],
@@ -4088,6 +4088,8 @@ function aspera_get_rule_context(): array {
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
         'image_sizes_registered' => [ 'label' => 'Additional image sizes geregistreerd', 'explanation' => 'Theme Options registreert extra afbeeldingsformaten. Elk formaat levert per upload een extra bestand op in de uploads-map; de map groeit onnodig en de formaten worden zelden gebruikt.', 'action' => 'Verwijder alle registraties uit Theme Options > Image Sizes. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
         'theme_optimize_assets_disabled' => [ 'label' => 'Optimize JS and CSS size uit', 'explanation' => 'Het framework bundelt en verkleint JS en CSS niet; elke pagina laadt losse, ongecomprimeerde assets.', 'action' => 'Framework > Theme Options > Advanced > zet "Optimize JS and CSS size" aan.' ],
+        'cpt_slug_missing_suffix' => [ 'label' => 'CPT-slug zonder _cpt suffix', 'explanation' => 'De post type key volgt de conventie {naam}_cpt niet. Typisch gevolg van een CPTUI-import, waarbij ACF de bestaande slug letterlijk overneemt.', 'action' => 'Hernoem de slug naar {naam}_cpt met Better Search Replace; die verwerkt geserialiseerde data correct. Doe eerst een scope-check op post_content.' ],
+        'cpt_can_export_enabled' => [ 'label' => 'CPT exporteerbaar', 'explanation' => 'can_export staat aan, waardoor dit post type meegaat in Tools > Export.', 'action' => 'Zet "Can Export" uit in de ACF post type-instellingen als export niet gewenst is.' ],
         'theme_gfonts_merge_disabled' => [ 'label' => 'Google Fonts niet samengevoegd', 'explanation' => 'Optimize JS and CSS size staat aan, maar de Google Fonts CSS wordt als apart bestand geladen; dat kost een extra request bovenop de gebundelde stylesheet.', 'action' => 'Framework > Theme Options > Advanced > zet "Merge Google Fonts styles into single CSS file" aan.' ],
         'theme_additional_settings_enabled' => [ 'label' => 'Additional Settings aan', 'explanation' => 'De Additional Settings metabox voegt per post extra velden toe (tile-kleuren, custom link, images) die buiten de ACF-structuur vallen en tot ongecontroleerde per-post afwijkingen leiden.', 'action' => 'Framework > Theme Options > Advanced > zet "Additional Settings" uit.' ],
         'theme_sidebar_titlebar_enabled' => [ 'label' => 'Titlebars & Sidebars aan', 'explanation' => 'Het framework voegt titlebar- en sidebar-instellingen toe per post type en per pagina. Aspera-sites bouwen die zones in de header en met page blocks, dus de optie voegt alleen ongebruikte instellingen toe.', 'action' => 'Framework > Theme Options > Advanced > zet "Titlebars & Sidebars" uit, tenzij de site ze bewust gebruikt.' ],
@@ -9408,6 +9410,23 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
 
+                // Regel: post type key volgt de {naam}_cpt conventie
+                if ( $slug !== '' && ! preg_match( '/_cpt$/', $slug ) ) {
+                    $post_violations[] = [
+                        'rule'   => 'cpt_slug_missing_suffix',
+                        'detail' => '"' . $slug . '" mist de _cpt suffix — verwacht: "' . $slug . '_cpt"'
+                                    . ( ( $config['import_source'] ?? '' ) === 'cptui' ? ' (geimporteerd uit CPTUI, slug letterlijk overgenomen)' : '' ),
+                    ];
+                }
+
+                // Observatie: post type is exporteerbaar via Tools > Export
+                if ( ! empty( $config['can_export'] ) ) {
+                    $post_observations[] = [
+                        'rule'   => 'cpt_can_export_enabled',
+                        'detail' => '"' . $slug . '" heeft can_export aan — het post type gaat mee in Tools > Export',
+                    ];
+                }
+
                 // Observatie: plural en singular zijn identiek
                 if ( $plural !== '' && $singular !== '' && strtolower( $plural ) === strtolower( $singular ) ) {
                     $post_observations[] = [
@@ -11231,6 +11250,9 @@ add_action( 'rest_api_init', function () {
                 'theme_schema_markup_disabled'           => 'warning',
                 'theme_sidebar_titlebar_enabled'         => 'observation',
                 'theme_gfonts_merge_disabled'            => 'warning',
+                'cpt_slug_missing_suffix'                => 'warning',
+                'cpt_can_export_enabled'                 => 'observation',
+                'plural_singular_identical'              => 'observation',
                 'search_engine_noindex'                  => aspera_host_is_subdomain() ? 'warning' : 'critical',
                 'missing_favicon'                        => 'warning',
                 'permalink_structure_invalid'            => 'critical',
@@ -11510,6 +11532,16 @@ add_action( 'rest_api_init', function () {
                         'rule'     => $rule,
                         'severity' => $sev,
                         'detail'   => $v['detail'] ?? '',
+                    ];
+                }
+                // Observations dragen hun eigen severity via de severity_map;
+                // zonder deze loop bleven ze buiten de audit-output hangen.
+                foreach ( $cpt['observations'] ?? [] as $o ) {
+                    $rule = $o['rule'] ?? 'unknown';
+                    $cpt_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $severity_map[ $rule ] ?? 'observation',
+                        'detail'   => $o['detail'] ?? '',
                     ];
                 }
                 if ( ! empty( $cpt['cptui_leftover'] ) ) {
