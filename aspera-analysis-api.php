@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.9.0
+ * Version: 3.10.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.9.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.10.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3351,12 +3351,56 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
         'delete_taxonomy_backup',
         'delete_orphaned_taxonomy_and_posts', 'delete_orphaned_post_type_posts',
         'delete_orphaned_plugin_options', 'delete_orphaned_plugin_meta', 'delete_cptui_data',
+        'set_theme_option',
     ];
     if ( ! $action || ( ! $post_id && ! in_array( $action, $no_post_id_actions, true ) ) ) {
         wp_send_json_error( 'Ongeldige parameters.' );
     }
 
     switch ( $action ) {
+        case 'set_theme_option':
+            // Alleen theme options met een vaste Aspera-standaard zijn fixbaar.
+            // De doelwaarde komt uit deze whitelist, nooit uit de request, zodat
+            // een gemanipuleerde POST geen willekeurige theme option kan zetten.
+            $allowed_theme_options = [
+                'schema_markup'              => 1,
+                'enable_additional_settings' => 0,
+            ];
+            $opt_key = sanitize_key( $_POST['theme_option'] ?? '' );
+            if ( ! isset( $allowed_theme_options[ $opt_key ] ) ) {
+                wp_send_json_error( 'Theme option "' . $opt_key . '" is niet fixbaar.' );
+            }
+            $target_value = $allowed_theme_options[ $opt_key ];
+
+            // Re-verify tegen de live waarde: de audit kan verouderd zijn.
+            $usof_fix_raw  = get_option( 'usof_options_Impreza', [] );
+            $usof_fix_opts = is_array( $usof_fix_raw )
+                ? $usof_fix_raw
+                : ( is_string( $usof_fix_raw ) ? maybe_unserialize( $usof_fix_raw ) : [] );
+            if ( ! is_array( $usof_fix_opts ) || empty( $usof_fix_opts ) ) {
+                wp_send_json_error( 'usof_options_Impreza niet gevonden of ongeldig.' );
+            }
+            if ( (int) ( $usof_fix_opts[ $opt_key ] ?? -1 ) === $target_value ) {
+                wp_send_json_error( 'Verificatie mislukt: "' . $opt_key . '" staat al op ' . $target_value . '. Voer audit opnieuw uit.' );
+            }
+
+            // us_update_option laat het framework zelf opslaan (usof_before_save /
+            // usof_after_save), zodat afgeleide caches meelopen. Die functie doet
+            // niets als de key nog niet bestaat, vandaar de fallback.
+            $fix_saved = false;
+            if ( function_exists( 'us_update_option' ) ) {
+                $fix_saved = (bool) us_update_option( $opt_key, $target_value );
+            }
+            if ( ! $fix_saved ) {
+                $usof_fix_opts[ $opt_key ] = $target_value;
+                $fix_saved = (bool) update_option( 'usof_options_Impreza', $usof_fix_opts, true );
+            }
+            if ( ! $fix_saved ) {
+                wp_send_json_error( 'Opslaan van theme option "' . $opt_key . '" mislukt.' );
+            }
+            wp_send_json_success( [ 'message' => 'Theme option "' . $opt_key . '" op ' . $target_value . ' gezet.' ] );
+            break;
+
         case 'delete_field_group':
             $post = get_post( $post_id );
             if ( ! $post || $post->post_type !== 'acf-field-group' ) {
@@ -3835,6 +3879,10 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
                     return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Framework license' ];
                 case 'theme_recaptcha_site_key_missing':
                 case 'theme_recaptcha_secret_key_missing':
+                case 'theme_optimize_assets_disabled':
+                case 'theme_additional_settings_enabled':
+                case 'theme_schema_markup_disabled':
+                case 'theme_sidebar_titlebar_enabled':
                     return [ 'url' => admin_url( 'themes.php?page=us-theme-options&panel=advanced' ), 'title' => 'Framework theme options' ];
                 default:
                     return [ 'url' => admin_url( 'themes.php' ), 'title' => 'Themes' ];
@@ -3915,7 +3963,7 @@ function aspera_get_rules_per_category(): array {
         'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
-        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing' ],
+        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled' ],
         'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
@@ -4038,6 +4086,10 @@ function aspera_get_rule_context(): array {
         'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Het framework theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul site_key in.' ],
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
         'image_sizes_registered' => [ 'label' => 'Additional image sizes geregistreerd', 'explanation' => 'Theme Options registreert extra afbeeldingsformaten. Elk formaat levert per upload een extra bestand op in de uploads-map; de map groeit onnodig en de formaten worden zelden gebruikt.', 'action' => 'Verwijder alle registraties uit Theme Options > Image Sizes. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
+        'theme_optimize_assets_disabled' => [ 'label' => 'Optimize JS and CSS size uit', 'explanation' => 'Het framework bundelt en verkleint JS en CSS niet; elke pagina laadt losse, ongecomprimeerde assets.', 'action' => 'Framework > Theme Options > Advanced > zet "Optimize JS and CSS size" aan.' ],
+        'theme_additional_settings_enabled' => [ 'label' => 'Additional Settings aan', 'explanation' => 'De Additional Settings metabox voegt per post extra velden toe (tile-kleuren, custom link, images) die buiten de ACF-structuur vallen en tot ongecontroleerde per-post afwijkingen leiden.', 'action' => 'Framework > Theme Options > Advanced > zet "Additional Settings" uit.' ],
+        'theme_sidebar_titlebar_enabled' => [ 'label' => 'Titlebars & Sidebars aan', 'explanation' => 'Het framework voegt titlebar- en sidebar-instellingen toe per post type en per pagina. Aspera-sites bouwen die zones in de header en met page blocks, dus de optie voegt alleen ongebruikte instellingen toe.', 'action' => 'Framework > Theme Options > Advanced > zet "Titlebars & Sidebars" uit, tenzij de site ze bewust gebruikt.' ],
+        'theme_schema_markup_disabled' => [ 'label' => 'Schema.org markup uit', 'explanation' => 'Het framework geeft geen schema.org structured data mee; zoekmachines missen de gestructureerde context van de pagina.', 'action' => 'Framework > Theme Options > Advanced > zet "Schema.org markup" aan.' ],
         'big_image_threshold_wrong' => [ 'label' => 'Big image threshold afwijkend', 'explanation' => 'WordPress schaalt uploads terug tot deze breedte. De default 2560px levert onnodig zware originelen op.', 'action' => 'Zet big_image_size_threshold op 1600px in Theme Options > More Options.' ],
         'delete_unused_images_disabled' => [ 'label' => 'Delete unused image thumbnails uit', 'explanation' => 'Bij het verwijderen van een afbeelding blijven de gegenereerde thumbnails achter in de uploads-map.', 'action' => 'Zet "Delete unused image thumbnails" aan in Theme Options > More Options.' ],
         'wp_image_size_nonzero' => [ 'label' => 'WP image size niet op nul', 'explanation' => 'Een of meer image sizes in Settings > Media staan op een waarde ongelijk nul. WordPress genereert dan per upload een afgeleid bestand per formaat.', 'action' => 'Zet Thumbnail, Medium en Large in Settings > Media alle op 0. Voer daarna een aanbevolen image regeneration uit om de deprecated formaten uit de uploads-map op te schonen.' ],
@@ -4721,6 +4773,8 @@ function aspera_dashboard_widget_render(): void {
                                 echo (int) ( $fix['count'] ?? 0 ) . ' option(s) met prefix <code>' . esc_html( $fix['prefix'] ?? '' ) . '</code> verwijderen';
                             } elseif ( $fa === 'delete_orphaned_plugin_meta' ) {
                                 echo (int) ( $fix['count'] ?? 0 ) . ' postmeta-rij(en) met prefix <code>' . esc_html( $fix['prefix'] ?? '' ) . '</code> verwijderen';
+                            } elseif ( $fa === 'set_theme_option' ) {
+                                echo 'theme option <code>' . esc_html( $fix['theme_option'] ?? '' ) . '</code> op <code>' . esc_html( (string) ( $fix['after'] ?? '' ) ) . '</code> zetten';
                             } elseif ( $fa === 'delete_cptui_data' ) {
                                 echo 'option <code>cptui_post_types</code> verwijderen';
                             } else {
@@ -5207,6 +5261,7 @@ function aspera_dashboard_widget_script(): void {
                     if (f.fix.meta_key) body += '&meta_key=' + encodeURIComponent(f.fix.meta_key);
                     if (f.fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(f.fix.option_prefix);
                     if (f.fix.option_name) body += '&option_name=' + encodeURIComponent(f.fix.option_name);
+                    if (f.fix.theme_option) body += '&theme_option=' + encodeURIComponent(f.fix.theme_option);
                     if (f.fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(f.fix.taxonomy_slug);
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
@@ -5370,6 +5425,8 @@ function aspera_dashboard_widget_script(): void {
                     msg += fix.count + ' option(s) met prefix "' + fix.prefix + '" worden verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).';
                 } else if (fix.action === 'delete_orphaned_plugin_meta') {
                     msg += fix.count + ' postmeta-rij(en) met prefix "' + fix.prefix + '" worden verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).';
+                } else if (fix.action === 'set_theme_option') {
+                    msg += 'Theme option "' + fix.theme_option + '" wordt op ' + fix.after + ' gezet in Theme Options > Advanced.\n\nDe wijziging is omkeerbaar via dezelfde optie in het framework.';
                 } else if (fix.action === 'delete_cptui_data') {
                     msg += (fix.description || 'Option "cptui_post_types" wordt verwijderd uit wp_options.') + '\n\nCPTUI-plugin is inactief; ACF blijft leidend voor de post type-registratie.';
                 } else {
@@ -5384,6 +5441,7 @@ function aspera_dashboard_widget_script(): void {
                 if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
                 if (fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(fix.option_prefix);
                 if (fix.option_name) body += '&option_name=' + encodeURIComponent(fix.option_name);
+                if (fix.theme_option) body += '&theme_option=' + encodeURIComponent(fix.theme_option);
                 if (fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(fix.taxonomy_slug);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
@@ -11166,6 +11224,10 @@ add_action( 'rest_api_init', function () {
                 'unauthorized_installed_theme'           => 'warning',
                 'theme_recaptcha_site_key_missing'       => 'critical',
                 'theme_recaptcha_secret_key_missing'     => 'critical',
+                'theme_optimize_assets_disabled'         => 'warning',
+                'theme_additional_settings_enabled'      => 'warning',
+                'theme_schema_markup_disabled'           => 'warning',
+                'theme_sidebar_titlebar_enabled'         => 'observation',
                 'search_engine_noindex'                  => aspera_host_is_subdomain() ? 'warning' : 'critical',
                 'missing_favicon'                        => 'warning',
                 'permalink_structure_invalid'            => 'critical',
@@ -12012,6 +12074,71 @@ add_action( 'rest_api_init', function () {
                     ];
                 }
             }
+            // Framework theme options (Theme Options > Advanced) — vaste standaard
+            $adv_raw  = get_option( 'usof_options_Impreza', [] );
+            $adv_opts = is_array( $adv_raw ) ? $adv_raw : ( is_string( $adv_raw ) ? maybe_unserialize( $adv_raw ) : [] );
+            if ( is_array( $adv_opts ) && ! empty( $adv_opts ) ) {
+
+                // optimize_assets — moet aan staan (framework-default 1)
+                if ( ( $adv_opts['optimize_assets'] ?? 0 ) != 1 ) {
+                    $theme_violations[] = [
+                        'rule'     => 'theme_optimize_assets_disabled',
+                        'severity' => 'warning',
+                        'detail'   => 'optimize_assets staat uit in theme options — JS en CSS worden niet gebundeld en verkleind',
+                    ];
+                }
+
+                // enable_additional_settings — moet uit staan (afwijking van framework-default 1)
+                if ( ( $adv_opts['enable_additional_settings'] ?? 0 ) == 1 ) {
+                    $post_types = trim( (string) ( $adv_opts['additional_settings_post_types'] ?? '' ) );
+                    $theme_violations[] = [
+                        'rule'         => 'theme_additional_settings_enabled',
+                        'severity'     => 'warning',
+                        'detail'       => 'enable_additional_settings staat aan in theme options'
+                                          . ( $post_types !== '' ? ' voor post types: ' . $post_types : '' )
+                                          . ' — de Additional Settings metabox moet uit',
+                        'proposed_fix' => [
+                            'fixable'      => true,
+                            'action'       => 'set_theme_option',
+                            'theme_option' => 'enable_additional_settings',
+                            'before'       => '1',
+                            'after'        => '0',
+                            'description'  => 'enable_additional_settings op 0 zetten',
+                        ],
+                    ];
+                }
+
+                // schema_markup — moet aan staan (framework-default 1)
+                if ( ( $adv_opts['schema_markup'] ?? 0 ) != 1 ) {
+                    $theme_violations[] = [
+                        'rule'         => 'theme_schema_markup_disabled',
+                        'severity'     => 'warning',
+                        'detail'       => 'schema_markup staat uit in theme options — geen schema.org structured data in de output',
+                        'proposed_fix' => [
+                            'fixable'      => true,
+                            'action'       => 'set_theme_option',
+                            'theme_option' => 'schema_markup',
+                            'before'       => (string) ( $adv_opts['schema_markup'] ?? '' ),
+                            'after'        => '1',
+                            'description'  => 'schema_markup op 1 zetten',
+                        ],
+                    ];
+                }
+
+                // enable_sidebar_titlebar — hoort uit (framework-default 0).
+                // Loose vergelijking: het framework slaat deze switch als bool op,
+                // andere switches als int of string.
+                if ( ! empty( $adv_opts['enable_sidebar_titlebar'] ) ) {
+                    $sidebar_blocks = ! empty( $adv_opts['enable_page_blocks_for_sidebars'] );
+                    $theme_violations[] = [
+                        'rule'     => 'theme_sidebar_titlebar_enabled',
+                        'severity' => 'observation',
+                        'detail'   => 'enable_sidebar_titlebar staat aan in theme options — titlebar- en sidebar-instellingen worden per post type en per pagina toegevoegd'
+                                      . ( $sidebar_blocks ? ' (enable_page_blocks_for_sidebars staat eveneens aan)' : '' ),
+                    ];
+                }
+            }
+
             $categories['theme_check'] = [
                 'violation_count' => count( $theme_violations ),
                 'violations'      => $theme_violations,
