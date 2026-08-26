@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.6.0
+ * Version: 3.7.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.6.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.7.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -1380,6 +1380,25 @@ if ( ! defined( 'ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS' ) ) {
 }
 
 /**
+ * Prefix van de backup-options. Vast punt voor drie plekken: het schrijven van
+ * de snapshot, de detectie in /taxonomy/validate en de prefix-controle in de
+ * fix-action delete_taxonomy_backup — die laatste is een veiligheidsgrens en
+ * mag nooit een andere waarde hanteren dan de eerste.
+ */
+if ( ! defined( 'ASPERA_TAXONOMY_BACKUP_PREFIX' ) ) {
+    define( 'ASPERA_TAXONOMY_BACKUP_PREFIX', 'aspera_taxonomy_backup_' );
+}
+
+/**
+ * Bovengrens waarboven de audit de backup-payload niet meer uitleest om er
+ * datum en rij-aantal uit te halen. De melding en de fix werken ook zonder die
+ * metadata; een audit die megabytes inleest voor een bijzin niet.
+ */
+if ( ! defined( 'ASPERA_TAXONOMY_BACKUP_READ_MAX_BYTES' ) ) {
+    define( 'ASPERA_TAXONOMY_BACKUP_READ_MAX_BYTES', 2097152 );
+}
+
+/**
  * Verzamelt alle plekken die naar een taxonomy-slug verwijzen: post_content,
  * us_grid_layout-excerpts, ACF field group-locatieregels, ACF taxonomy-velden,
  * nav menu items en themabestanden.
@@ -1544,7 +1563,7 @@ function aspera_taxonomy_snapshot( string $taxonomy_slug, array $term_ids, array
     }
     if ( $total > ASPERA_TAXONOMY_SNAPSHOT_MAX_ROWS ) return null;
 
-    $option = 'aspera_taxonomy_backup_' . $taxonomy_slug;
+    $option = ASPERA_TAXONOMY_BACKUP_PREFIX . $taxonomy_slug;
     update_option( $option, [
         'taxonomy'       => $taxonomy_slug,
         'created'        => current_time( 'mysql' ),
@@ -3144,6 +3163,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
     $no_post_id_actions = [
         'delete_orphaned_meta', 'delete_orphaned_option', 'delete_wpforms_scheduled_actions',
         'drop_orphaned_table', 'delete_orphaned_taxonomy', 'disable_wpb_modules',
+        'delete_taxonomy_backup',
         'delete_orphaned_taxonomy_and_posts', 'delete_orphaned_post_type_posts',
         'delete_orphaned_plugin_options', 'delete_orphaned_plugin_meta', 'delete_cptui_data',
     ];
@@ -3413,6 +3433,26 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             wp_send_json_success( [ 'message' => $tax_message ] );
             break;
 
+        case 'delete_taxonomy_backup':
+            $backup_option = sanitize_text_field( $_POST['option_name'] ?? '' );
+            if ( ! $backup_option ) {
+                wp_send_json_error( 'option_name ontbreekt.' );
+            }
+            // Veiligheidsgrens: deze actie mag uitsluitend onze eigen backups
+            // raken. Zonder deze check zou elke option-naam via de POST-body
+            // verwijderbaar zijn.
+            if ( strpos( $backup_option, ASPERA_TAXONOMY_BACKUP_PREFIX ) !== 0 ) {
+                wp_send_json_error( 'Option "' . $backup_option . '" is geen taxonomy-backup — verwijdering geweigerd.' );
+            }
+            if ( get_option( $backup_option, null ) === null ) {
+                wp_send_json_success( [ 'message' => 'Backup "' . $backup_option . '" bestond niet meer (al opgeruimd?).' ] );
+            }
+            if ( ! delete_option( $backup_option ) ) {
+                wp_send_json_error( 'Verwijderen van "' . $backup_option . '" mislukt.' );
+            }
+            wp_send_json_success( [ 'message' => 'Backup "' . $backup_option . '" verwijderd.' ] );
+            break;
+
         case 'delete_orphaned_taxonomy_and_posts':
             $taxonomy_slug = sanitize_key( $_POST['taxonomy_slug'] ?? '' );
             $dep_post_type = sanitize_key( $_POST['post_type'] ?? '' );
@@ -3672,7 +3712,7 @@ function aspera_get_rules_per_category(): array {
         'theme_breakpoints' => [ 'breakpoint_mobile_group_mismatch','breakpoint_order_invalid','breakpoint_convention_deviation','breakpoint_exceeds_content_width','laptops_breakpoint_mismatch' ],
         'widgets' => [ 'widgetised_sidebar_in_template','extra_widget_area','default_sidebar_not_empty','active_widget_text','active_widget_nav_menu','active_widget_other' ],
         'wpb_templates' => [ 'wpb_saved_templates' ],
-        'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies' ],
+        'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies','taxonomy_backup_present' ],
         'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_enabled','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
         'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix' ],
         'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
@@ -3746,6 +3786,7 @@ function aspera_get_rule_context(): array {
         'orphaned_plugin_meta' => [ 'label' => 'Postmeta van inactieve plugin', 'explanation' => 'Postmeta-rijen van een plugin die niet meer actief is.', 'action' => 'Beoordeel en verwijder.' ],
         'orphaned_taxonomy' => [ 'label' => 'Verweesde taxonomy', 'explanation' => 'Een taxonomy is niet meer geregistreerd maar terms en relaties bestaan nog.', 'action' => 'Verwijder ongebruikte terms of herregistreer de taxonomy.' ],
         'orphaned_taxonomy_has_dependencies' => [ 'label' => 'Verweesde taxonomy met dependencies', 'explanation' => 'Taxonomy is verdwenen maar er zijn nog posts/term-relations gekoppeld; opruimen vereist eerst dependency-resolutie.', 'action' => 'Identificeer afhankelijke posts; verwijder relaties voor je de taxonomy laat staan.' ],
+        'taxonomy_backup_present' => [ 'label' => 'Backup van opgeruimde taxonomy aanwezig', 'explanation' => 'Bij het opruimen van een verweesde taxonomy zijn de verwijderde rijen vastgelegd in een option, zodat de actie terug te draaien is.', 'action' => 'Controleer of er niets ontbreekt en verwijder de backup daarna.' ],
         'orphaned_option' => [ 'label' => 'Verweesde wp_option', 'explanation' => 'Een wp_options-key matcht geen actieve plugin/theme.', 'action' => 'Beoordeel en verwijder indien legacy.' ],
         'orphaned_location_taxonomy' => [ 'label' => 'ACF location-rule wijst naar inactieve taxonomy', 'explanation' => 'Een field group heeft een location-rule die verwijst naar een taxonomy die niet bestaat.', 'action' => 'Verwijder de location-rule of herregistreer de taxonomy.' ],
         'orphaned_location_term' => [ 'label' => 'ACF location-rule wijst naar verwijderde term', 'explanation' => 'Location-rule wijst naar een specifieke term die niet meer bestaat.', 'action' => 'Pas de location-rule aan.' ],
@@ -4464,6 +4505,8 @@ function aspera_dashboard_widget_render(): void {
                                     echo ' (' . (int) ( $fix['terms'] ?? 0 ) . ' terms, ' . (int) ( $fix['relationships'] ?? 0 )
                                          . ' koppelingen; ' . (int) ( $fix['linked_posts_count'] ?? 0 ) . ' posts blijven bestaan)';
                                 }
+                            } elseif ( $fa === 'delete_taxonomy_backup' ) {
+                                echo 'backup-option <code>' . esc_html( $fix['option_name'] ?? '' ) . '</code> verwijderen';
                             } elseif ( $fa === 'delete_orphaned_taxonomy_and_posts' ) {
                                 echo 'taxonomy <code>' . esc_html( $fix['taxonomy_slug'] ?? '' ) . '</code> + posts van type <code>' . esc_html( $fix['post_type'] ?? '' ) . '</code> verwijderen';
                             } elseif ( $fa === 'delete_orphaned_post_type_posts' ) {
@@ -4957,6 +5000,7 @@ function aspera_dashboard_widget_script(): void {
                         + '&post_id=' + encodeURIComponent(f.postId);
                     if (f.fix.meta_key) body += '&meta_key=' + encodeURIComponent(f.fix.meta_key);
                     if (f.fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(f.fix.option_prefix);
+                    if (f.fix.option_name) body += '&option_name=' + encodeURIComponent(f.fix.option_name);
                     if (f.fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(f.fix.taxonomy_slug);
                     if (f.fix.before) body += '&before=' + encodeURIComponent(f.fix.before);
                     if (f.fix.after !== undefined) body += '&after=' + encodeURIComponent(f.fix.after);
@@ -5106,6 +5150,12 @@ function aspera_dashboard_widget_script(): void {
                     msg += 'Allow null inschakelen op page-link "' + (fix.label || fix.field_key) + '".\n\nHet veld kan daarna leeggelaten worden.';
                 } else if (fix.action === 'disable_wpb_modules') {
                     msg += 'Alle WPBakery Module Manager modules worden uitgeschakeld (optie "wpb_js_modules" overschreven).\n\nDit lost in één keer alle actieve-module violations op.';
+                } else if (fix.action === 'delete_taxonomy_backup') {
+                    msg += 'Backup-option "' + fix.option_name + '" verwijderen';
+                    if (fix.row_count) msg += ' (' + fix.row_count + ' vastgelegde rijen';
+                    if (fix.row_count && fix.created) msg += ' van ' + fix.created;
+                    if (fix.row_count) msg += ')';
+                    msg += '.\n\nDoe dit pas nadat je hebt vastgesteld dat de opruiming goed is gegaan: hierna is de taxonomy-data niet meer terug te zetten.';
                 } else if (fix.action === 'delete_orphaned_taxonomy_and_posts') {
                     msg += 'Taxonomy "' + fix.taxonomy_slug + '" EN alle posts van type "' + fix.post_type + '" worden onomkeerbaar verwijderd (herkomst: ' + (fix.plugin_slug || 'onbekend') + ', plugin inactief).\n\nDeze actie is NIET terug te draaien.';
                 } else if (fix.action === 'delete_orphaned_post_type_posts') {
@@ -5127,6 +5177,7 @@ function aspera_dashboard_widget_script(): void {
                     + '&post_id=' + encodeURIComponent(postId);
                 if (fix.meta_key) body += '&meta_key=' + encodeURIComponent(fix.meta_key);
                 if (fix.option_prefix) body += '&option_prefix=' + encodeURIComponent(fix.option_prefix);
+                if (fix.option_name) body += '&option_name=' + encodeURIComponent(fix.option_name);
                 if (fix.taxonomy_slug) body += '&taxonomy_slug=' + encodeURIComponent(fix.taxonomy_slug);
                 if (fix.before) body += '&before=' + encodeURIComponent(fix.before);
                 if (fix.after !== undefined) body += '&after=' + encodeURIComponent(fix.after);
@@ -10445,12 +10496,75 @@ add_action( 'rest_api_init', function () {
                 $violations[] = $violation_entry;
             }
 
+            // ── Achtergebleven backup-options van eerdere opruimingen ────
+            // aspera_delete_taxonomy_data() legt de verwijderde rijen vast in
+            // een option zodat de opruiming terug te draaien is. Zodra de
+            // gebruiker heeft vastgesteld dat er niets ontbreekt, mag die
+            // backup weg. Observation: het is geen sitefout maar een bewust
+            // achtergelaten vangnet, dus 0 scorepunten.
+            $backups     = [];
+            $backup_like = $wpdb->esc_like( ASPERA_TAXONOMY_BACKUP_PREFIX ) . '%';
+            $backup_rows = $wpdb->get_results( $wpdb->prepare(
+                "SELECT option_name, LENGTH(option_value) AS bytes
+                 FROM {$wpdb->options}
+                 WHERE option_name LIKE %s",
+                $backup_like
+            ) );
+
+            foreach ( $backup_rows as $brow ) {
+                $bytes  = (int) $brow->bytes;
+                $bentry = [
+                    'option_name' => $brow->option_name,
+                    'taxonomy'    => substr( $brow->option_name, strlen( ASPERA_TAXONOMY_BACKUP_PREFIX ) ),
+                    'bytes'       => $bytes,
+                    'created'     => null,
+                    'row_count'   => null,
+                ];
+
+                // Payload alleen uitlezen zolang hij redelijk van omvang is —
+                // de metadata is nice-to-have, de melding werkt ook zonder.
+                if ( $bytes <= ASPERA_TAXONOMY_BACKUP_READ_MAX_BYTES ) {
+                    $payload = get_option( $brow->option_name );
+                    if ( is_array( $payload ) ) {
+                        $bentry['created']   = $payload['created']   ?? null;
+                        $bentry['row_count'] = isset( $payload['row_count'] ) ? (int) $payload['row_count'] : null;
+                    }
+                }
+
+                $backups[] = $bentry;
+
+                $detail = 'Backup "' . $brow->option_name . '"';
+                if ( $bentry['row_count'] !== null ) {
+                    $detail .= ': ' . $bentry['row_count'] . ' rij(en)';
+                }
+                if ( $bentry['created'] !== null ) {
+                    $detail .= ', gemaakt op ' . $bentry['created'];
+                }
+                $detail .= ' (' . size_format( $bytes ) . ')';
+
+                $violations[] = [
+                    'taxonomy'     => $bentry['taxonomy'],
+                    'rule'         => 'taxonomy_backup_present',
+                    'detail'       => $detail,
+                    'proposed_fix' => [
+                        'fixable'     => true,
+                        'action'      => 'delete_taxonomy_backup',
+                        'option_name' => $brow->option_name,
+                        'row_count'   => $bentry['row_count'],
+                        'created'     => $bentry['created'],
+                        'description' => 'Backup-option "' . $brow->option_name . '" verwijderen',
+                    ],
+                ];
+            }
+
             return [
-                'status'               => empty( $results ) ? 'ok' : 'issues_found',
+                'status'               => empty( $results ) && empty( $backups ) ? 'ok' : 'issues_found',
                 'orphaned_taxonomies'  => $results,
+                'backups'              => $backups,
                 'violations'           => $violations,
                 'summary'              => [
                     'total_orphaned'  => count( $results ),
+                    'backups_present' => count( $backups ),
                     'safe_to_remove'  => count( array_filter( $results, function ( $r ) {
                         return $r['status'] === 'orphaned_safe';
                     } ) ),
@@ -10738,6 +10852,7 @@ add_action( 'rest_api_init', function () {
                 // taxonomy/validate
                 'orphaned_taxonomy'                    => 'warning',
                 'orphaned_taxonomy_has_dependencies'    => 'warning',
+                'taxonomy_backup_present'               => 'observation',
 
                 // header/validate
                 'custom_breakpoint_invalid_order'        => 'error',
