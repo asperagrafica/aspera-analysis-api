@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.4.2
+ * Version: 3.5.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.4.2' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.5.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -84,6 +84,154 @@ function aspera_host_is_subdomain(): bool {
         }
     }
     return substr_count( $host, '.' ) > 1;
+}
+
+/**
+ * ─── Impreza licentie-contract ───────────────────────────────────────────────
+ * Alle Impreza-specifieke aannames van de licentiecontrole op één plek.
+ * Geverifieerd tegen Impreza 9.1 (`common/admin/functions/about.php`).
+ * Wijzigt UpSolution de optienamen of het endpoint, dan is dit blok het enige
+ * dat aangepast hoeft te worden; `aspera_impreza_license_state()` degradeert
+ * tot die tijd naar 'unknown' in plaats van een onjuiste violation te melden.
+ */
+const ASPERA_US_LICENSE = [
+    'verified_against' => 'Impreza 9.1',
+    'option_active'    => 'us_license_activated',
+    'option_dev'       => 'us_license_dev_activated',
+    'option_secret'    => 'us_license_secret',
+    'api_path'         => '/envato_auth',
+    'api_status_key'   => 'status',
+    'api_status_ok'    => 1,
+];
+
+/** Eigen option: laatst geverifieerde domein. Cache, geen site-configuratie. */
+const ASPERA_LICENSE_BASELINE_OPTION = 'aspera_license_baseline';
+const ASPERA_LICENSE_REMOTE_TRANSIENT = 'aspera_license_remote_check';
+const ASPERA_LICENSE_REMOTE_TTL       = 12 * HOUR_IN_SECONDS;
+const ASPERA_LICENSE_REMOTE_TTL_FAIL  = HOUR_IN_SECONDS;
+
+/**
+ * Bepaalt de werkelijke staat van de Impreza-licentie.
+ *
+ * De option `us_license_activated` bewijst alleen dat de licentie ooit met
+ * succes is geactiveerd, niet dat hij nú geldig is: Impreza hervalideert
+ * uitsluitend bij het openen van de licentiepagina in wp-admin
+ * (`about.php:111-134`, stuurt `secret` + `domain` naar `/envato_auth` en
+ * verwijdert de opties bij `status !== 1`). Na een sitemigratie blijft de
+ * option daardoor op 1 staan terwijl de licentie op het oude domein zit.
+ *
+ * Twee onafhankelijke detecties:
+ *  1. Lokale baseline — het domein waarop wij de licentie voor het laatst
+ *     geldig zagen. Puur lokaal, blijft werken los van UpSolution's API.
+ *  2. Remote check — read-only aanroep van dezelfde endpoint die het thema
+ *     gebruikt. Bevestigt de baseline en legt hem aan bij de eerste run.
+ *
+ * @return array{status:string,dev:bool,domain:string,baseline_domain:?string,remote:string}
+ *   status: 'active' | 'dev' | 'inactive' | 'mismatch' | 'unknown'
+ *   remote: 'valid' | 'invalid' | 'unavailable' | 'skipped'
+ */
+function aspera_impreza_license_state(): array {
+    $host   = (string) wp_parse_url( site_url(), PHP_URL_HOST );
+    $active = get_option( ASPERA_US_LICENSE['option_active'] );
+    $dev    = get_option( ASPERA_US_LICENSE['option_dev'] );
+    $secret = (string) get_option( ASPERA_US_LICENSE['option_secret'] );
+
+    $baseline = get_option( ASPERA_LICENSE_BASELINE_OPTION );
+    $baseline_domain = is_array( $baseline ) && ! empty( $baseline['domain'] )
+        ? (string) $baseline['domain']
+        : NULL;
+
+    $state = [
+        'status'          => 'inactive',
+        'dev'             => (bool) $dev,
+        'domain'          => $host,
+        'baseline_domain' => $baseline_domain,
+        'remote'          => 'skipped',
+    ];
+
+    // Geen enkele activatie-vlag: hard inactief, geen remote check nodig.
+    if ( empty( $active ) && empty( $dev ) ) {
+        return $state;
+    }
+
+    $state['status'] = ! empty( $dev ) ? 'dev' : 'active';
+    $state['remote'] = aspera_impreza_license_remote_status( $host, $secret );
+
+    if ( $state['remote'] === 'invalid' ) {
+        $state['status'] = 'mismatch';
+
+    } elseif ( $state['remote'] === 'valid' ) {
+        // Baseline (her)bevestigen op het huidige domein.
+        if ( $baseline_domain !== $host ) {
+            update_option( ASPERA_LICENSE_BASELINE_OPTION, [
+                'domain'     => $host,
+                'checked_at' => current_time( 'timestamp' ),
+            ], /* autoload */ FALSE );
+            $state['baseline_domain'] = $host;
+        }
+
+    } elseif ( $baseline_domain !== NULL && $baseline_domain !== $host ) {
+        // Remote niet beschikbaar, maar het domein is sinds de laatste
+        // geslaagde verificatie gewijzigd — het migratiegeval.
+        $state['status'] = 'mismatch';
+    }
+
+    return $state;
+}
+
+/**
+ * Read-only verificatie bij de licentieserver, via de themafunctie zelf.
+ * Retourneert 'unavailable' zodra ook maar één aanname niet meer opgaat,
+ * zodat een gewijzigd Impreza nooit een onjuiste critical oplevert.
+ */
+function aspera_impreza_license_remote_status( string $host, string $secret ): string {
+    if ( $secret === '' ) {
+        return 'unavailable';
+    }
+    if ( ( $cached = get_transient( ASPERA_LICENSE_REMOTE_TRANSIENT ) ) !== FALSE ) {
+        return is_array( $cached ) && ( $cached['host'] ?? '' ) === $host
+            ? (string) $cached['status']
+            : 'unavailable';
+    }
+
+    // Contract-check: zonder deze themafunctie/constante geen oordeel.
+    if ( ! function_exists( 'us_api' ) || ! defined( 'US_API_RETURN_ARRAY' ) ) {
+        return 'unavailable';
+    }
+
+    $response = us_api(
+        ASPERA_US_LICENSE['api_path'],
+        [
+            'secret'  => $secret,
+            'domain'  => $host,
+            'version' => defined( 'US_THEMEVERSION' ) ? US_THEMEVERSION : '',
+        ],
+        US_API_RETURN_ARRAY
+    );
+
+    $body = is_array( $response ) ? ( $response['body'] ?? NULL ) : NULL;
+    if ( ! is_array( $body ) || ! array_key_exists( ASPERA_US_LICENSE['api_status_key'], $body ) ) {
+        // Onbereikbaar of gewijzigd antwoordformaat: kort negatief cachen,
+        // zodat een trage licentieserver niet elke audit vertraagt.
+        set_transient(
+            ASPERA_LICENSE_REMOTE_TRANSIENT,
+            [ 'host' => $host, 'status' => 'unavailable' ],
+            ASPERA_LICENSE_REMOTE_TTL_FAIL
+        );
+        return 'unavailable';
+    }
+
+    $status = ( (int) $body[ ASPERA_US_LICENSE['api_status_key'] ] === ASPERA_US_LICENSE['api_status_ok'] )
+        ? 'valid'
+        : 'invalid';
+
+    set_transient(
+        ASPERA_LICENSE_REMOTE_TRANSIENT,
+        [ 'host' => $host, 'status' => $status ],
+        ASPERA_LICENSE_REMOTE_TTL
+    );
+
+    return $status;
 }
 
 /**
@@ -3243,6 +3391,9 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
         case 'theme_check':
             switch ( $rule ) {
                 case 'impreza_license_inactive':
+                case 'impreza_license_domain_mismatch':
+                case 'impreza_license_dev_activated':
+                case 'impreza_license_check_unavailable':
                     return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Framework license' ];
                 case 'theme_recaptcha_site_key_missing':
                 case 'theme_recaptcha_secret_key_missing':
@@ -3317,7 +3468,7 @@ function aspera_get_rules_per_category(): array {
         'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
-        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing' ],
+        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
     ];
@@ -3427,7 +3578,10 @@ function aspera_get_rule_context(): array {
 
         // ── Theme / Header / Permalinks / Settings ────────────────────────
         'wrong_active_theme' => [ 'label' => 'Verkeerd actief thema', 'explanation' => 'Actief thema is niet Aspera (Child); alleen Aspera mag actief zijn.', 'action' => 'Appearance > Themes > activeer Aspera Child.' ],
-        'impreza_license_inactive' => [ 'label' => 'Framework licentie niet geactiveerd', 'explanation' => 'us_license_activated option staat niet op 1; theme-updates en addons werken niet.', 'action' => 'Framework > Licentie activeren met purchase-code.' ],
+        'impreza_license_inactive' => [ 'label' => 'Framework licentie niet geactiveerd', 'explanation' => 'Geen enkele activatie-option aanwezig; theme-updates en addons werken niet. Let op: het framework verwijdert de options bij deactivatie, het zet ze niet op 0.', 'action' => 'Framework > Licentie activeren met purchase-code.' ],
+        'impreza_license_domain_mismatch' => [ 'label' => 'Framework licentie hoort bij ander domein', 'explanation' => 'De activatie-option staat op 1, maar de licentie is niet geldig voor dit domein. Typisch na een migratie: het framework hervalideert alleen bij het openen van de licentiepagina, dus de option blijft ten onrechte op 1 staan terwijl updates en addons stilstaan.', 'action' => 'Framework > Licentie deactiveren en opnieuw activeren op het huidige domein.' ],
+        'impreza_license_dev_activated' => [ 'label' => 'Framework licentie is een dev-licentie', 'explanation' => 'De licentie is als dev-licentie geactiveerd; het framework forceert daarbij maintenance mode. Acceptabel op een ontwikkelomgeving, niet op een live domein.', 'action' => 'Op live: Framework > Licentie opnieuw activeren als reguliere licentie.' ],
+        'impreza_license_check_unavailable' => [ 'label' => 'Licentiecontrole niet uitvoerbaar', 'explanation' => 'De licentieserver was niet bereikbaar of gaf een onbekend antwoordformaat, mogelijk na een framework-update. De licentiestatus is daardoor niet hard vast te stellen; er wordt bewust geen violation afgegeven in plaats van een mogelijk onjuiste.', 'action' => 'Herhaal de audit later; blijft de melding staan, controleer het licentiecontract in de plugin (constante ASPERA_US_LICENSE).' ],
         'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
         'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Het framework theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul site_key in.' ],
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
@@ -10489,6 +10643,9 @@ add_action( 'rest_api_init', function () {
                 // theme/check
                 'wrong_active_theme'                     => 'observation',
                 'impreza_license_inactive'               => 'critical',
+                'impreza_license_domain_mismatch'        => 'critical',
+                'impreza_license_dev_activated'          => aspera_host_is_subdomain() ? 'observation' : 'warning',
+                'impreza_license_check_unavailable'      => 'observation',
                 'unauthorized_installed_theme'           => 'warning',
                 'theme_recaptcha_site_key_missing'       => 'critical',
                 'theme_recaptcha_secret_key_missing'     => 'critical',
@@ -11256,12 +11413,37 @@ add_action( 'rest_api_init', function () {
                     'detail'   => 'Actief thema: ' . $theme_name . ' (' . $stylesheet . ')',
                 ];
             }
-            $license = get_option( 'us_license_activated' );
-            if ( $license !== '1' && $license !== 1 ) {
+            $license = aspera_impreza_license_state();
+            if ( $license['status'] === 'inactive' ) {
                 $theme_violations[] = [
                     'rule'     => 'impreza_license_inactive',
                     'severity' => 'critical',
                     'detail'   => 'Framework licentie is niet geactiveerd',
+                ];
+
+            } elseif ( $license['status'] === 'mismatch' ) {
+                $theme_violations[] = [
+                    'rule'     => 'impreza_license_domain_mismatch',
+                    'severity' => 'critical',
+                    'detail'   => $license['remote'] === 'invalid'
+                        ? 'Licentie staat lokaal op geactiveerd, maar is niet geldig voor ' . $license['domain']
+                        : 'Licentie geactiveerd op ' . $license['baseline_domain'] . ', site draait nu op ' . $license['domain'],
+                ];
+
+            } elseif ( $license['status'] === 'dev' ) {
+                // Dev-activatie forceert maintenance_mode (about.php:135) en is
+                // daarmee alleen op een ontwikkelomgeving acceptabel.
+                $theme_violations[] = [
+                    'rule'     => 'impreza_license_dev_activated',
+                    'severity' => aspera_host_is_subdomain() ? 'observation' : 'warning',
+                    'detail'   => 'Licentie is als dev-licentie geactiveerd; het framework forceert maintenance mode',
+                ];
+            }
+            if ( $license['status'] !== 'inactive' && $license['remote'] === 'unavailable' ) {
+                $theme_violations[] = [
+                    'rule'     => 'impreza_license_check_unavailable',
+                    'severity' => 'observation',
+                    'detail'   => 'Licentie kon niet bij de licentieserver geverifieerd worden (geverifieerd tegen ' . ASPERA_US_LICENSE['verified_against'] . ')',
                 ];
             }
             // Geinstalleerde thema's: alleen aspera/impreza toegestaan
