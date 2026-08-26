@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.7.0
+ * Version: 3.8.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.7.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.8.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -425,6 +425,21 @@ function aspera_wpb_column_kind( string $col_body ): string {
 }
 
 /**
+ * De theme-brede standaard voor Row Vertical Indents (us-core theme-option 'row_height').
+ * Ontbreekt de option, dan hanteert us-core zelf 'medium' als std
+ * (config/theme-options/layout.php), dus die waarde is hier de expliciete fallback:
+ * een lege option betekent M, niet "geen default".
+ */
+function aspera_us_row_height_default(): string {
+    static $default = null;
+    if ( $default !== null ) return $default;
+    $opts    = get_option( 'usof_options_Impreza', [] );
+    $value   = is_array( $opts ) && isset( $opts['row_height'] ) ? (string) $opts['row_height'] : '';
+    $default = ( $value !== '' ) ? $value : 'medium';
+    return $default;
+}
+
+/**
  * Valideert de WPBakery shortcodes van één post op beleidsschendingen.
  * Geeft een array terug met 'violations' en 'shortcode_count'.
  * Wordt gebruikt door zowel /wpb/validate/{id} als /wpb/validate/all.
@@ -695,6 +710,55 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                         'detail' => 'us_bg_video="' . $bg_video . '" — gebruik {{veldslug}}',
                         'snippet' => $snippet,
                         'location' => $current_location ];
+                }
+
+                // Impreza verbergt een achtergrondvideo standaard onder 600px wanneer
+                // us_bg_video_disable_width ontbreekt; het attribuut staat dus alleen in
+                // de shortcode als het van die default afwijkt. Aspera-norm is 1px.
+                $has_bg_video = ( $bg_video !== null && $bg_video !== '' ) || $attr( 'us_bg_show' ) === 'video';
+                if ( $has_bg_video ) {
+                    $disable_width = $attr( 'us_bg_video_disable_width' );
+                    if ( $disable_width === null || trim( $disable_width ) === '' ) {
+                        $violations[] = [ 'tag' => $tag, 'rule' => 'wrong_bg_video_disable_width',
+                            'detail' => 'us_bg_video_disable_width ontbreekt — Impreza-default 600px verbergt de video op mobiel; zet op 1px',
+                            'snippet' => $snippet,
+                            'location' => $current_location ];
+                    } elseif ( strtolower( trim( $disable_width ) ) !== '1px' ) {
+                        $violations[] = [ 'tag' => $tag, 'rule' => 'wrong_bg_video_disable_width',
+                            'detail' => 'us_bg_video_disable_width="' . $disable_width . '" — video verborgen onder ' . $disable_width . '; zet op 1px',
+                            'snippet' => $snippet,
+                            'location' => $current_location ];
+                    }
+                }
+
+                // Vertical Indents (height) op de theme-default vastzetten koppelt de rij
+                // los van Theme Options zonder dat het visueel opvalt: wijzigt de default
+                // later, dan blijft deze rij achter. Impreza schrijft 'default' niet weg,
+                // dus een afwezig attribuut volgt de default en is altijd correct.
+                $row_height = $attr( 'height' );
+                if ( $row_height !== null && $row_height !== '' && $row_height !== 'default' ) {
+                    $height_default = aspera_us_row_height_default();
+                    if ( $row_height === $height_default ) {
+                        $labels = [ 'auto' => 'None', 'small' => 'S', 'medium' => 'M', 'large' => 'L', 'huge' => 'XL' ];
+                        $label  = $labels[ $row_height ] ?? $row_height;
+                        $viol_rh = [ 'tag' => $tag, 'rule' => 'redundant_row_height',
+                            'detail' => 'height="' . $row_height . '" is gelijk aan de theme-default Row Vertical Indents (' . $label . ') — de rij volgt Theme Options niet meer; verwijder het attribuut',
+                            'snippet' => $snippet,
+                            'location' => $current_location ];
+                        // De fix-handler doet een str_replace over de volledige post_content.
+                        // Alleen aanbieden wanneer deze openingstag exact één keer voorkomt,
+                        // anders zouden identieke rijen elders ongemerkt meeveranderen.
+                        if ( substr_count( $content, $full_sc ) === 1 ) {
+                            $viol_rh['proposed_fix'] = [
+                                'fixable'   => true,
+                                'action'    => 'remove_attribute',
+                                'attribute' => 'height',
+                                'before'    => $full_sc,
+                                'after'     => preg_replace( '/\s+height="' . preg_quote( $row_height, '/' ) . '"/', '', $full_sc ),
+                            ];
+                        }
+                        $violations[] = $viol_rh;
+                    }
                 }
             }
         }
@@ -1619,6 +1683,71 @@ function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
 }
 
 /**
+ * Geeft het post-ID terug wanneer een field group aantoonbaar precies één pagina bedient,
+ * anders null. Alleen bij zo'n een-op-een-koppeling zegt een lege veldwaarde iets over het
+ * veld zelf: er is dan geen tweede post die hem alsnog vult.
+ *
+ * Bewust strikt: alleen een locatie die uit één regel bestaat is eenduidig. Meerdere
+ * OR-groepen of AND-regels verbreden de scope of maken hem onbepaald, en dan is niets
+ * melden beter dan een veld ten onrechte deprecated noemen.
+ */
+function aspera_acf_group_single_post( int $group_id ): ?int {
+    $group = get_post( $group_id );
+    if ( ! $group ) return null;
+
+    $config = maybe_unserialize( $group->post_content );
+    if ( ! is_array( $config ) || empty( $config['location'] ) || ! is_array( $config['location'] ) ) return null;
+    if ( count( $config['location'] ) !== 1 ) return null;
+
+    $rules = reset( $config['location'] );
+    if ( ! is_array( $rules ) || count( $rules ) !== 1 ) return null;
+
+    $rule = reset( $rules );
+    if ( ! is_array( $rule ) || ( $rule['operator'] ?? '' ) !== '==' ) return null;
+
+    $param = $rule['param'] ?? '';
+    $value = (string) ( $rule['value'] ?? '' );
+
+    // Directe koppeling aan één pagina of post
+    if ( in_array( $param, [ 'page', 'post' ], true ) && ctype_digit( $value ) ) {
+        return get_post( (int) $value ) ? (int) $value : null;
+    }
+
+    // Koppeling via een taxonomy-term — op Aspera-sites het gangbare patroon (p_temps:home).
+    // De group bedient dan de posts in die term; alleen bij precies één post is hij eenduidig.
+    if ( $param === 'post_taxonomy' ) {
+        $parts = explode( ':', $value, 2 );
+        if ( count( $parts ) !== 2 ) return null;
+        list( $taxonomy, $term_slug ) = $parts;
+        if ( ! taxonomy_exists( $taxonomy ) ) return null;
+
+        $post_ids = get_posts( [
+            'post_type'        => 'any',
+            'post_status'      => [ 'publish', 'draft', 'pending', 'private' ],
+            'posts_per_page'   => 2,
+            'fields'           => 'ids',
+            'suppress_filters' => false,
+            'tax_query'        => [ [ 'taxonomy' => $taxonomy, 'field' => 'slug', 'terms' => $term_slug ] ],
+        ] );
+        return ( count( $post_ids ) === 1 ) ? (int) $post_ids[0] : null;
+    }
+
+    return null;
+}
+
+/**
+ * Bepaalt of een ACF-veldwaarde als niet-ingevuld geldt.
+ * Let op: "0" telt als ingevuld — dat is de opgeslagen waarde van een uitgevinkt
+ * true_false-veld en dus een bewuste keuze, geen leeg veld.
+ */
+function aspera_acf_value_is_empty( $value ): bool {
+    if ( $value === null || $value === false ) return true;
+    if ( is_string( $value ) ) return trim( $value ) === '';
+    if ( is_array( $value ) )  return $value === [];
+    return false;
+}
+
+/**
  * Valideert een ACF field group op structuurfouten.
  * Gedeelde logica voor /acf/validate/{id} en /acf/validate/all.
  *
@@ -1627,6 +1756,9 @@ function aspera_delete_taxonomy_data( string $taxonomy_slug ): array {
 function aspera_validate_acf_group( int $group_id ): array {
     $fields = acf_get_fields( $group_id );
     if ( ! $fields ) return [ 'fields' => [], 'issues' => [] ];
+
+    // Bedient deze group precies één pagina? Dan is een leeg veld nergens anders in gebruik.
+    $single_post_id = aspera_acf_group_single_post( $group_id );
 
     $all_keys = [];
     foreach ( $fields as $f ) {
@@ -1699,6 +1831,23 @@ function aspera_validate_acf_group( int $group_id ): array {
                 'field_label' => $f['label'] ?? $name,
                 'field_slug'  => $name,
                 'field_key'   => $key,
+            ];
+        }
+
+        // Leeg veld in een group die maar één pagina bedient: aannemelijk deprecated.
+        // tab, accordion en message dragen geen waarde en zijn dus altijd "leeg".
+        if (
+            $single_post_id !== null
+            && $name !== ''
+            && ! in_array( $type, [ 'tab', 'accordion', 'message' ], true )
+            && aspera_acf_value_is_empty( get_post_meta( $single_post_id, $name, true ) )
+        ) {
+            $issues[] = [
+                'type'        => 'unused_acf_field',
+                'field_label' => $f['label'] ?? $name,
+                'field_slug'  => $name,
+                'field_key'   => $key,
+                'post_id'     => $single_post_id,
             ];
         }
     }
@@ -3699,7 +3848,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
@@ -3714,7 +3863,7 @@ function aspera_get_rules_per_category(): array {
         'wpb_templates' => [ 'wpb_saved_templates' ],
         'taxonomy' => [ 'orphaned_taxonomy','orphaned_taxonomy_has_dependencies','taxonomy_backup_present' ],
         'header_config' => [ 'custom_breakpoint_invalid_order','custom_breakpoint_exceeds_content_width','custom_breakpoint_active','orientation_vertical_forbidden','menu_mobile_always','menu_mobile_exceeds_content_width','menu_mobile_behavior_not_label_and_arrow','menu_mobile_icon_size_too_large','menu_mobile_icon_size_inconsistent','menu_align_edges_enabled','scroll_breakpoint_inconsistent','centering_missing','centering_unexpected','header_element_unused' ],
-        'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix' ],
+        'acf_fields' => [ 'missing_name','broken_conditional_reference','mixed_choice_key_types','wysiwyg_media_upload_enabled','page_link_missing_allow_null','wrong_group_name_prefix','unused_acf_field' ],
         'acf_locations' => [ 'orphaned_location_taxonomy','orphaned_location_term','empty_location_term' ],
         'meta_orphaned' => [ 'orphaned_meta','orphaned_meta_in_templates','orphaned_meta_slug_mismatch','orphaned_meta_slug_mismatch_in_templates','stale_meta_field_key' ],
         'options_orphaned' => [ 'orphaned_option' ],
@@ -3800,6 +3949,8 @@ function aspera_get_rule_context(): array {
         'hardcoded_text' => [ 'label' => 'Hardcoded tekst in shortcode', 'explanation' => 'Tekst is vast in shortcode i.p.v. via ACF.', 'action' => 'Vervang door ACF-veld referentie.' ],
         'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
         'hardcoded_bg_video' => [ 'label' => 'Hardcoded achtergrond-video', 'explanation' => 'Row heeft vaste video-URL i.p.v. ACF.', 'action' => 'Vervang door ACF-veld of verwijder de video.' ],
+        'redundant_row_height' => [ 'label' => 'Vertical Indents vastgezet op de theme-default', 'explanation' => 'De row zet height= hard op dezelfde maat die in Theme Options als standaard geldt. De rij volgt de theme-default daardoor niet meer: wijzigt die later, dan blijft deze rij op de oude maat staan.', 'action' => 'Zet Vertical Indents in de row terug op Default (verwijder het height-attribuut).' ],
+        'wrong_bg_video_disable_width' => [ 'label' => 'Achtergrond-video verborgen op smalle schermen', 'explanation' => 'us_bg_video_disable_width ontbreekt of wijkt af van 1px; Impreza verbergt de video dan onder die breedte (default 600px), waardoor mobiele bezoekers alleen de videostill zien.', 'action' => 'Zet us_bg_video_disable_width="1px" op de row.' ],
         'hardcoded_button_text' => [ 'label' => 'Hardcoded button-tekst in formulier', 'explanation' => 'Submit-button-tekst is vast i.p.v. via opt_forms option.', 'action' => 'Verplaats naar option page (opt_forms) en refereer dynamisch.' ],
         'hardcoded_receiver_email' => [ 'label' => 'Hardcoded e-mailadres in formulier', 'explanation' => 'Receiver e-mail is vast in shortcode; niet centraal beheerbaar.', 'action' => 'Verplaats naar opt_forms option page.' ],
         'hardcoded_success_message' => [ 'label' => 'Hardcoded success-message in formulier', 'explanation' => 'Bevestigingstekst is vast in shortcode.', 'action' => 'Verplaats naar opt_forms option.' ],
@@ -3931,6 +4082,7 @@ function aspera_get_rule_context(): array {
         'animate_detected' => [ 'label' => 'Animate-attribuut gedetecteerd', 'explanation' => 'Element heeft animate-eigenschap; meestal performance-impact.', 'action' => 'Beoordeel of nodig; eventueel verwijderen.' ],
         'responsive_hide_detected' => [ 'label' => 'Responsive-hide attribuut', 'explanation' => 'Element heeft responsive_hide_at_*; layout-keuze om expliciet te zijn.', 'action' => 'Bevestigen of bewust.' ],
         'unknown_acf_field' => [ 'label' => 'Verwijzing naar niet-bestaand ACF-veld', 'explanation' => 'Een element roept een ACF-veld op dat niet meer bestaat; het element blijft leeg en een conditie op dat veld vuurt nooit.', 'action' => 'Corrigeer de veldnaam of verwijder de verwijzing.' ],
+        'unused_acf_field' => [ 'label' => 'Leeg ACF-veld (aannemelijk deprecated)', 'explanation' => 'Het veld is leeg op de enige pagina waarvoor deze field group geldt. Er is geen tweede post die de waarde alsnog vult, dus het veld wordt nergens gebruikt en houdt onnodig ruimte bezet in de editor.', 'action' => 'Controleer of het veld nog nodig is; zo niet, verwijder het uit de field group en haal daarna de eventuele verwijzing uit het template.' ],
         'duplicate_acf_fields' => [ 'label' => 'Duplicate ACF-veldwaarden', 'explanation' => 'Dezelfde ACF-veldnaam wordt binnen deze post meerdere keren opgeroepen; vaak het gevolg van het dupliceren van een element.', 'action' => 'Controleer of de herhaling bedoeld is; zo niet, koppel de kopie aan een eigen veld.' ],
 
         // ── Grid (us_header / us_grid_layout) ─────────────────────────────
@@ -5716,6 +5868,9 @@ add_action( 'rest_api_init', function () {
                             break;
                         case 'page_link_missing_allow_null':
                             $detail = $group->post_title . ': page-link "' . ( $label ?: $name ) . '" heeft allow null niet ingeschakeld';
+                            break;
+                        case 'unused_acf_field':
+                            $detail = $group->post_title . ': veld "' . ( $label ?: $name ) . '" (' . $name . ') is leeg op de enige pagina die deze group bedient (#' . ( $issue['post_id'] ?? '?' ) . ') — aannemelijk deprecated';
                             break;
                         default:
                             $detail = $group->post_title . ': ' . $t;
@@ -10738,6 +10893,8 @@ add_action( 'rest_api_init', function () {
                 'parent_row_with_siblings'    => 'error',
                 'hardcoded_bg_image'          => 'error',
                 'hardcoded_bg_video'          => 'error',
+                'wrong_bg_video_disable_width' => 'warning',
+                'redundant_row_height'        => 'warning',
                 'hardcoded_text'              => 'error',
                 'empty_btn_style'             => 'warning',
                 'scroll_effect_forbidden'     => 'warning',
@@ -10749,6 +10906,7 @@ add_action( 'rest_api_init', function () {
                 'animate_detected'            => 'observation',
                 'responsive_hide_detected'    => 'observation',
                 'duplicate_acf_fields'        => 'warning',
+                'unused_acf_field'            => 'warning',
                 'unknown_acf_field'           => 'error',
 
                 // grid/validate — image:* (us_header only)
