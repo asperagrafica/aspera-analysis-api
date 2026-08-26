@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.13.0
+ * Version: 3.14.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.13.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.14.0' );
 }
 
 // ─── Plugin Update Checker ────────────────────────────────────────────────────
@@ -3971,7 +3971,7 @@ function aspera_get_rules_per_category(): array {
         'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled','theme_gfonts_merge_disabled' ],
         'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
-        'smtp' => [ 'smtp_plugin_inactive','smtp_announcements_visible','smtp_dashboard_widget_visible','smtp_summary_email_enabled','smtp_brevo_api_key_missing','smtp_from_email_not_forced','smtp_from_name_not_forced','smtp_mailer_not_allowed' ],
+        'smtp' => [ 'smtp_plugin_inactive','smtp_announcements_visible','smtp_dashboard_widget_visible','smtp_summary_email_enabled','smtp_brevo_api_key_missing','smtp_from_email_not_forced','smtp_from_name_not_forced','smtp_mailer_not_allowed','smtp_do_not_send_enabled','smtp_delivery_errors_hidden','smtp_usage_tracking_enabled','smtp_optimize_sending_enabled' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
     ];
     return $reg;
@@ -4097,6 +4097,10 @@ function aspera_get_rule_context(): array {
         'smtp_announcements_visible' => [ 'label' => 'WP Mail SMTP announcements zichtbaar', 'explanation' => 'De plugin toont aankondigingen en promotieblokken in wp-admin.', 'action' => 'WP Mail SMTP > Settings > General > zet "Hide Announcements" aan.' ],
         'smtp_dashboard_widget_visible' => [ 'label' => 'WP Mail SMTP dashboard widget zichtbaar', 'explanation' => 'De plugin plaatst een eigen widget op het WordPress-dashboard.', 'action' => 'WP Mail SMTP > Settings > General > zet "Hide Dashboard Widget" aan.' ],
         'smtp_summary_email_enabled' => [ 'label' => 'WP Mail SMTP weekmail actief', 'explanation' => 'De plugin mailt wekelijks een verzendoverzicht naar de beheerder.', 'action' => 'WP Mail SMTP > Settings > General > zet "Disable Email Summaries" aan.' ],
+        'smtp_do_not_send_enabled' => [ 'label' => 'Do Not Send staat aan', 'explanation' => 'WP Mail SMTP blokkeert alle uitgaande mail. Formulierinzendingen, bestellingen en wachtwoordherstel komen niet aan, zonder zichtbare fout op de site.', 'action' => 'WP Mail SMTP > Settings > General > zet "Do Not Send" uit.' ],
+        'smtp_delivery_errors_hidden' => [ 'label' => 'Email delivery errors verborgen', 'explanation' => 'Verzendfouten worden niet meer in wp-admin getoond; een kapotte mailconfiguratie blijft daardoor onopgemerkt.', 'action' => 'WP Mail SMTP > Settings > General > zet "Hide Email Delivery Errors" uit.' ],
+        'smtp_usage_tracking_enabled' => [ 'label' => 'Usage tracking aan', 'explanation' => 'De plugin stuurt gebruiksgegevens over deze site naar de maker.', 'action' => 'WP Mail SMTP > Settings > General > zet "Allow Usage Tracking" uit.' ],
+        'smtp_optimize_sending_enabled' => [ 'label' => 'Optimize Email Sending aan', 'explanation' => 'E-mail wordt asynchroon via een wachtrij verstuurd in plaats van direct. Bij een haperende cron blijft mail in de wachtrij staan zonder foutmelding.', 'action' => 'WP Mail SMTP > Settings > General > zet "Optimize Email Sending" uit.' ],
         'smtp_mailer_not_allowed' => [ 'label' => 'Niet-toegestane mailer', 'explanation' => 'Alleen Brevo en Other SMTP zijn toegestaan. Een andere mailer betekent een niet-ondersteund verzendpad, of bij de PHP mail-functie helemaal geen authenticatie.', 'action' => 'WP Mail SMTP > Settings > Mail > kies Brevo of Other SMTP.' ],
         'smtp_brevo_api_key_missing' => [ 'label' => 'Brevo API-key ontbreekt', 'explanation' => 'De mailer staat op Brevo maar het API-key-veld is leeg; uitgaande mail kan niet verstuurd worden.', 'action' => 'WP Mail SMTP > Settings > Brevo > vul de API-key in.' ],
         'smtp_from_email_not_forced' => [ 'label' => 'From Email niet geforceerd', 'explanation' => 'Zonder Force From Email mogen plugins een eigen afzenderadres meesturen, wat de afleverbaarheid en SPF/DKIM-uitlijning ondermijnt.', 'action' => 'WP Mail SMTP > Settings > Mail > zet "Force From Email" aan.' ],
@@ -11271,6 +11275,10 @@ add_action( 'rest_api_init', function () {
                 'smtp_summary_email_enabled'             => 'warning',
                 'smtp_brevo_api_key_missing'             => 'critical',
                 'smtp_mailer_not_allowed'                => 'warning',
+                'smtp_do_not_send_enabled'               => 'critical',
+                'smtp_delivery_errors_hidden'            => 'critical',
+                'smtp_usage_tracking_enabled'            => 'warning',
+                'smtp_optimize_sending_enabled'          => 'critical',
                 'smtp_from_email_not_forced'             => 'warning',
                 'smtp_from_name_not_forced'              => 'warning',
                 'cpt_can_export_enabled'                 => 'observation',
@@ -12538,6 +12546,23 @@ add_action( 'rest_api_init', function () {
                             'rule'     => $smtp_rule,
                             'severity' => 'warning',
                             'detail'   => '"' . $smtp_label . '" staat uit (' . $opt_key . ') — moet aan',
+                        ];
+                    }
+                }
+
+                // Deze opties horen juist uit te staan.
+                $smtp_forbidden = [
+                    'do_not_send'                    => [ 'smtp_do_not_send_enabled',      'Do Not Send',                'critical' ],
+                    'email_delivery_errors_hidden'   => [ 'smtp_delivery_errors_hidden',   'Hide Email Delivery Errors', 'critical' ],
+                    'usage-tracking-enabled'         => [ 'smtp_usage_tracking_enabled',   'Allow Usage Tracking',       'warning'  ],
+                    'optimize_email_sending_enabled' => [ 'smtp_optimize_sending_enabled', 'Optimize Email Sending',     'critical' ],
+                ];
+                foreach ( $smtp_forbidden as $opt_key => list( $smtp_rule, $smtp_label, $smtp_sev ) ) {
+                    if ( ! empty( $smtp_gen[ $opt_key ] ) ) {
+                        $smtp_violations[] = [
+                            'rule'     => $smtp_rule,
+                            'severity' => $smtp_sev,
+                            'detail'   => '"' . $smtp_label . '" staat aan (' . $opt_key . ') — moet uit',
                         ];
                     }
                 }
