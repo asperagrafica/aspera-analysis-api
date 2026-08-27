@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.15.0
+ * Version: 3.16.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,11 +10,17 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.15.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.16.0' );
 }
 
-// Minimaal vereiste PHP-versie op een Aspera-site. Alles daaronder is critical,
-// elke hogere versie (8.4.1, 8.5, ...) is akkoord. Verhogen = alleen deze regel.
+// PHP-versiedrempels op een Aspera-site, in twee trappen:
+//   < ASPERA_PHP_MINIMUM   critical  (niet meer ondersteund door PHP zelf)
+//   < ASPERA_PHP_BASELINE  warning   (ondersteund, maar niet de Aspera-norm)
+//   >= ASPERA_PHP_BASELINE geen violation, inclusief 8.4.x en 8.5+
+// Verhogen = alleen deze twee regels aanpassen.
+if ( ! defined( 'ASPERA_PHP_MINIMUM' ) ) {
+    define( 'ASPERA_PHP_MINIMUM', '8.2' );
+}
 if ( ! defined( 'ASPERA_PHP_BASELINE' ) ) {
     define( 'ASPERA_PHP_BASELINE', '8.4' );
 }
@@ -3936,6 +3942,7 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
                 case 'missing_favicon':
                     return [ 'url' => admin_url( 'customize.php?autofocus[section]=title_tagline' ), 'title' => 'Site identity' ];
                 case 'php_version_critical':
+                case 'php_version_outdated':
                 case 'php_memory_limit_low':
                     return [ 'url' => admin_url( 'site-health.php?tab=debug' ), 'title' => 'Site Health' ];
                 case 'orphaned_wpforms_scheduled_actions':
@@ -3975,7 +3982,7 @@ function aspera_get_rules_per_category(): array {
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
         'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled','theme_gfonts_merge_disabled' ],
         'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
-        'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
+        'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'smtp' => [ 'smtp_plugin_inactive','smtp_announcements_visible','smtp_dashboard_widget_visible','smtp_summary_email_enabled','smtp_brevo_api_key_missing','smtp_from_email_not_forced','smtp_from_name_not_forced','smtp_mailer_not_allowed','smtp_do_not_send_enabled','smtp_delivery_errors_hidden','smtp_usage_tracking_enabled','smtp_optimize_sending_enabled' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
     ];
@@ -4133,7 +4140,8 @@ function aspera_get_rule_context(): array {
         'default_role_invalid' => [ 'label' => 'Default user-rol niet subscriber', 'explanation' => 'New User Default Role ≠ subscriber.', 'action' => 'Settings > General > New User Default Role > Subscriber.' ],
         'users_can_register_enabled' => [ 'label' => 'Membership-registratie aan', 'explanation' => 'Anyone can register staat aan; ongewenste user-creatie mogelijk.', 'action' => 'Settings > General > Membership > vink uit.' ],
         'admin_email_invalid' => [ 'label' => 'Admin-email afwijkend', 'explanation' => 'admin_email ≠ wp@asperagrafica.nl.', 'action' => 'Settings > General > Administration Email Address > wp@asperagrafica.nl.' ],
-        'php_version_critical' => [ 'label' => 'PHP-versie onder baseline', 'explanation' => 'PHP < ' . ASPERA_PHP_BASELINE . '; security-risico en compatibiliteitsproblemen.', 'action' => 'Hosting > PHP-versie naar ' . ASPERA_PHP_BASELINE . ' of hoger.' ],
+        'php_version_critical' => [ 'label' => 'PHP-versie kritiek verouderd', 'explanation' => 'PHP < ' . ASPERA_PHP_MINIMUM . '; security-risico en compatibiliteitsproblemen.', 'action' => 'Hosting > PHP-versie naar ' . ASPERA_PHP_BASELINE . ' of hoger.' ],
+        'php_version_outdated' => [ 'label' => 'PHP-versie onder norm', 'explanation' => 'PHP < ' . ASPERA_PHP_BASELINE . '; nog ondersteund, maar niet de Aspera-norm.', 'action' => 'Hosting > PHP-versie naar ' . ASPERA_PHP_BASELINE . ' of hoger.' ],
         'php_memory_limit_low' => [ 'label' => 'PHP memory limit te laag', 'explanation' => 'memory_limit < 128M; complexe pagina\'s kunnen crashen.', 'action' => 'Hosting > verhoog memory_limit naar 256M.' ],
         'search_engine_noindex' => [ 'label' => 'Site geblokkeerd voor zoekmachines', 'explanation' => 'blog_public=0; site indexeert niet. Severity is critical op hoofddomein en warning op subdomein (subdomeinen worden vaak voor dev/test ingezet).', 'action' => 'Settings > Reading > "Discourage search engines" uitvinken.' ],
         'missing_favicon' => [ 'label' => 'Favicon ontbreekt', 'explanation' => 'Site Icon is niet ingesteld.', 'action' => 'Settings > General > Site Icon > upload.' ],
@@ -11303,6 +11311,7 @@ add_action( 'rest_api_init', function () {
                 'users_can_register_enabled'             => 'warning',
                 'admin_email_invalid'                    => 'warning',
                 'php_version_critical'                   => 'critical',
+                'php_version_outdated'                   => 'warning',
                 'php_memory_limit_low'                   => 'warning',
                 'orphaned_wpforms_scheduled_actions'     => 'warning',
                 'scroll_breakpoint_not_1px'              => 'observation',
@@ -12414,11 +12423,17 @@ add_action( 'rest_api_init', function () {
                 ];
             }
             $php_version = PHP_VERSION;
-            if ( version_compare( $php_version, ASPERA_PHP_BASELINE, '<' ) ) {
+            if ( version_compare( $php_version, ASPERA_PHP_MINIMUM, '<' ) ) {
                 $wp_settings_violations[] = [
                     'rule'     => 'php_version_critical',
                     'severity' => 'critical',
-                    'detail'   => 'PHP versie ' . $php_version . ' (minimaal ' . ASPERA_PHP_BASELINE . ' vereist)',
+                    'detail'   => 'PHP versie ' . $php_version . ' (minimaal ' . ASPERA_PHP_MINIMUM . ' vereist, norm ' . ASPERA_PHP_BASELINE . ')',
+                ];
+            } elseif ( version_compare( $php_version, ASPERA_PHP_BASELINE, '<' ) ) {
+                $wp_settings_violations[] = [
+                    'rule'     => 'php_version_outdated',
+                    'severity' => 'warning',
+                    'detail'   => 'PHP versie ' . $php_version . ' (norm is ' . ASPERA_PHP_BASELINE . ')',
                 ];
             }
             $memory_limit_raw   = ini_get( 'memory_limit' );
