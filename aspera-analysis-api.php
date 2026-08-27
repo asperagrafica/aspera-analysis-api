@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.16.0
+ * Version: 3.16.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.16.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.16.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -121,6 +121,31 @@ const ASPERA_LICENSE_BASELINE_OPTION = 'aspera_license_baseline';
 const ASPERA_LICENSE_REMOTE_TRANSIENT = 'aspera_license_remote_check';
 const ASPERA_LICENSE_REMOTE_TTL       = 12 * HOUR_IN_SECONDS;
 const ASPERA_LICENSE_REMOTE_TTL_FAIL  = HOUR_IN_SECONDS;
+
+/**
+ * ─── Uitzonderingen op empty_style_attr ──────────────────────────────────────
+ * De regel `empty_style_attr` flagt attributen die op `_style` eindigen en leeg
+ * zijn, omdat een leeg stijlobject-attribuut betekent dat de gekozen stijl uit
+ * het framework is verdwenen. Niet elk `*_style` attribuut is echter een
+ * verwijzing naar een stijlobject.
+ *
+ * `font_style` is een legacy typografie-attribuut dat de CSS-property
+ * `font-style` (normal/italic) droeg. us-core migreert het naar
+ * `css.default.font-style`, maar uitsluitend wanneer het gevuld is
+ * (`migrations/Impreza/us_migration_7_0.php:823` — `if ( ! empty( ... ) )`).
+ * Een leeg `font_style=""` blijft daardoor per definitie achter na migratie en
+ * is niet meer opruimbaar via de editor: het huidige element-schema
+ * (`config/elements/post_date.php`) kent de parameter niet meer, dus er is geen
+ * control voor. Flaggen levert een melding op die niemand kan oplossen.
+ *
+ * Geverifieerd tegen us-core 9.2.2: geen enkele parameter in `config/` heet
+ * `font_style`; alle overige `*_style` parameters (btn_style, text_style,
+ * us_field_style, …) zijn wél stijlobject-selectors en blijven dus gevlagd.
+ */
+const ASPERA_EMPTY_STYLE_ATTR_EXCEPTIONS = [
+    'verified_against' => 'us-core 9.2.2',
+    'attributes'       => [ 'font_style' ],
+];
 
 /**
  * Bepaalt de werkelijke staat van de Impreza-licentie.
@@ -963,6 +988,8 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
             if ( preg_match_all( '/\b((?:\w+_)?style)="\s*"/', $attrs, $style_m ) ) {
                 foreach ( $style_m[1] as $style_attr ) {
                     if ( $tag === 'us_btn' && $style_attr === 'style' ) continue;
+                    // Legacy typografie-attributen zijn geen stijlobject-referentie.
+                    if ( in_array( $style_attr, ASPERA_EMPTY_STYLE_ATTR_EXCEPTIONS['attributes'], true ) ) continue;
                     $violations[] = [ 'tag' => $tag, 'rule' => 'empty_style_attr',
                         'detail' => $style_attr . '="" — stijl was ingesteld maar het stijlobject bestaat niet meer in het framework',
                         'location' => $current_location,
@@ -8646,7 +8673,8 @@ add_action( 'rest_api_init', function () {
                     if ( ! in_array( $element_type, [ 'image', 'img' ], true ) ) {
                         foreach ( $element as $attr_key => $attr_val ) {
                             if ( ( $attr_key === 'style' || substr( $attr_key, -6 ) === '_style' )
-                                 && $attr_val === '' ) {
+                                 && $attr_val === ''
+                                 && ! in_array( $attr_key, ASPERA_EMPTY_STYLE_ATTR_EXCEPTIONS['attributes'], true ) ) {
                                 $violations[] = [
                                     'element' => $element_key,
                                     'rule'    => 'empty_style_attr',
