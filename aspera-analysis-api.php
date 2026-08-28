@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.18.0
+ * Version: 3.18.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -338,11 +338,22 @@ function aspera_acf_field_map(): array {
  */
 /**
  * Elementen die de responsive-opties uit us-core laden EN de kolom-/breakpoint-
- * params daadwerkelijk tonen. De vier carousel-varianten laden dezelfde config
- * maar sluiten deze params uit via `exclude_for_carousel`.
+ * params daadwerkelijk tonen, met per element de us-core default voor `columns`.
+ * Die default verschilt per element en is bepalend: een shortcode zonder
+ * columns-attribuut valt erop terug, en het kolomaantal bepaalt welke
+ * breakpoints gelden. Een vaste fallback zou us_post_list (std 4) als 2
+ * behandelen en daardoor de verkeerde breakpoints verwachten.
+ * De vier carousel-varianten laden dezelfde config maar sluiten deze params
+ * uit via `exclude_for_carousel`.
  * Bron: us-core config/elements_responsive_options.php + config/elements/*.php
  */
-const ASPERA_RESPONSIVE_LIST_TAGS = [ 'us_post_list', 'us_product_list', 'us_user_list', 'us_term_list', 'us_grid' ];
+const ASPERA_RESPONSIVE_LIST_TAGS = [
+    'us_post_list'    => 4,
+    'us_product_list' => 4,
+    'us_user_list'    => 3,
+    'us_term_list'    => 3,
+    'us_grid'         => 2,
+];
 
 /**
  * Tablets- en mobiles-breakpoint uit de Impreza theme options, in px.
@@ -867,8 +878,9 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
 
         // ─── Responsive breakpoints op lijst-elementen ────────────────
         // Aspera-standaard: de breakpoint-widths matchen exact de theme options.
-        //   3 of meer kolommen -> slot 1 = tablets_breakpoint, slot 2 = mobiles_breakpoint
-        //   2 kolommen         -> slot 1 = mobiles_breakpoint, slot 2 ongebruikt
+        //   3 of meer kolommen -> twee keer breken: slot 1 = tablets_breakpoint,
+        //                         slot 2 = mobiles_breakpoint
+        //   2 kolommen         -> één keer breken: slot 1 = tablets_breakpoint
         //   1 kolom            -> geen breakpoints
         // Slot 3 blijft in alle gevallen ongebruikt.
         //
@@ -876,13 +888,18 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         // voor slot 1, tablets+1 (1101px) voor slot 2 en mobiles+1 (901px) voor slot 3.
         // Een niet-gezet attribuut valt daarop terug en voldoet dus nooit aan deze
         // standaard; "niet gezet" is hier een violation, geen vrijstelling.
-        if ( in_array( $tag, ASPERA_RESPONSIVE_LIST_TAGS, true ) && ( $bp_theme = aspera_theme_breakpoints() ) !== null ) {
+        if ( isset( ASPERA_RESPONSIVE_LIST_TAGS[ $tag ] ) && ( $bp_theme = aspera_theme_breakpoints() ) !== null ) {
             $bp_cols = $attr( 'columns' );
-            $bp_cols = ( $bp_cols === null || $bp_cols === '' ) ? 2 : (int) $bp_cols; // us-core std = 2
+            $bp_cols = ( $bp_cols === null || $bp_cols === '' )
+                ? ASPERA_RESPONSIVE_LIST_TAGS[ $tag ] // us-core default van dit element
+                : (int) $bp_cols;
+            // Slot 1 is altijd de tablets-breakpoint, slot 2 altijd de mobiles-
+            // breakpoint. Het kolomaantal bepaalt alleen HOEVAAK er gebroken wordt:
+            // 2 kolommen breken één keer (slot 1), 3 of meer breken twee keer.
             if ( $bp_cols >= 3 ) {
                 $bp_expected = [ 1 => $bp_theme['tablets'], 2 => $bp_theme['mobiles'] ];
             } elseif ( $bp_cols === 2 ) {
-                $bp_expected = [ 1 => $bp_theme['mobiles'] ];
+                $bp_expected = [ 1 => $bp_theme['tablets'] ];
             } else {
                 $bp_expected = [];
             }
