@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.16.1
+ * Version: 3.17.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.16.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.17.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -3985,13 +3985,13 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','hardcoded_text','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
-        'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size','hardcoded_border_radius' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
+        'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size','hardcoded_border_radius','hardcoded_element_text' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
         'plugins' => [ 'extra_plugin','maintenance_mode_active' ],
         'cpt' => [ 'missing_rest','default_icon','duplicate_icon','empty_labels','unexpected_supports','missing_title_support','nav_menus_no_frontend','cptui_leftover','cpt_slug_missing_suffix','cpt_can_export_enabled','plural_singular_identical' ],
-        'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta' ],
+        'db_tables' => [ 'orphaned_table','unknown_table','orphaned_post_type','orphaned_plugin_options','orphaned_plugin_meta','wpo_schedule_disabled','wpo_schedule_wrong_interval','wpo_cleanup_task_missing' ],
         'css' => [ 'unused_css_class','wrong_css_prefix' ],
         'nav' => [ 'unused_nav_menu','broken_menu_reference','invalid_menu_name','mismatched_menu_placement','external_link_no_target_blank','page_not_in_menu','custom_menu_label' ],
         'wpb_modules' => [ 'wpb_post_custom_css','wpb_post_custom_js','wpb_module_active','beheerder_post_types_not_disabled' ],
@@ -4068,6 +4068,9 @@ function aspera_get_rule_context(): array {
         'orphaned_meta_slug_mismatch_in_templates' => [ 'label' => 'Afwijkende meta-key in templates', 'explanation' => 'Een meta_key hoort niet bij het veld waarnaar zijn referentie wijst, maar komt nog wel voor in WPBakery-templates.', 'action' => 'Verwijder of corrigeer de referentie in de template eerst, dan pas de meta opruimen.' ],
         'stale_meta_field_key' => [ 'label' => 'Verouderde field key referentie', 'explanation' => 'Een veld met deze slug bestaat nog, maar de _-referentie wijst naar een field key die niet meer bestaat. ACF valt dan terug op naam-lookup, waardoor het veld meestal blijft werken maar de koppeling niet meer expliciet is.', 'action' => 'Werk de _-referentie bij naar de actuele field key van het veld met deze slug.' ],
         'orphaned_table' => [ 'label' => 'Verweesde database-tabel', 'explanation' => 'Een tabel hoort bij een plugin/feature die niet meer actief is.', 'action' => 'Bevestig dat de tabel niet meer nodig is en drop hem.' ],
+        'wpo_schedule_disabled' => [ 'label' => 'WP-Optimize opschoning staat uit', 'explanation' => 'De geplande opschoning van WP-Optimize is uitgeschakeld. Revisies, auto-drafts en verlopen transients blijven zich dan opstapelen in de database.', 'action' => 'Zet in WP-Optimize onder Settings de optie "Enable scheduled clean-up and optimization" aan.' ],
+        'wpo_schedule_wrong_interval' => [ 'label' => 'WP-Optimize met afwijkend interval', 'explanation' => 'De geplande opschoning draait op een ander interval dan dagelijks. Bij een lagere frequentie loopt de database tussen twee runs verder vol.', 'action' => 'Zet het interval in WP-Optimize op Daily.' ],
+        'wpo_cleanup_task_missing' => [ 'label' => 'WP-Optimize mist opschoontaken', 'explanation' => 'Een of meer van de vier standaardtaken staan niet aangevinkt: database optimize, clean post revisions, remove auto draft posts en remove expired transient options.', 'action' => 'Vink de ontbrekende taken aan in WP-Optimize onder Settings.' ],
         'unknown_table' => [ 'label' => 'Onbekende database-tabel', 'explanation' => 'Een tabel is niet herkend uit de Aspera-whitelist; mogelijk onbekende plugin of legacy.', 'action' => 'Onderzoek herkomst en classificeer (governed/orphaned).' ],
         'orphaned_post_type' => [ 'label' => 'Verweesde posts van inactief post-type', 'explanation' => 'Posts in een post-type dat niet meer geregistreerd is.', 'action' => 'Onderzoek herkomst; verwijderen of post-type herregistreren.' ],
         'orphaned_plugin_options' => [ 'label' => 'Options van inactieve plugin', 'explanation' => 'wp_options-rijen van een plugin die niet meer actief is.', 'action' => 'Beoordeel of options nog nodig (deactivatie tijdelijk?) en verwijder anders.' ],
@@ -4086,7 +4089,6 @@ function aspera_get_rule_context(): array {
         'hardcoded_image' => [ 'label' => 'Hardcoded afbeelding (us_image)', 'explanation' => 'Image-shortcode heeft vaste image_id in plaats van ACF.', 'action' => 'Vervang door ACF-gekoppelde image, of zet via us_image image="{{acf_field}}".' ],
         'us_image_wrong_size' => [ 'label' => 'us_image met afwijkende size', 'explanation' => 'Het size-attribuut wijkt af van "full" of ontbreekt. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size="full" op het us_image element.' ],
         'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
-        'hardcoded_text' => [ 'label' => 'Hardcoded tekst in shortcode', 'explanation' => 'Tekst is vast in shortcode i.p.v. via ACF.', 'action' => 'Vervang door ACF-veld referentie.' ],
         'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
         'hardcoded_bg_video' => [ 'label' => 'Hardcoded achtergrond-video', 'explanation' => 'Row heeft vaste video-URL i.p.v. ACF.', 'action' => 'Vervang door ACF-veld of verwijder de video.' ],
         'redundant_row_height' => [ 'label' => 'Vertical Indents vastgezet op de theme-default', 'explanation' => 'De row zet height= hard op dezelfde maat die in Theme Options als standaard geldt. De rij volgt de theme-default daardoor niet meer: wijzigt die later, dan blijft deze rij op de oude maat staan.', 'action' => 'Zet Vertical Indents in de row terug op Default (verwijder het height-attribuut).' ],
@@ -4255,6 +4257,7 @@ function aspera_get_rule_context(): array {
         'image_has_ratio' => [ 'label' => 'Header-image met ratio-attribuut', 'explanation' => 'Image-ratio is gezet; overschrijft natural ratio.', 'action' => 'Verwijder ratio.' ],
         'image_has_style' => [ 'label' => 'Header-image met style-attribuut', 'explanation' => 'Image heeft inline style.', 'action' => 'Verwijder.' ],
         'image_wrong_size' => [ 'label' => 'Image met afwijkende size', 'explanation' => 'Het size-attribuut van een image-element in een header of post layout wijkt af van "full", ontbreekt of is leeg. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size op "full" in de header- of grid-builder.' ],
+        'hardcoded_element_text' => [ 'label' => 'Hardcoded tekst in header- of grid-element', 'explanation' => 'Een text-element in een header of post layout heeft vaste tekst in plaats van een ACF-veldverwijzing. De inhoud is dan niet vanuit het dashboard aan te passen; bij een header geldt dat site-breed, zoals bij een telefoonnummer of emailadres.', 'action' => 'Vervang de vaste tekst door een ACF-veldverwijzing, bijvoorbeeld {{opt_contact_1}} uit een option page-veld, en zet de waarde in dat veld.' ],
         'hardcoded_border_radius' => [ 'label' => 'Post layout met hardcoded border-radius', 'explanation' => 'De grid layout zet een vaste border-radius in plaats van de site-variabele; de afronding loopt uit de pas zodra de thema-waarde wijzigt.', 'action' => 'Zet border_radius op var(--site-border-radius), of op 0 wanneer de layout bewust geen afronding heeft.' ],
 
         // ── Header config ─────────────────────────────────────────────────
@@ -6004,6 +6007,29 @@ add_action( 'rest_api_init', function () {
                             if ( $rule['param'] === 'taxonomy' ) {
                                 $expected_prefix = 'TAX - ';
                                 break 2;
+                            }
+                            // post_taxonomy hangt de groep aan posts MET een term,
+                            // niet aan het term-scherm zelf. De prefix volgt daarom het
+                            // post type waarop de taxonomie geregistreerd is. Staat die
+                            // op meerdere types, dan is de prefix niet af te leiden en
+                            // stellen we niets vast (handboek sectie 8: liever niets
+                            // melden dan stilzwijgend onjuist melden).
+                            if ( $rule['param'] === 'post_taxonomy' ) {
+                                $tax_name = explode( ':', (string) $rule['value'] )[0];
+                                $tax_obj  = $tax_name !== '' ? get_taxonomy( $tax_name ) : false;
+                                $tax_types = ( $tax_obj && ! empty( $tax_obj->object_type ) )
+                                    ? array_values( array_unique( (array) $tax_obj->object_type ) )
+                                    : [];
+                                if ( count( $tax_types ) === 1 ) {
+                                    if ( $tax_types[0] === 'page' ) {
+                                        $expected_prefix = 'Page - ';
+                                        break 2;
+                                    }
+                                    if ( $tax_types[0] !== 'post' ) {
+                                        $expected_prefix = 'CPT - ';
+                                        break 2;
+                                    }
+                                }
                             }
                         }
                     }
@@ -8308,19 +8334,73 @@ add_action( 'rest_api_init', function () {
                 }
             }
 
+            // ── WP-Optimize: geplande opschoning ──────────────────────────
+            // Aspera-standaard: schedule aan, interval daily, en de taken
+            // optimize / revisions / drafts / transient aangevinkt. Staat de
+            // plugin niet actief, dan nul violations; het ontbreken van de
+            // plugin wordt al door /plugins/validate gemeld.
+            // Let op: WP-Optimize slaat deze waarden op als de STRINGS
+            // 'true'/'false', niet als booleans. Een vergelijking op === true
+            // faalt daarom altijd.
+            $wpo = [];
+            if ( ! function_exists( 'is_plugin_active' ) ) {
+                require_once ABSPATH . 'wp-admin/includes/plugin.php';
+            }
+            if ( is_plugin_active( 'wp-optimize/wp-optimize.php' ) ) {
+                $wpo_on = fn( $v ) => ( is_string( $v ) ? strtolower( $v ) === 'true' : (bool) $v );
+
+                if ( ! $wpo_on( get_option( 'wp-optimize-schedule' ) ) ) {
+                    $wpo[] = [
+                        'rule'   => 'wpo_schedule_disabled',
+                        'detail' => 'Geplande opschoning staat uit in WP-Optimize',
+                    ];
+                } else {
+                    $wpo_interval = (string) get_option( 'wp-optimize-schedule-type', '' );
+                    if ( $wpo_interval !== 'wpo_daily' ) {
+                        $wpo[] = [
+                            'rule'   => 'wpo_schedule_wrong_interval',
+                            'detail' => 'Interval is "' . ( $wpo_interval !== '' ? $wpo_interval : 'niet ingesteld' ) . '" — verwacht wpo_daily',
+                        ];
+                    }
+
+                    $wpo_auto     = get_option( 'wp-optimize-auto' );
+                    $wpo_auto     = is_array( $wpo_auto ) ? $wpo_auto : [];
+                    $wpo_required = [
+                        'optimize'  => 'Database optimize',
+                        'revisions' => 'Clean post revisions',
+                        'drafts'    => 'Remove auto draft posts',
+                        'transient' => 'Remove expired transient options',
+                    ];
+                    $wpo_missing = [];
+                    foreach ( $wpo_required as $wpo_key => $wpo_label ) {
+                        if ( ! $wpo_on( $wpo_auto[ $wpo_key ] ?? false ) ) {
+                            $wpo_missing[] = $wpo_label;
+                        }
+                    }
+                    if ( ! empty( $wpo_missing ) ) {
+                        $wpo[] = [
+                            'rule'   => 'wpo_cleanup_task_missing',
+                            'detail' => 'Niet aangevinkt: ' . implode( ', ', $wpo_missing ),
+                        ];
+                    }
+                }
+            }
+
             return [
-                'status'              => empty( $orphaned ) && empty( $unknown ) && empty( $orphaned_post_types ) && empty( $orphaned_options ) && empty( $orphaned_meta ) ? 'ok' : 'issues_found',
+                'status'              => empty( $orphaned ) && empty( $unknown ) && empty( $orphaned_post_types ) && empty( $orphaned_options ) && empty( $orphaned_meta ) && empty( $wpo ) ? 'ok' : 'issues_found',
                 'orphaned_tables'     => $orphaned,
                 'unknown_tables'      => $unknown,
                 'orphaned_post_types' => $orphaned_post_types,
                 'orphaned_options'    => $orphaned_options,
                 'orphaned_meta'       => $orphaned_meta,
+                'wp_optimize'         => $wpo,
                 'summary'             => [
                     'orphaned_tables'     => count( $orphaned ),
                     'unknown_tables'      => count( $unknown ),
                     'orphaned_post_types' => count( $orphaned_post_types ),
                     'orphaned_options'    => count( $orphaned_options ),
                     'orphaned_meta'       => count( $orphaned_meta ),
+                    'wp_optimize'         => count( $wpo ),
                 ],
             ];
         },
@@ -8938,6 +9018,28 @@ add_action( 'rest_api_init', function () {
                                 'element' => $element_key,
                                 'rule'    => 'missing_hide_with_empty_link',
                                 'detail'  => 'hide_with_empty_link is niet ingeschakeld — element blijft zichtbaar wanneer de link leeg is',
+                            ];
+                        }
+                    }
+
+                    // ─── hardcoded_element_text (text) ──────────────────────
+                    // Een text:* element met vaste inhoud is niet vanuit het
+                    // dashboard te beheren; headercontact, openingstijden en labels
+                    // horen uit een ACF-veld te komen. Dit is de enige plek waar een
+                    // `text`-property voorkomt: us-core kent geen shortcode met een
+                    // text-parameter, daar staat vaste tekst tussen de tags.
+                    // Geen fix-button: welk veld de waarde krijgt en waar die waarde
+                    // heen verhuist is een menselijke afweging, en grid-elementen staan
+                    // sinds v2.7.1 sowieso niet meer open voor set_grid_attribute.
+                    if ( $element_type === 'text' ) {
+                        $el_text = $element['text'] ?? null;
+                        if ( $el_text !== null && $el_text !== ''
+                             && preg_match( '/[a-zA-Z0-9]/', (string) $el_text )
+                             && strpos( (string) $el_text, '{{' ) === false ) {
+                            $violations[] = [
+                                'element' => $element_key,
+                                'rule'    => 'hardcoded_element_text',
+                                'detail'  => 'text="' . $el_text . '" — hardcoded tekst; gebruik een ACF-veldverwijzing',
                             ];
                         }
                     }
@@ -11119,7 +11221,6 @@ add_action( 'rest_api_init', function () {
                 'hardcoded_bg_video'          => 'error',
                 'wrong_bg_video_disable_width' => 'warning',
                 'redundant_row_height'        => 'warning',
-                'hardcoded_text'              => 'error',
                 'empty_btn_style'             => 'warning',
                 'scroll_effect_forbidden'     => 'warning',
                 'vc_video_wrong_attribute'    => 'warning',
@@ -11141,6 +11242,7 @@ add_action( 'rest_api_init', function () {
                 'image_has_style'             => 'error',
                 'image_wrong_size'            => 'warning',
                 'hardcoded_border_radius'     => 'warning',
+                'hardcoded_element_text'      => 'warning',
 
                 // media — framework + WP core media-instellingen
                 'image_sizes_registered'        => 'warning',
@@ -11202,6 +11304,9 @@ add_action( 'rest_api_init', function () {
                 'orphaned_post_type'          => 'warning',
                 'orphaned_plugin_options'     => 'warning',
                 'orphaned_plugin_meta'        => 'warning',
+                'wpo_schedule_disabled'       => 'warning',
+                'wpo_schedule_wrong_interval' => 'warning',
+                'wpo_cleanup_task_missing'    => 'warning',
 
                 // css/unused
                 'unused_css_class'            => 'warning',
@@ -11677,6 +11782,13 @@ add_action( 'rest_api_init', function () {
                     ];
                     if ( isset( $om['proposed_fix'] ) ) $entry['proposed_fix'] = $om['proposed_fix'];
                     $db_violations[] = $entry;
+                }
+                foreach ( $db['wp_optimize'] ?? [] as $w ) {
+                    $db_violations[] = [
+                        'rule'     => $w['rule'],
+                        'severity' => $severity_map[ $w['rule'] ] ?? 'warning',
+                        'detail'   => $w['detail'] ?? '',
+                    ];
                 }
             }
             $categories['db_tables'] = [
