@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.17.0
+ * Version: 3.18.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.17.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -336,6 +336,38 @@ function aspera_acf_field_map(): array {
  * Geeft het ACF veldtype terug voor een gegeven veldslug.
  * Geeft null terug als de slug niet gevonden wordt.
  */
+/**
+ * Elementen die de responsive-opties uit us-core laden EN de kolom-/breakpoint-
+ * params daadwerkelijk tonen. De vier carousel-varianten laden dezelfde config
+ * maar sluiten deze params uit via `exclude_for_carousel`.
+ * Bron: us-core config/elements_responsive_options.php + config/elements/*.php
+ */
+const ASPERA_RESPONSIVE_LIST_TAGS = [ 'us_post_list', 'us_product_list', 'us_user_list', 'us_term_list', 'us_grid' ];
+
+/**
+ * Tablets- en mobiles-breakpoint uit de Impreza theme options, in px.
+ *
+ * Retourneert null wanneer de theme options ontbreken of onbruikbaar zijn. De
+ * aanroeper slaat de validatie dan over: zonder referentiewaarde is er geen
+ * verwachting te stellen en is zwijgen beter dan onjuist melden.
+ */
+function aspera_theme_breakpoints(): ?array {
+    static $cached = false;
+    if ( $cached !== false ) {
+        return $cached;
+    }
+    $opts = get_option( 'usof_options_Impreza', [] );
+    if ( ! is_array( $opts ) || ! isset( $opts['tablets_breakpoint'], $opts['mobiles_breakpoint'] ) ) {
+        return $cached = null;
+    }
+    $tablets = (int) $opts['tablets_breakpoint'];
+    $mobiles = (int) $opts['mobiles_breakpoint'];
+    if ( $tablets <= 0 || $mobiles <= 0 ) {
+        return $cached = null;
+    }
+    return $cached = [ 'tablets' => $tablets, 'mobiles' => $mobiles ];
+}
+
 function aspera_acf_field_type( string $slug ): ?string {
     $key = preg_replace( '#^option\|#', '', $slug );
     return aspera_acf_field_map()[ $key ] ?? null;
@@ -830,6 +862,69 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                         'before'    => $full_sc,
                         'after'     => substr( $full_sc, 0, -1 ) . ' color_link="0"]',
                     ] ];
+            }
+        }
+
+        // ─── Responsive breakpoints op lijst-elementen ────────────────
+        // Aspera-standaard: de breakpoint-widths matchen exact de theme options.
+        //   3 of meer kolommen -> slot 1 = tablets_breakpoint, slot 2 = mobiles_breakpoint
+        //   2 kolommen         -> slot 1 = mobiles_breakpoint, slot 2 ongebruikt
+        //   1 kolom            -> geen breakpoints
+        // Slot 3 blijft in alle gevallen ongebruikt.
+        //
+        // Let op: us-core hanteert zelf ANDERE defaults, namelijk laptops+1 (1201px)
+        // voor slot 1, tablets+1 (1101px) voor slot 2 en mobiles+1 (901px) voor slot 3.
+        // Een niet-gezet attribuut valt daarop terug en voldoet dus nooit aan deze
+        // standaard; "niet gezet" is hier een violation, geen vrijstelling.
+        if ( in_array( $tag, ASPERA_RESPONSIVE_LIST_TAGS, true ) && ( $bp_theme = aspera_theme_breakpoints() ) !== null ) {
+            $bp_cols = $attr( 'columns' );
+            $bp_cols = ( $bp_cols === null || $bp_cols === '' ) ? 2 : (int) $bp_cols; // us-core std = 2
+            if ( $bp_cols >= 3 ) {
+                $bp_expected = [ 1 => $bp_theme['tablets'], 2 => $bp_theme['mobiles'] ];
+            } elseif ( $bp_cols === 2 ) {
+                $bp_expected = [ 1 => $bp_theme['mobiles'] ];
+            } else {
+                $bp_expected = [];
+            }
+
+            // Ruwe waarde -> px als int, null bij leeg/afwezig, false bij onzin ("px", "pxpx").
+            $bp_px = function ( $raw ) {
+                if ( $raw === null ) {
+                    return null;
+                }
+                $raw = trim( (string) $raw );
+                if ( $raw === '' ) {
+                    return null;
+                }
+                return preg_match( '/^(\d+)px$/', $raw, $m ) ? (int) $m[1] : false;
+            };
+
+            foreach ( $bp_expected as $bp_slot => $bp_want ) {
+                $bp_raw = $attr( 'breakpoint_' . $bp_slot . '_width' );
+                if ( $bp_px( $bp_raw ) !== $bp_want ) {
+                    $bp_found = ( $bp_raw === null || trim( (string) $bp_raw ) === '' )
+                        ? 'niet gezet (us-core valt terug op een eigen default)'
+                        : '"' . $bp_raw . '"';
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_width_mismatch',
+                        'detail' => 'columns="' . $bp_cols . '": breakpoint_' . $bp_slot . '_width is ' . $bp_found
+                                    . ' — verwacht "' . $bp_want . 'px"',
+                        'location' => $current_location ];
+                }
+            }
+
+            foreach ( [ 1, 2, 3 ] as $bp_slot ) {
+                if ( isset( $bp_expected[ $bp_slot ] ) ) {
+                    continue;
+                }
+                $bp_w = $bp_px( $attr( 'breakpoint_' . $bp_slot . '_width' ) );
+                $bp_c = $attr( 'breakpoint_' . $bp_slot . '_cols' );
+                $bp_c_set = ( $bp_c !== null && $bp_c !== '' && $bp_c !== 'default' );
+                if ( ( is_int( $bp_w ) ) || $bp_c_set ) {
+                    $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_unexpected',
+                        'detail' => 'columns="' . $bp_cols . '": breakpoint ' . $bp_slot
+                                    . ' is ingesteld terwijl dat slot bij dit kolomaantal ongebruikt hoort te blijven',
+                        'location' => $current_location ];
+                }
             }
         }
 
@@ -3985,7 +4080,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','empty_btn_style','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','empty_btn_style','responsive_breakpoint_width_mismatch','responsive_breakpoint_unexpected','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size','hardcoded_border_radius','hardcoded_element_text' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
@@ -4089,6 +4184,8 @@ function aspera_get_rule_context(): array {
         'hardcoded_image' => [ 'label' => 'Hardcoded afbeelding (us_image)', 'explanation' => 'Image-shortcode heeft vaste image_id in plaats van ACF.', 'action' => 'Vervang door ACF-gekoppelde image, of zet via us_image image="{{acf_field}}".' ],
         'us_image_wrong_size' => [ 'label' => 'us_image met afwijkende size', 'explanation' => 'Het size-attribuut wijkt af van "full" of ontbreekt. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size="full" op het us_image element.' ],
         'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
+        'responsive_breakpoint_width_mismatch' => [ 'label' => 'Breakpoint-breedte wijkt af van de theme-instelling', 'explanation' => 'De responsive breakpoints van een lijst-element moeten exact de Impreza theme options volgen: bij 3 of meer kolommen slot 1 op tablets screen width en slot 2 op mobiles screen width, bij 2 kolommen alleen slot 1 op mobiles screen width. Een niet-gezet attribuut valt terug op de us-core default (laptops+1 / tablets+1), die daarvan afwijkt.', 'action' => 'Zet de breakpoint-breedte in het element gelijk aan de bijbehorende waarde uit Theme Options > Layout.' ],
+        'responsive_breakpoint_unexpected' => [ 'label' => 'Breakpoint ingesteld op een ongebruikt slot', 'explanation' => 'Er is een breakpoint geconfigureerd dat bij dit kolomaantal niet gebruikt hoort te worden. Bij 2 kolommen is alleen slot 1 in gebruik, slot 3 blijft altijd leeg. Een extra slot levert een kolomstap op die de responsive volgorde omkeert.', 'action' => 'Maak het kolomaantal en de breedte van dat breakpoint leeg in het element.' ],
         'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
         'hardcoded_bg_video' => [ 'label' => 'Hardcoded achtergrond-video', 'explanation' => 'Row heeft vaste video-URL i.p.v. ACF.', 'action' => 'Vervang door ACF-veld of verwijder de video.' ],
         'redundant_row_height' => [ 'label' => 'Vertical Indents vastgezet op de theme-default', 'explanation' => 'De row zet height= hard op dezelfde maat die in Theme Options als standaard geldt. De rij volgt de theme-default daardoor niet meer: wijzigt die later, dan blijft deze rij op de oude maat staan.', 'action' => 'Zet Vertical Indents in de row terug op Default (verwijder het height-attribuut).' ],
@@ -11221,6 +11318,8 @@ add_action( 'rest_api_init', function () {
                 'hardcoded_bg_video'          => 'error',
                 'wrong_bg_video_disable_width' => 'warning',
                 'redundant_row_height'        => 'warning',
+                'responsive_breakpoint_width_mismatch' => 'warning',
+                'responsive_breakpoint_unexpected'     => 'warning',
                 'empty_btn_style'             => 'warning',
                 'scroll_effect_forbidden'     => 'warning',
                 'vc_video_wrong_attribute'    => 'warning',
