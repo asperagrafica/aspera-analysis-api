@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.18.2
+ * Version: 3.18.3
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.2' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.3' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -947,10 +947,12 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 if ( isset( $bp_expected[ $bp_slot ] ) ) {
                     continue;
                 }
+                // Een slot is pas echt in gebruik wanneer de BREEDTE een bruikbare
+                // waarde heeft. Een achtergebleven kolomaantal zonder breedte doet
+                // niets en is dus geen violation: de gebruiker kan de slider niet
+                // leegmaken, dus resten van een eerdere instelling blijven staan.
                 $bp_w = $bp_px( $attr( 'breakpoint_' . $bp_slot . '_width' ) );
-                $bp_c = $attr( 'breakpoint_' . $bp_slot . '_cols' );
-                $bp_c_set = ( $bp_c !== null && $bp_c !== '' && $bp_c !== 'default' );
-                if ( ( is_int( $bp_w ) ) || $bp_c_set ) {
+                if ( is_int( $bp_w ) ) {
                     $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_unexpected',
                         'detail' => 'columns="' . $bp_cols . '": breakpoint ' . $bp_slot
                                     . ' is ingesteld terwijl dat slot bij dit kolomaantal ongebruikt hoort te blijven',
