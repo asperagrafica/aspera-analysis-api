@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.18.1
+ * Version: 3.18.2
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.18.2' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -904,7 +904,13 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 $bp_expected = [];
             }
 
-            // Ruwe waarde -> px als int, null bij leeg/afwezig, false bij onzin ("px", "pxpx").
+            // Ruwe waarde -> px als int, null wanneer het breakpoint UIT staat,
+            // false bij onzin ("px", "pxpx").
+            //
+            // "Uit" heeft drie verschijningsvormen: attribuut afwezig, lege waarde,
+            // of "0px". Die laatste is geen randgeval maar de normale uit-stand: de
+            // control is een slider met een minimum, dus de gebruiker kan het veld
+            // niet leegmaken en zet hem op 0 om het breakpoint niet te gebruiken.
             $bp_px = function ( $raw ) {
                 if ( $raw === null ) {
                     return null;
@@ -913,15 +919,23 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 if ( $raw === '' ) {
                     return null;
                 }
-                return preg_match( '/^(\d+)px$/', $raw, $m ) ? (int) $m[1] : false;
+                if ( ! preg_match( '/^(\d+)px$/', $raw, $m ) ) {
+                    return false;
+                }
+                return (int) $m[1] === 0 ? null : (int) $m[1];
             };
 
             foreach ( $bp_expected as $bp_slot => $bp_want ) {
                 $bp_raw = $attr( 'breakpoint_' . $bp_slot . '_width' );
                 if ( $bp_px( $bp_raw ) !== $bp_want ) {
-                    $bp_found = ( $bp_raw === null || trim( (string) $bp_raw ) === '' )
-                        ? 'niet gezet (us-core valt terug op een eigen default)'
-                        : '"' . $bp_raw . '"';
+                    $bp_trim  = $bp_raw === null ? '' : trim( (string) $bp_raw );
+                    if ( $bp_trim === '' ) {
+                        $bp_found = 'niet gezet (us-core valt terug op een eigen default)';
+                    } elseif ( preg_match( '/^0px$/', $bp_trim ) ) {
+                        $bp_found = 'uitgeschakeld (0px)';
+                    } else {
+                        $bp_found = '"' . $bp_raw . '"';
+                    }
                     $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_width_mismatch',
                         'detail' => 'columns="' . $bp_cols . '": breakpoint_' . $bp_slot . '_width is ' . $bp_found
                                     . ' — verwacht "' . $bp_want . 'px"',
