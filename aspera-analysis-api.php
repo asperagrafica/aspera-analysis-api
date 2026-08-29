@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.20.1
+ * Version: 3.21.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.20.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.21.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -100,27 +100,16 @@ function aspera_host_is_subdomain(): bool {
 
 /**
  * ─── Impreza licentie-contract ───────────────────────────────────────────────
- * Alle Impreza-specifieke aannames van de licentiecontrole op één plek.
- * Geverifieerd tegen Impreza 9.1 (`common/admin/functions/about.php`).
- * Wijzigt UpSolution de optienamen of het endpoint, dan is dit blok het enige
- * dat aangepast hoeft te worden; `aspera_impreza_license_state()` degradeert
- * tot die tijd naar 'unknown' in plaats van een onjuiste violation te melden.
+ * De Impreza-specifieke optienamen van de licentiecontrole op één plek.
+ * Geverifieerd tegen Impreza 9.2 (`common/admin/functions/about.php`).
+ * Wijzigt UpSolution de optienamen, dan is dit blok het enige dat aangepast
+ * hoeft te worden.
  */
 const ASPERA_US_LICENSE = [
-    'verified_against' => 'Impreza 9.1',
+    'verified_against' => 'Impreza 9.2',
     'option_active'    => 'us_license_activated',
     'option_dev'       => 'us_license_dev_activated',
-    'option_secret'    => 'us_license_secret',
-    'api_path'         => '/envato_auth',
-    'api_status_key'   => 'status',
-    'api_status_ok'    => 1,
 ];
-
-/** Eigen option: laatst geverifieerde domein. Cache, geen site-configuratie. */
-const ASPERA_LICENSE_BASELINE_OPTION = 'aspera_license_baseline';
-const ASPERA_LICENSE_REMOTE_TRANSIENT = 'aspera_license_remote_check';
-const ASPERA_LICENSE_REMOTE_TTL       = 12 * HOUR_IN_SECONDS;
-const ASPERA_LICENSE_REMOTE_TTL_FAIL  = HOUR_IN_SECONDS;
 
 /**
  * ─── Uitzonderingen op empty_style_attr ──────────────────────────────────────
@@ -148,127 +137,35 @@ const ASPERA_EMPTY_STYLE_ATTR_EXCEPTIONS = [
 ];
 
 /**
- * Bepaalt de werkelijke staat van de Impreza-licentie.
+ * Leest de lokale activatiestaat van de Impreza-licentie.
  *
- * De option `us_license_activated` bewijst alleen dat de licentie ooit met
- * succes is geactiveerd, niet dat hij nú geldig is: Impreza hervalideert
- * uitsluitend bij het openen van de licentiepagina in wp-admin
- * (`about.php:111-134`, stuurt `secret` + `domain` naar `/envato_auth` en
- * verwijdert de opties bij `status !== 1`). Na een sitemigratie blijft de
- * option daardoor op 1 staan terwijl de licentie op het oude domein zit.
+ * Uitsluitend de eigen options van het framework: geactiveerd, als
+ * dev-licentie geactiveerd, of geen van beide. Let op dat het framework de
+ * options bij deactivatie verwijdert in plaats van op 0 te zetten.
  *
- * Twee onafhankelijke detecties:
- *  1. Lokale baseline — het domein waarop wij de licentie voor het laatst
- *     geldig zagen. Puur lokaal, blijft werken los van UpSolution's API.
- *  2. Remote check — read-only aanroep van dezelfde endpoint die het thema
- *     gebruikt. Bevestigt de baseline en legt hem aan bij de eerste run.
+ * Bewust géén verificatie bij de licentieserver. Tot v3.20.1 deed de plugin dat
+ * wel, met een lokale domein-baseline ernaast, om een licentie te betrappen die
+ * na een migratie nog aan het oude domein hing. Die constructie kostte meer dan
+ * ze opleverde: elk antwoord dat niet exact status 1 was gold als
+ * domein-mismatch — ook bij rate limiting of een tijdelijke storing — en het
+ * oordeel werd twaalf uur gecachet, zodat een geslaagde heractivatie pas de
+ * volgende dag zichtbaar werd. Te veel omwegen voor een niche-geval; het
+ * framework hervalideert zelf zodra de licentiepagina geopend wordt.
  *
- * @return array{status:string,dev:bool,domain:string,baseline_domain:?string,remote:string}
- *   status: 'active' | 'dev' | 'inactive' | 'mismatch' | 'unknown'
- *   remote: 'valid' | 'invalid' | 'unavailable' | 'skipped'
+ * @return array{status:string,dev:bool,domain:string}
+ *   status: 'active' | 'dev' | 'inactive'
  */
 function aspera_impreza_license_state(): array {
-    $host   = (string) wp_parse_url( site_url(), PHP_URL_HOST );
     $active = get_option( ASPERA_US_LICENSE['option_active'] );
     $dev    = get_option( ASPERA_US_LICENSE['option_dev'] );
-    $secret = (string) get_option( ASPERA_US_LICENSE['option_secret'] );
 
-    $baseline = get_option( ASPERA_LICENSE_BASELINE_OPTION );
-    $baseline_domain = is_array( $baseline ) && ! empty( $baseline['domain'] )
-        ? (string) $baseline['domain']
-        : NULL;
-
-    $state = [
-        'status'          => 'inactive',
-        'dev'             => (bool) $dev,
-        'domain'          => $host,
-        'baseline_domain' => $baseline_domain,
-        'remote'          => 'skipped',
+    return [
+        'status' => ! empty( $dev )
+            ? 'dev'
+            : ( ! empty( $active ) ? 'active' : 'inactive' ),
+        'dev'    => (bool) $dev,
+        'domain' => (string) wp_parse_url( site_url(), PHP_URL_HOST ),
     ];
-
-    // Geen enkele activatie-vlag: hard inactief, geen remote check nodig.
-    if ( empty( $active ) && empty( $dev ) ) {
-        return $state;
-    }
-
-    $state['status'] = ! empty( $dev ) ? 'dev' : 'active';
-    $state['remote'] = aspera_impreza_license_remote_status( $host, $secret );
-
-    if ( $state['remote'] === 'invalid' ) {
-        $state['status'] = 'mismatch';
-
-    } elseif ( $state['remote'] === 'valid' ) {
-        // Baseline (her)bevestigen op het huidige domein.
-        if ( $baseline_domain !== $host ) {
-            update_option( ASPERA_LICENSE_BASELINE_OPTION, [
-                'domain'     => $host,
-                'checked_at' => current_time( 'timestamp' ),
-            ], /* autoload */ FALSE );
-            $state['baseline_domain'] = $host;
-        }
-
-    } elseif ( $baseline_domain !== NULL && $baseline_domain !== $host ) {
-        // Remote niet beschikbaar, maar het domein is sinds de laatste
-        // geslaagde verificatie gewijzigd — het migratiegeval.
-        $state['status'] = 'mismatch';
-    }
-
-    return $state;
-}
-
-/**
- * Read-only verificatie bij de licentieserver, via de themafunctie zelf.
- * Retourneert 'unavailable' zodra ook maar één aanname niet meer opgaat,
- * zodat een gewijzigd Impreza nooit een onjuiste critical oplevert.
- */
-function aspera_impreza_license_remote_status( string $host, string $secret ): string {
-    if ( $secret === '' ) {
-        return 'unavailable';
-    }
-    if ( ( $cached = get_transient( ASPERA_LICENSE_REMOTE_TRANSIENT ) ) !== FALSE ) {
-        return is_array( $cached ) && ( $cached['host'] ?? '' ) === $host
-            ? (string) $cached['status']
-            : 'unavailable';
-    }
-
-    // Contract-check: zonder deze themafunctie/constante geen oordeel.
-    if ( ! function_exists( 'us_api' ) || ! defined( 'US_API_RETURN_ARRAY' ) ) {
-        return 'unavailable';
-    }
-
-    $response = us_api(
-        ASPERA_US_LICENSE['api_path'],
-        [
-            'secret'  => $secret,
-            'domain'  => $host,
-            'version' => defined( 'US_THEMEVERSION' ) ? US_THEMEVERSION : '',
-        ],
-        US_API_RETURN_ARRAY
-    );
-
-    $body = is_array( $response ) ? ( $response['body'] ?? NULL ) : NULL;
-    if ( ! is_array( $body ) || ! array_key_exists( ASPERA_US_LICENSE['api_status_key'], $body ) ) {
-        // Onbereikbaar of gewijzigd antwoordformaat: kort negatief cachen,
-        // zodat een trage licentieserver niet elke audit vertraagt.
-        set_transient(
-            ASPERA_LICENSE_REMOTE_TRANSIENT,
-            [ 'host' => $host, 'status' => 'unavailable' ],
-            ASPERA_LICENSE_REMOTE_TTL_FAIL
-        );
-        return 'unavailable';
-    }
-
-    $status = ( (int) $body[ ASPERA_US_LICENSE['api_status_key'] ] === ASPERA_US_LICENSE['api_status_ok'] )
-        ? 'valid'
-        : 'invalid';
-
-    set_transient(
-        ASPERA_LICENSE_REMOTE_TRANSIENT,
-        [ 'host' => $host, 'status' => $status ],
-        ASPERA_LICENSE_REMOTE_TTL
-    );
-
-    return $status;
 }
 
 /**
@@ -337,24 +234,22 @@ function aspera_acf_field_map(): array {
  * Geeft null terug als de slug niet gevonden wordt.
  */
 /**
- * Elementen die de responsive-opties uit us-core laden EN de kolom-/breakpoint-
- * params daadwerkelijk tonen, met per element de us-core default voor `columns`.
- * De vier carousel-varianten laden dezelfde config maar sluiten deze params
- * uit via `exclude_for_carousel`.
+ * Elementen die de responsive-opties uit us-core laden EN de breakpoint-params
+ * daadwerkelijk tonen. De vier carousel-varianten laden dezelfde config maar
+ * sluiten deze params uit via `exclude_for_carousel`.
  *
- * De kolom-default verschilt per element en een shortcode zonder columns-attribuut
- * valt erop terug. Sinds v3.19.0 bepaalt het kolomaantal niet meer WELKE
- * breakpoints gelden — dat zijn er altijd drie — maar sinds v3.20.0 wel naar
- * hoeveel kolommen er per stap gebroken wordt. De default blijft dus nodig; een
- * vaste fallback zou us_post_list (std 4) als 2 behandelen.
+ * Het kolomaantal speelt geen rol meer: v3.20.0 leidde de verwachte kolommen per
+ * breakpoint af uit `columns`, maar dat is een ontwerpkeuze van de bouwer en geen
+ * norm (zie `aspera_responsive_expected()`). Alleen de breekpunten zelf worden
+ * nog getoetst, en die zijn voor elk element gelijk.
  * Bron: us-core config/elements_responsive_options.php + config/elements/*.php
  */
 const ASPERA_RESPONSIVE_LIST_TAGS = [
-    'us_post_list'    => 4,
-    'us_product_list' => 4,
-    'us_user_list'    => 3,
-    'us_term_list'    => 3,
-    'us_grid'         => 2,
+    'us_post_list',
+    'us_product_list',
+    'us_user_list',
+    'us_term_list',
+    'us_grid',
 ];
 
 /**
@@ -369,28 +264,24 @@ const ASPERA_RESPONSIVE_SLOT_LABELS = [
 ];
 
 /**
- * De volledige Aspera-standaard voor de drie breakpoint-slots van een lijst-element.
+ * De Aspera-standaard voor de drie breakpoint-slots van een lijst-element: de
+ * breedtes uit de theme options, zodat een lijst op dezelfde schermbreedtes
+ * breekt als de rest van de site.
  *
- * Breedtes liggen vast op de theme options en zijn niet van het kolomaantal
- * afhankelijk: een lijst breekt op dezelfde schermbreedtes als de rest van de site.
- * Het kolomaantal loopt wél af, en mag daarbij nooit STIJGEN ten opzichte van de
- * desktopwaarde in `columns`: bij columns="2" zou een vaste 3 op laptops het
- * element breder maken dan op desktop, en bij een 1-koloms lijst (zoals een
- * footer-lijst) zou het de layout omgooien. Vandaar de min()-afkapping.
+ * Uitsluitend breedtes. v3.20.0 toetste ook het kolomaantal per slot en leidde de
+ * verwachting af uit `columns` (min(3,…) / min(2,…) / 1), maar die desktopwaarde
+ * is een ontwerpkeuze en geen norm: een lijst die op desktop bewust één kolom
+ * breed is, mag op laptops alsnog drie kolommen tonen. De regel meldde dat als
+ * afwijking en de fix-knop zou de bewuste reeks hebben platgeslagen. Sinds
+ * v3.21.0 blijven de kolom-attributen daarom onaangeroerd.
  *
- * @return array<int,array{width:int,cols:int}> Geïndexeerd op slot 1..3.
+ * @return array<int,int> Verwachte breedte in px, geïndexeerd op slot 1..3.
  */
-function aspera_responsive_expected( string $tag, ?string $columns_raw, array $bp_theme ): array {
-    $base = ( $columns_raw === null || trim( (string) $columns_raw ) === '' )
-        ? ( ASPERA_RESPONSIVE_LIST_TAGS[ $tag ] ?? 1 )
-        : (int) $columns_raw;
-    if ( $base < 1 ) {
-        $base = 1;
-    }
+function aspera_responsive_expected( array $bp_theme ): array {
     return [
-        1 => [ 'width' => $bp_theme['laptops'], 'cols' => min( 3, $base ) ],
-        2 => [ 'width' => $bp_theme['tablets'], 'cols' => min( 2, $base ) ],
-        3 => [ 'width' => $bp_theme['mobiles'], 'cols' => 1 ],
+        1 => $bp_theme['laptops'],
+        2 => $bp_theme['tablets'],
+        3 => $bp_theme['mobiles'],
     ];
 }
 
@@ -420,22 +311,6 @@ function aspera_responsive_px( $raw ) {
         return false;
     }
     return (int) $m[1] === 0 ? null : (int) $m[1];
-}
-
-/**
- * Ruw kolomaantal van een breakpoint -> int, of null wanneer er niets bruikbaars
- * staat. Anders dan bij de breedte is 0 hier geen uit-stand maar een onzinwaarde:
- * een breakpoint naar nul kolommen bestaat niet.
- */
-function aspera_responsive_cols( $raw ): ?int {
-    if ( $raw === null ) {
-        return null;
-    }
-    $raw = trim( (string) $raw );
-    if ( ! preg_match( '/^\d+$/', $raw ) || (int) $raw === 0 ) {
-        return null;
-    }
-    return (int) $raw;
 }
 
 /**
@@ -977,11 +852,9 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         }
 
         // ─── Responsive breakpoints op lijst-elementen ────────────────
-        // Aspera-standaard: alle drie de breakpoint-slots zijn in gebruik.
-        //   breedte: slot 1 = laptops_breakpoint, slot 2 = tablets_breakpoint,
-        //            slot 3 = mobiles_breakpoint — los van het kolomaantal
-        //   kolommen: slot 1 = min(3, columns), slot 2 = min(2, columns),
-        //             slot 3 = 1 — loopt af, stijgt nooit boven de desktopwaarde
+        // Aspera-standaard: alle drie de breakpoint-slots zijn in gebruik en hun
+        // breedtes volgen de theme options — slot 1 laptops, slot 2 tablets,
+        // slot 3 mobiles.
         //
         // Let op: us-core hanteert zelf ANDERE default-breedtes, namelijk laptops+1
         // (1201px) voor slot 1, tablets+1 (1101px) voor slot 2 en mobiles+1 (901px)
@@ -989,25 +862,18 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
         // nooit aan deze standaard; "niet gezet" is hier een violation, geen
         // vrijstelling.
         //
-        // Breedte en kolomaantal zijn twee losse regels — je wilt in de audit kunnen
-        // zien of er verkeerd gebroken wordt of naar het verkeerde aantal kolommen —
-        // maar allebei aggregeren ze tot één violation per element en delen ze
-        // dezelfde fix. Eén fix zet de hele shortcode in één keer goed; drie losse
-        // per-slot fixes zouden na de eerste klik een verouderde `before` houden.
-        if ( isset( ASPERA_RESPONSIVE_LIST_TAGS[ $tag ] ) && ( $bp_theme = aspera_theme_breakpoints() ) !== null ) {
-            $bp_cols_raw = $attr( 'columns' );
-            $bp_expected = aspera_responsive_expected( $tag, $bp_cols_raw, $bp_theme );
-            $bp_base     = ( $bp_cols_raw === null || trim( (string) $bp_cols_raw ) === '' )
-                ? ASPERA_RESPONSIVE_LIST_TAGS[ $tag ] . ' (us-core default)'
-                : (int) $bp_cols_raw;
+        // Het kolomaantal per breakpoint blijft buiten beschouwing: dat is een
+        // ontwerpkeuze van de bouwer (zie `aspera_responsive_expected()`). De fix
+        // raakt de kolom-attributen dan ook niet aan.
+        if ( in_array( $tag, ASPERA_RESPONSIVE_LIST_TAGS, true ) && ( $bp_theme = aspera_theme_breakpoints() ) !== null ) {
+            $bp_expected = aspera_responsive_expected( $bp_theme );
 
             $bp_w_bad = [];
-            $bp_c_bad = [];
             $bp_after = $full_sc;
 
-            foreach ( $bp_expected as $bp_slot => $bp_exp ) {
+            foreach ( $bp_expected as $bp_slot => $bp_width ) {
                 $bp_w_raw = $attr( 'breakpoint_' . $bp_slot . '_width' );
-                if ( aspera_responsive_px( $bp_w_raw ) !== $bp_exp['width'] ) {
+                if ( aspera_responsive_px( $bp_w_raw ) !== $bp_width ) {
                     $bp_trim = $bp_w_raw === null ? '' : trim( (string) $bp_w_raw );
                     if ( $bp_trim === '' ) {
                         $bp_found = 'niet gezet (us-core valt terug op een eigen default)';
@@ -1017,46 +883,25 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                         $bp_found = '"' . $bp_trim . '"';
                     }
                     $bp_w_bad[] = 'slot ' . $bp_slot . ' is ' . $bp_found . ' — verwacht "'
-                                  . $bp_exp['width'] . 'px" (' . ASPERA_RESPONSIVE_SLOT_LABELS[ $bp_slot ] . ')';
+                                  . $bp_width . 'px" (' . ASPERA_RESPONSIVE_SLOT_LABELS[ $bp_slot ] . ')';
                 }
 
-                $bp_c_raw = $attr( 'breakpoint_' . $bp_slot . '_cols' );
-                if ( aspera_responsive_cols( $bp_c_raw ) !== $bp_exp['cols'] ) {
-                    $bp_ctrim = $bp_c_raw === null ? '' : trim( (string) $bp_c_raw );
-                    $bp_cfound = $bp_ctrim === '' ? 'niet gezet' : '"' . $bp_ctrim . '"';
-                    $bp_c_bad[] = 'slot ' . $bp_slot . ' is ' . $bp_cfound . ' — verwacht '
-                                  . $bp_exp['cols'] . ' ' . ( $bp_exp['cols'] === 1 ? 'kolom' : 'kolommen' )
-                                  . ' (' . ASPERA_RESPONSIVE_SLOT_LABELS[ $bp_slot ] . ')';
-                }
-
-                $bp_after = aspera_sc_set_attr( $bp_after, 'breakpoint_' . $bp_slot . '_width', $bp_exp['width'] . 'px' );
-                $bp_after = aspera_sc_set_attr( $bp_after, 'breakpoint_' . $bp_slot . '_cols', (string) $bp_exp['cols'] );
+                $bp_after = aspera_sc_set_attr( $bp_after, 'breakpoint_' . $bp_slot . '_width', $bp_width . 'px' );
             }
 
-            if ( $bp_w_bad || $bp_c_bad ) {
-                $bp_desc = 'De drie breakpoints worden gezet op '
-                           . $bp_expected[1]['width'] . 'px / ' . $bp_expected[1]['cols'] . ' kol, '
-                           . $bp_expected[2]['width'] . 'px / ' . $bp_expected[2]['cols'] . ' kol, '
-                           . $bp_expected[3]['width'] . 'px / ' . $bp_expected[3]['cols'] . ' kol.';
-                $bp_fix = [
-                    'fixable'     => true,
-                    'action'      => 'set_responsive_breakpoints',
-                    'description' => $bp_desc,
-                    'before'      => $full_sc,
-                    'after'       => $bp_after,
-                ];
-                if ( $bp_w_bad ) {
-                    $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_width_mismatch','responsive_breakpoint_cols_mismatch',
-                        'detail' => implode( '; ', $bp_w_bad ),
-                        'location' => $current_location,
-                        'proposed_fix' => $bp_fix ];
-                }
-                if ( $bp_c_bad ) {
-                    $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_cols_mismatch',
-                        'detail' => 'columns=' . $bp_base . ': ' . implode( '; ', $bp_c_bad ),
-                        'location' => $current_location,
-                        'proposed_fix' => $bp_fix ];
-                }
+            if ( $bp_w_bad ) {
+                $violations[] = [ 'tag' => $tag, 'rule' => 'responsive_breakpoint_width_mismatch',
+                    'detail' => implode( '; ', $bp_w_bad ),
+                    'location' => $current_location,
+                    'proposed_fix' => [
+                        'fixable'     => true,
+                        'action'      => 'set_responsive_breakpoints',
+                        'description' => 'De drie breakpoint-breedtes worden gezet op '
+                                         . $bp_expected[1] . 'px, ' . $bp_expected[2] . 'px en '
+                                         . $bp_expected[3] . 'px; het kolomaantal blijft ongewijzigd.',
+                        'before'      => $full_sc,
+                        'after'       => $bp_after,
+                    ] ];
             }
         }
 
@@ -3854,7 +3699,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
                 wp_send_json_error( 'before-waarde ontbreekt.' );
             }
             if ( ! preg_match( '/^\[(\w+)((?:"[^"]*"|\'[^\']*\'|[^\]])*)\]$/', $before, $sc_m )
-                || ! isset( ASPERA_RESPONSIVE_LIST_TAGS[ $sc_m[1] ] ) ) {
+                || ! in_array( $sc_m[1], ASPERA_RESPONSIVE_LIST_TAGS, true ) ) {
                 wp_send_json_error( 'Deze fix werkt alleen op een lijst-element met responsive-opties.' );
             }
             $bp_theme = aspera_theme_breakpoints();
@@ -3869,24 +3714,21 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
                 wp_send_json_error( 'Shortcode niet gevonden in post_content — mogelijk al gewijzigd.' );
             }
 
-            $sc_cols  = preg_match( '/\bcolumns="([^"]*)"/', $sc_m[2], $sc_c ) ? $sc_c[1] : null;
-            $expected = aspera_responsive_expected( $sc_m[1], $sc_cols, $bp_theme );
+            $expected = aspera_responsive_expected( $bp_theme );
 
             $after = $before;
-            foreach ( $expected as $slot => $exp ) {
-                $after = aspera_sc_set_attr( $after, 'breakpoint_' . $slot . '_width', $exp['width'] . 'px' );
-                $after = aspera_sc_set_attr( $after, 'breakpoint_' . $slot . '_cols', (string) $exp['cols'] );
+            foreach ( $expected as $slot => $width ) {
+                $after = aspera_sc_set_attr( $after, 'breakpoint_' . $slot . '_width', $width . 'px' );
             }
             if ( $after === $before ) {
-                wp_send_json_success( [ 'message' => 'Breakpoints stonden al conform de standaard in post #' . $post_id . '.' ] );
+                wp_send_json_success( [ 'message' => 'Breakpoint-breedtes stonden al conform de standaard in post #' . $post_id . '.' ] );
             }
 
             $new_content = str_replace( $before, $after, $post->post_content );
             wp_update_post( [ 'ID' => $post_id, 'post_content' => $new_content ] );
-            wp_send_json_success( [ 'message' => 'Breakpoints gezet op '
-                . $expected[1]['width'] . 'px/' . $expected[1]['cols'] . ', '
-                . $expected[2]['width'] . 'px/' . $expected[2]['cols'] . ', '
-                . $expected[3]['width'] . 'px/' . $expected[3]['cols'] . ' in post #' . $post_id . '.' ] );
+            wp_send_json_success( [ 'message' => 'Breakpoint-breedtes gezet op '
+                . $expected[1] . 'px, ' . $expected[2] . 'px en ' . $expected[3]
+                . 'px in post #' . $post_id . '; kolomaantallen ongewijzigd.' ] );
             break;
 
         case 'enable_page_link_allow_null':
@@ -4193,9 +4035,7 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
         case 'theme_check':
             switch ( $rule ) {
                 case 'impreza_license_inactive':
-                case 'impreza_license_domain_mismatch':
                 case 'impreza_license_dev_activated':
-                case 'impreza_license_check_unavailable':
                     return [ 'url' => admin_url( 'themes.php?page=us-license-activation' ), 'title' => 'Framework license' ];
                 case 'theme_recaptcha_site_key_missing':
                 case 'theme_recaptcha_secret_key_missing':
@@ -4284,7 +4124,7 @@ function aspera_get_rules_per_category(): array {
         'naming' => [ 'wrong_template_prefix','wrong_block_prefix','deprecated_page_block_term' ],
         'options_config' => [ 'wrong_option_slug','wrong_option_position','wrong_option_icon' ],
         'acf_slugs' => [ 'missing_number','wrong_opt_format','wrong_cpt_format','wrong_page_format','wrong_cpt_format_multi','wrong_page_format_multi' ],
-        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_domain_mismatch','impreza_license_dev_activated','impreza_license_check_unavailable','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled','theme_gfonts_merge_disabled' ],
+        'theme_check' => [ 'wrong_active_theme','impreza_license_inactive','impreza_license_dev_activated','unauthorized_installed_theme','theme_recaptcha_site_key_missing','theme_recaptcha_secret_key_missing','theme_optimize_assets_disabled','theme_additional_settings_enabled','theme_schema_markup_disabled','theme_sidebar_titlebar_enabled','theme_gfonts_merge_disabled' ],
         'media' => [ 'image_sizes_registered','big_image_threshold_wrong','delete_unused_images_disabled','wp_image_size_nonzero','wp_thumbnail_crop_enabled' ],
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'smtp' => [ 'smtp_plugin_inactive','smtp_announcements_visible','smtp_dashboard_widget_visible','smtp_summary_email_enabled','smtp_brevo_api_key_missing','smtp_from_email_not_forced','smtp_from_name_not_forced','smtp_mailer_not_allowed','smtp_do_not_send_enabled','smtp_delivery_errors_hidden','smtp_usage_tracking_enabled','smtp_optimize_sending_enabled' ],
@@ -4367,7 +4207,6 @@ function aspera_get_rule_context(): array {
         'us_image_wrong_size' => [ 'label' => 'us_image met afwijkende size', 'explanation' => 'Het size-attribuut wijkt af van "full" of ontbreekt. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size="full" op het us_image element.' ],
         'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
         'responsive_breakpoint_width_mismatch' => [ 'label' => 'Breakpoint-breedte wijkt af van de theme-instelling', 'explanation' => 'Alle drie de responsive breakpoints van een lijst-element zijn in gebruik en hun breedtes moeten exact de Impreza theme options volgen: slot 1 op laptops screen width, slot 2 op tablets screen width en slot 3 op mobiles screen width. Het kolomaantal speelt geen rol. Een niet-gezet attribuut valt terug op de us-core default (laptops+1 / tablets+1 / mobiles+1), die daarvan afwijkt.', 'action' => 'Zet de breakpoint-breedte in het element gelijk aan de bijbehorende waarde uit Theme Options > Layout, of gebruik de fix-knop die alle drie de slots in één keer goedzet.' ],
-        'responsive_breakpoint_cols_mismatch' => [ 'label' => 'Kolomaantal bij een breakpoint wijkt af', 'explanation' => 'Het aantal kolommen per breakpoint moet aflopen vanaf de desktopwaarde in `columns`: slot 1 (laptops) drie kolommen, slot 2 (tablets) twee, slot 3 (mobiles) één. Bij een element met minder dan drie kolommen wordt die reeks afgekapt op de desktopwaarde, zodat een breakpoint het element nooit breder maakt dan het op desktop is.', 'action' => 'Zet het kolomaantal per breakpoint in het element, of gebruik de fix-knop die alle drie de slots in één keer goedzet.' ],
         'hardcoded_bg_image' => [ 'label' => 'Hardcoded achtergrond-afbeelding', 'explanation' => 'Row/section heeft vaste bg_image i.p.v. ACF-koppeling.', 'action' => 'Vervang door ACF-image referentie.' ],
         'hardcoded_bg_video' => [ 'label' => 'Hardcoded achtergrond-video', 'explanation' => 'Row heeft vaste video-URL i.p.v. ACF.', 'action' => 'Vervang door ACF-veld of verwijder de video.' ],
         'redundant_row_height' => [ 'label' => 'Vertical Indents vastgezet op de theme-default', 'explanation' => 'De row zet height= hard op dezelfde maat die in Theme Options als standaard geldt. De rij volgt de theme-default daardoor niet meer: wijzigt die later, dan blijft deze rij op de oude maat staan.', 'action' => 'Zet Vertical Indents in de row terug op Default (verwijder het height-attribuut).' ],
@@ -4405,9 +4244,7 @@ function aspera_get_rule_context(): array {
         // ── Theme / Header / Permalinks / Settings ────────────────────────
         'wrong_active_theme' => [ 'label' => 'Verkeerd actief thema', 'explanation' => 'Actief thema is niet Aspera (Child); alleen Aspera mag actief zijn.', 'action' => 'Appearance > Themes > activeer Aspera Child.' ],
         'impreza_license_inactive' => [ 'label' => 'Framework licentie niet geactiveerd', 'explanation' => 'Geen enkele activatie-option aanwezig; theme-updates en addons werken niet. Let op: het framework verwijdert de options bij deactivatie, het zet ze niet op 0.', 'action' => 'Framework > Licentie activeren met purchase-code.' ],
-        'impreza_license_domain_mismatch' => [ 'label' => 'Framework licentie hoort bij ander domein', 'explanation' => 'De activatie-option staat op 1, maar de licentie is niet geldig voor dit domein. Typisch na een migratie: het framework hervalideert alleen bij het openen van de licentiepagina, dus de option blijft ten onrechte op 1 staan terwijl updates en addons stilstaan.', 'action' => 'Framework > Licentie deactiveren en opnieuw activeren op het huidige domein.' ],
         'impreza_license_dev_activated' => [ 'label' => 'Framework licentie is een dev-licentie', 'explanation' => 'De licentie is als dev-licentie geactiveerd; het framework forceert daarbij maintenance mode. Acceptabel op een ontwikkelomgeving, niet op een live domein.', 'action' => 'Op live: Framework > Licentie opnieuw activeren als reguliere licentie.' ],
-        'impreza_license_check_unavailable' => [ 'label' => 'Licentiecontrole niet uitvoerbaar', 'explanation' => 'De licentieserver was niet bereikbaar of gaf een onbekend antwoordformaat, mogelijk na een framework-update. De licentiestatus is daardoor niet hard vast te stellen; er wordt bewust geen violation afgegeven in plaats van een mogelijk onjuiste.', 'action' => 'Herhaal de audit later; blijft de melding staan, controleer het licentiecontract in de plugin (constante ASPERA_US_LICENSE).' ],
         'unauthorized_installed_theme' => [ 'label' => 'Geïnstalleerd thema niet toegestaan', 'explanation' => 'Een geïnstalleerd thema buiten Aspera-set; ruimt zelden iets op maar voorkomt confusion.', 'action' => 'Appearance > Themes > verwijder.' ],
         'theme_recaptcha_site_key_missing' => [ 'label' => 'reCAPTCHA site key leeg in theme', 'explanation' => 'Het framework theme heeft geen reCAPTCHA site_key terwijl er formulieren met reCAPTCHA bestaan; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul site_key in.' ],
         'theme_recaptcha_secret_key_missing' => [ 'label' => 'reCAPTCHA secret key leeg in theme', 'explanation' => 'Het framework theme mist reCAPTCHA secret_key; formulieren werken niet.', 'action' => 'Framework > Theme Options > reCAPTCHA > vul secret_key in.' ],
@@ -5778,7 +5615,7 @@ function aspera_dashboard_widget_script(): void {
                 } else if (fix.action === 'delete_cptui_data') {
                     msg += (fix.description || 'Option "cptui_post_types" wordt verwijderd uit wp_options.') + '\n\nCPTUI-plugin is inactief; ACF blijft leidend voor de post type-registratie.';
                 } else if (fix.action === 'set_responsive_breakpoints') {
-                    msg += (fix.description || 'De drie breakpoints van dit element worden op de Aspera-standaard gezet.') + '\n\nAlleen de zes breakpoint-attributen van deze shortcode worden herschreven; alle overige attributen blijven ongewijzigd.';
+                    msg += (fix.description || 'De drie breakpoint-breedtes van dit element worden op de Aspera-standaard gezet.') + '\n\nAlleen de drie breedte-attributen van deze shortcode worden herschreven; het kolomaantal en alle overige attributen blijven ongewijzigd.';
                 } else {
                     msg += 'Actie: ' + fix.action + '\nAttribuut: ' + fix.attribute;
                     if (fix.value) msg += '\nWaarde: ' + fix.value;
@@ -11559,7 +11396,6 @@ add_action( 'rest_api_init', function () {
                 'wrong_bg_video_disable_width' => 'warning',
                 'redundant_row_height'        => 'warning',
                 'responsive_breakpoint_width_mismatch' => 'warning',
-                'responsive_breakpoint_cols_mismatch'  => 'warning',
                 'empty_btn_style'             => 'warning',
                 'scroll_effect_forbidden'     => 'warning',
                 'vc_video_wrong_attribute'    => 'warning',
@@ -11741,9 +11577,7 @@ add_action( 'rest_api_init', function () {
                 // theme/check
                 'wrong_active_theme'                     => 'observation',
                 'impreza_license_inactive'               => 'critical',
-                'impreza_license_domain_mismatch'        => 'critical',
                 'impreza_license_dev_activated'          => aspera_host_is_subdomain() ? 'observation' : 'warning',
-                'impreza_license_check_unavailable'      => 'observation',
                 'unauthorized_installed_theme'           => 'warning',
                 'theme_recaptcha_site_key_missing'       => 'critical',
                 'theme_recaptcha_secret_key_missing'     => 'critical',
@@ -12558,15 +12392,6 @@ add_action( 'rest_api_init', function () {
                     'detail'   => 'Framework licentie is niet geactiveerd',
                 ];
 
-            } elseif ( $license['status'] === 'mismatch' ) {
-                $theme_violations[] = [
-                    'rule'     => 'impreza_license_domain_mismatch',
-                    'severity' => 'critical',
-                    'detail'   => $license['remote'] === 'invalid'
-                        ? 'Licentie staat lokaal op geactiveerd, maar is niet geldig voor ' . $license['domain']
-                        : 'Licentie geactiveerd op ' . $license['baseline_domain'] . ', site draait nu op ' . $license['domain'],
-                ];
-
             } elseif ( $license['status'] === 'dev' ) {
                 // Dev-activatie forceert maintenance_mode (about.php:135) en is
                 // daarmee alleen op een ontwikkelomgeving acceptabel.
@@ -12574,13 +12399,6 @@ add_action( 'rest_api_init', function () {
                     'rule'     => 'impreza_license_dev_activated',
                     'severity' => aspera_host_is_subdomain() ? 'observation' : 'warning',
                     'detail'   => 'Licentie is als dev-licentie geactiveerd; het framework forceert maintenance mode',
-                ];
-            }
-            if ( $license['status'] !== 'inactive' && $license['remote'] === 'unavailable' ) {
-                $theme_violations[] = [
-                    'rule'     => 'impreza_license_check_unavailable',
-                    'severity' => 'observation',
-                    'detail'   => 'Licentie kon niet bij de licentieserver geverifieerd worden (geverifieerd tegen ' . ASPERA_US_LICENSE['verified_against'] . ')',
                 ];
             }
             // Geinstalleerde thema's: alleen aspera/impreza toegestaan
