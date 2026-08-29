@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.20.0
+ * Version: 3.20.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.20.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.20.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -7485,10 +7485,19 @@ add_action( 'rest_api_init', function () {
      * GET /wp-json/aspera/v1/acf/validate/slugs
      * Valideert ACF veldsluggen site-wide op naamgevingsconventies.
      *
-     * Context wordt bepaald uit de locatieregels van de field group:
-     * - options_page regel aanwezig        → option_page context → opt_{naam}_{n} verwacht
-     * - post_type niet page/post/attachment → cpt context       → _cpt_{naam}_{n} verwacht
-     * - overig                             → page context       → _p_{fieldgroup}_{n} verwacht
+     * Context wordt bepaald uit álle locatieregels van de field group, niet uit de
+     * eerste match. Page weegt het zwaarst: een group die zowel aan pages als aan een
+     * CPT hangt volgt de _p_ conventie, omdat page op Aspera-sites het leidende post
+     * type is en CPTs een verlengstuk van het paginasysteem zijn.
+     * - page-signaal in welke OR-groep dan ook → page context   → _p_{fieldgroup}_{n} verwacht
+     * - anders options_page regel aanwezig     → option_page     → opt_{naam}_{n} verwacht
+     * - anders post_type niet page/post/etc.   → cpt context     → _cpt_{naam}_{n} verwacht
+     * - anders                                 → page context (default)
+     *
+     * Page-signalen: post_type uit $builtin_types, de paginagebonden params
+     * (page / page_type / page_template / page_parent) en een post_taxonomy waarvan
+     * de taxonomie op een builtin type geregistreerd staat. Alleen regels met
+     * operator '==' tellen mee; een '!=' regel zegt niets over de context.
      *
      * Gecontroleerde regels:
      * - missing_number          : slug eindigt niet op _\d+
@@ -7542,29 +7551,71 @@ add_action( 'rest_api_init', function () {
 
                 $groups_scanned++;
 
-                // Detecteer context uit locatieregels
+                // Detecteer context uit alle locatieregels; page gaat vóór cpt.
                 $context      = 'page'; // default
                 $context_name = '';
+                $has_page     = false;
+                $opt_value    = null;
+                $cpt_value    = null;
 
                 foreach ( (array) ( $group['location'] ?? [] ) as $or_group ) {
                     foreach ( (array) $or_group as $rule ) {
+                        // Een '!=' regel sluit iets uit en bepaalt dus geen context.
+                        if ( ( $rule['operator'] ?? '==' ) !== '==' ) continue;
+
                         $param = $rule['param'] ?? '';
-                        $value = $rule['value'] ?? '';
+                        $value = (string) ( $rule['value'] ?? '' );
 
                         if ( $param === 'options_page' ) {
-                            $context      = 'option_page';
-                            $context_name = $value;
-                            break 2;
+                            if ( $opt_value === null ) $opt_value = $value;
+                            continue;
                         }
 
-                        if ( $param === 'post_type'
-                             && ! in_array( $value, $builtin_types, true ) ) {
-                            $context      = 'cpt';
-                            // Verwijder _cpt suffix voor de context_name
-                            $context_name = preg_replace( '/_cpt$/', '', $value );
-                            break 2;
+                        // Paginagebonden locatieregels
+                        if ( in_array( $param, [ 'page', 'page_type', 'page_template', 'page_parent' ], true ) ) {
+                            $has_page = true;
+                            continue;
+                        }
+
+                        if ( $param === 'post_type' ) {
+                            if ( in_array( $value, $builtin_types, true ) ) {
+                                $has_page = true;
+                            } elseif ( $cpt_value === null ) {
+                                $cpt_value = $value;
+                            }
+                            continue;
+                        }
+
+                        // post_taxonomy hangt de group aan posts MÉT een term, niet aan het
+                        // term-scherm zelf. De context volgt daarom het post type waarop de
+                        // taxonomie geregistreerd staat (zelfde afleiding als de field-group
+                        // naming-check). Staat hij op meerdere types, dan telt elk type mee.
+                        if ( $param === 'post_taxonomy' ) {
+                            $tax_name = explode( ':', $value )[0];
+                            $tax_obj  = $tax_name !== '' ? get_taxonomy( $tax_name ) : false;
+                            $tax_types = ( $tax_obj && ! empty( $tax_obj->object_type ) )
+                                ? array_values( array_unique( (array) $tax_obj->object_type ) )
+                                : [];
+                            foreach ( $tax_types as $tax_type ) {
+                                if ( in_array( $tax_type, $builtin_types, true ) ) {
+                                    $has_page = true;
+                                } elseif ( $cpt_value === null ) {
+                                    $cpt_value = $tax_type;
+                                }
+                            }
                         }
                     }
+                }
+
+                if ( $has_page ) {
+                    $context = 'page';
+                } elseif ( $opt_value !== null ) {
+                    $context      = 'option_page';
+                    $context_name = $opt_value;
+                } elseif ( $cpt_value !== null ) {
+                    $context      = 'cpt';
+                    // Verwijder _cpt suffix voor de context_name
+                    $context_name = preg_replace( '/_cpt$/', '', $cpt_value );
                 }
 
                 foreach ( $fields as $field ) {
