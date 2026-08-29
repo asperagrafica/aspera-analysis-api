@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.21.0
+ * Version: 3.22.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.21.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.22.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -261,6 +261,27 @@ const ASPERA_RESPONSIVE_SLOT_LABELS = [
     1 => 'laptops screen width',
     2 => 'tablets screen width',
     3 => 'mobiles screen width',
+];
+
+/**
+ * ─── Tekstparameters zonder dynamic-value ondersteuning ──────────────────────
+ * Elementen waarvan us-core de tekstparameter niet als dynamic value aanbiedt:
+ * de editor toont er geen veldkiezer bij, dus een ACF-koppeling is er niet te
+ * leggen en de tekst kán alleen hardcoded. `hardcoded_text` zou dat als warning
+ * melden zonder dat er iets aan te doen valt; deze lijst degradeert de melding
+ * naar `hardcoded_text_no_dynamic_support` (observation), zodat de plek zichtbaar
+ * blijft en alsnog omgezet kan worden zodra het framework de koppeling toestaat.
+ *
+ * Criterium, te controleren bij elke us-core update: de parameter mist
+ * `dynamic_values` in `config/elements/<element>.php`. Vergelijk us_btn `label`,
+ * dat `'dynamic_values' => TRUE` draagt en dus wél gekoppeld hoort te zijn.
+ */
+const ASPERA_NO_DYNAMIC_TEXT_PARAMS = [
+    'verified_against' => 'us-core 9.2.2',
+    'params'           => [
+        'us_list_search'         => [ 'text' ],
+        'us_list_result_counter' => [ 'text' ],
+    ],
 ];
 
 /**
@@ -1104,8 +1125,20 @@ function aspera_wpb_validate_post( WP_Post $post ): array {
                 if ( preg_match( '/^\{\{[\w_\/]+\}\}$/', $val ) ) continue;
                 if ( strpos( $val, '%7B' ) === 0 || strpos( $val, '%7b' ) === 0 ) continue;
                 if ( preg_match( '/[a-zA-Z]/', $val ) && ! preg_match( '/^[\w_]+$/', $val ) ) {
-                    $violations[] = [ 'tag' => $tag, 'rule' => 'hardcoded_' . $attr_name,
-                        'detail' => $attr_name . '="' . $val . '" — hardcoded tekst in template/page block',
+                    // Kent het element deze parameter niet als dynamic value, dan is
+                    // hardcoderen de enige mogelijkheid en is het geen fout maar een
+                    // vastlegging (zie ASPERA_NO_DYNAMIC_TEXT_PARAMS).
+                    $no_dynamic = in_array(
+                        $attr_name,
+                        ASPERA_NO_DYNAMIC_TEXT_PARAMS['params'][ $tag ] ?? [],
+                        true
+                    );
+                    $violations[] = [ 'tag' => $tag,
+                        'rule'   => $no_dynamic ? 'hardcoded_text_no_dynamic_support' : 'hardcoded_' . $attr_name,
+                        'detail' => $no_dynamic
+                            ? $attr_name . '="' . $val . '" — ' . $tag . ' biedt geen dynamic value voor deze parameter (us-core '
+                              . ASPERA_NO_DYNAMIC_TEXT_PARAMS['verified_against'] . '), dus een ACF-koppeling is hier niet te leggen'
+                            : $attr_name . '="' . $val . '" — hardcoded tekst in template/page block',
                         'location' => $current_location ];
                 }
             }
@@ -4102,7 +4135,7 @@ function aspera_get_rules_per_category(): array {
     static $reg = null;
     if ( $reg !== null ) return $reg;
     $reg = [
-        'wpb' => [ 'hardcoded_label','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','empty_btn_style','responsive_breakpoint_width_mismatch','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
+        'wpb' => [ 'hardcoded_label','hardcoded_text','hardcoded_text_no_dynamic_support','hardcoded_image','hardcoded_link','empty_style_attr','missing_hide_empty','missing_color_link','missing_hide_with_empty_link','css_forbidden','design_css_forbidden','wrong_option_syntax','missing_acf_link','wrong_link_field_prefix','missing_el_class','missing_remove_rows','parent_row_with_siblings','hardcoded_bg_image','hardcoded_bg_video','wrong_bg_video_disable_width','redundant_row_height','empty_btn_style','responsive_breakpoint_width_mismatch','scroll_effect_forbidden','vc_video_wrong_attribute','missing_columns_reverse','unexpected_columns_reverse','columns_reverse_single_column','wpforms_deprecated','animate_detected','responsive_hide_detected','duplicate_acf_fields','unknown_acf_field','us_image_wrong_size' ],
         'grid' => [ 'image_lazy_loading_enabled','image_missing_homepage_link','image_has_ratio','image_has_style','image_wrong_size','hardcoded_border_radius','hardcoded_element_text' ],
         'colors' => [ 'deprecated_hex_var','deprecated_custom_var','hardcoded_hex_color','deprecated_theme_var','unknown_theme_var','rgba_color' ],
         'forms' => [ 'cform_inbound_disabled','missing_receiver_email','hardcoded_receiver_email','missing_button_text','hardcoded_button_text','empty_button_style','missing_success_message','hardcoded_success_message','missing_email_subject','missing_email_message','missing_field_list','missing_recaptcha','missing_email_field','wrong_email_field_type','empty_option_field' ],
@@ -4203,6 +4236,7 @@ function aspera_get_rule_context(): array {
 
         // ── Hardcoded content ─────────────────────────────────────────────
         'hardcoded_label' => [ 'label' => 'Hardcoded button-label in shortcode', 'explanation' => 'Een button heeft een vaste tekst i.p.v. via ACF-veld; niet vertaalbaar of beheerbaar via dashboard.', 'action' => 'Vervang door us_post_custom_field shortcode met ACF-koppeling.' ],
+        'hardcoded_text_no_dynamic_support' => [ 'label' => 'Hardcoded tekst in element zonder ACF-koppeling', 'explanation' => 'De tekst staat vast in de shortcode, maar dit element biedt de parameter niet als dynamic value aan: us-core zet er geen veldkiezer bij, dus een ACF-koppeling is niet te leggen. Vastgelegd als observation zodat de plek zichtbaar blijft.', 'action' => 'Geen actie mogelijk zolang het framework deze parameter niet dynamic maakt. Controleer bij een us-core update of `dynamic_values` op de parameter is toegevoegd; dan alsnog omzetten naar een ACF-koppeling.' ],
         'hardcoded_image' => [ 'label' => 'Hardcoded afbeelding (us_image)', 'explanation' => 'Image-shortcode heeft vaste image_id in plaats van ACF.', 'action' => 'Vervang door ACF-gekoppelde image, of zet via us_image image="{{acf_field}}".' ],
         'us_image_wrong_size' => [ 'label' => 'us_image met afwijkende size', 'explanation' => 'Het size-attribuut wijkt af van "full" of ontbreekt. Afgeleide us_*-formaten verwijzen naar theme-registraties die na het opschonen van Additional Image Sizes niet meer bestaan; de afbeelding toont dan afwijkend.', 'action' => 'Zet size="full" op het us_image element.' ],
         'hardcoded_link' => [ 'label' => 'Hardcoded link in button/element', 'explanation' => 'Link is vaste URL i.p.v. ACF link-veld; niet via dashboard aanpasbaar.', 'action' => 'Vervang door ACF link-veld referentie.' ],
@@ -9974,6 +10008,16 @@ add_action( 'rest_api_init', function () {
                 'owl-',         // OWL Carousel: owl-stage-outer, owl-dot, owl-item
                 'wpb_',         // WPBakery wrapper classes: wpb_wrapper, wpb_*
                 'icon_at',      // Impreza icon-positie: icon_atleft, icon_atright
+                // WordPress body class per post type: single, single-post,
+                // single-project_cpt, … Impreza zet die op de body van elk item van
+                // dat post type, dus custom CSS die eraan hangt geldt post-type-breed
+                // en komt per definitie niet in een el_class voor.
+                'single-',
+                // Impreza filter-modifier: mod_dropdown, mod_side, mod_toggle,
+                // mod_default. us-core zet die zelf op het element in
+                // templates/elements/grid_filter.php en list_filter.php, dus ze
+                // staan nooit in een el_class in post_content.
+                'mod_',
             ];
 
             // Exact-match klassen die volledig genegeerd worden (framework/3rd-party)
@@ -11377,6 +11421,7 @@ add_action( 'rest_api_init', function () {
             $severity_map = [
                 // wpb/validate/all
                 'hardcoded_label'             => 'error',
+                'hardcoded_text_no_dynamic_support' => 'observation',
                 'hardcoded_image'             => 'error',
                 'hardcoded_link'              => 'error',
                 'empty_style_attr'            => 'warning',
