@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.23.0
+ * Version: 3.24.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.23.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.24.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -2499,9 +2499,86 @@ function aspera_check_key( WP_REST_Request $req ): true|WP_Error {
         $provided = (string) ( $req->get_param( 'aspera_key' ) ?? '' );
     }
     if ( ! hash_equals( $stored, $provided ) ) {
+        // Alternatief: kortlevend, read-only sessietoken uit AsperAi → Dashboard.
+        if ( aspera_session_token_valid( $provided, $req->get_method() ) ) {
+            return true;
+        }
         return new WP_Error( 'unauthorized', 'Ongeldige of ontbrekende aspera_key.', [ 'status' => 401 ] );
     }
     return true;
+}
+
+// ── Sessietoken ──────────────────────────────────────────────────────────────
+// Kortlevend (1 uur), read-only alternatief voor de secret key, bedoeld om aan
+// een AI-sessie door te geven zonder de blijvende key te delen. Alleen de hash
+// staat in de database; het token zelf wordt eenmalig getoond na aanmaken.
+// Het token geldt uitsluitend voor GET/HEAD, dus nooit voor fix-acties.
+
+const ASPERA_SESSION_TOKEN_OPTION = 'aspera_session_token';
+const ASPERA_SESSION_TOKEN_TTL    = HOUR_IN_SECONDS;
+
+function aspera_session_token_valid( string $provided, string $method ): bool {
+    if ( $provided === '' || ! in_array( strtoupper( $method ), [ 'GET', 'HEAD' ], true ) ) {
+        return false;
+    }
+    $data = get_option( ASPERA_SESSION_TOKEN_OPTION );
+    if ( ! is_array( $data ) || empty( $data['hash'] ) || empty( $data['expires'] ) ) {
+        return false;
+    }
+    if ( time() > (int) $data['expires'] ) {
+        delete_option( ASPERA_SESSION_TOKEN_OPTION );
+        return false;
+    }
+    return hash_equals( (string) $data['hash'], hash( 'sha256', $provided ) );
+}
+
+add_action( 'admin_post_aspera_session_token_create', function () {
+    if ( ! aspera_user_is_administrator() ) wp_die( 'Geen toegang.', 403 );
+    check_admin_referer( 'aspera_session_token' );
+    $token = wp_generate_password( 40, false );
+    update_option( ASPERA_SESSION_TOKEN_OPTION, [
+        'hash'    => hash( 'sha256', $token ),
+        'expires' => time() + ASPERA_SESSION_TOKEN_TTL,
+    ], false );
+    set_transient( 'aspera_session_token_show_' . get_current_user_id(), $token, 300 );
+    wp_safe_redirect( admin_url( 'admin.php?page=' . ASPERA_ADMIN_PAGE_SLUG ) );
+    exit;
+} );
+
+add_action( 'admin_post_aspera_session_token_revoke', function () {
+    if ( ! aspera_user_is_administrator() ) wp_die( 'Geen toegang.', 403 );
+    check_admin_referer( 'aspera_session_token' );
+    delete_option( ASPERA_SESSION_TOKEN_OPTION );
+    wp_safe_redirect( admin_url( 'admin.php?page=' . ASPERA_ADMIN_PAGE_SLUG ) );
+    exit;
+} );
+
+function aspera_session_token_render(): void {
+    $uid   = get_current_user_id();
+    $shown = get_transient( 'aspera_session_token_show_' . $uid );
+    if ( $shown ) delete_transient( 'aspera_session_token_show_' . $uid );
+    $data   = get_option( ASPERA_SESSION_TOKEN_OPTION );
+    $active = is_array( $data ) && ! empty( $data['expires'] ) && time() <= (int) $data['expires'];
+    echo '<div class="card" style="max-width:none;margin-top:16px"><h2>Sessietoken voor AI-sessie</h2>';
+    echo '<p class="description">Kortlevend (1 uur), alleen lezen (GET). Geef dit token door in plaats van de secret key. Verstuur als header <code>X-Aspera-Key</code>.</p>';
+    if ( $shown ) {
+        echo '<p>Token (wordt maar één keer getoond):</p><p><input type="text" readonly class="large-text code" onclick="this.select()" value="' . esc_attr( $shown ) . '"></p>';
+    }
+    if ( $active ) {
+        echo '<p>Actief tot ' . esc_html( wp_date( 'H:i', (int) $data['expires'] ) ) . '.</p>';
+    }
+    $action = esc_url( admin_url( 'admin-post.php' ) );
+    echo '<form method="post" action="' . $action . '" style="display:inline-block;margin-right:8px">';
+    echo '<input type="hidden" name="action" value="aspera_session_token_create">';
+    wp_nonce_field( 'aspera_session_token' );
+    echo '<button type="submit" class="button button-primary">' . ( $active ? 'Nieuw token genereren' : 'Sessietoken genereren' ) . '</button></form>';
+    if ( $active ) {
+        echo '<form method="post" action="' . $action . '" style="display:inline-block">';
+        echo '<input type="hidden" name="action" value="aspera_session_token_revoke">';
+        wp_nonce_field( 'aspera_session_token' );
+        echo '<button type="submit" class="button">Intrekken</button></form>';
+    }
+    echo '</div>';
 }
 
 /**
@@ -2789,6 +2866,7 @@ function aspera_admin_page_render(): void {
     echo '<h1>AsperAi Site Tools</h1>';
     echo '<p class="description">Diagnostisch hulpmiddel voor WordPress-sites</p>';
     aspera_dashboard_widget_render();
+    aspera_session_token_render();
     aspera_admin_page_pdf_export();
     echo '</div>';
 }
