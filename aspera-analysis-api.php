@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.24.0
+ * Version: 3.25.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.24.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.25.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -1572,6 +1572,32 @@ function aspera_get_plugin_slugs(): array {
         'active'    => array_map( $extract_slug, $active_files ),
     ];
     return $cache;
+}
+
+/**
+ * Is het Impreza-framework op deze site geïnstalleerd?
+ * True zodra een geïnstalleerd thema Impreza is of Impreza als parent heeft
+ * (Impreza, Impreza Child, Aspera Child). Sites met een eigen standalone
+ * thema geven false; Impreza-regels zijn daar niet van toepassing.
+ */
+function aspera_impreza_installed(): bool {
+    static $cache = null;
+    if ( $cache !== null ) return $cache;
+    $cache = false;
+    foreach ( wp_get_themes() as $slug => $theme ) {
+        if ( strtolower( (string) $slug ) === 'impreza' || strtolower( (string) $theme->get_template() ) === 'impreza' ) {
+            $cache = true;
+            break;
+        }
+    }
+    return $cache;
+}
+
+/**
+ * Is WPBakery Page Builder op deze site geïnstalleerd (actief of inactief)?
+ */
+function aspera_wpbakery_installed(): bool {
+    return in_array( 'js_composer', aspera_get_plugin_slugs()['installed'], true );
 }
 
 /**
@@ -4862,6 +4888,18 @@ function aspera_dashboard_widget_render(): void {
 
     // ── Per-categorie accordion (Issues tab) ──────────────────────────────────
     echo '<div class="aspera-tab-content" data-tab-content="issues">';
+    $na_cats = get_option( 'aspera_audit_not_applicable', [] );
+    if ( is_array( $na_cats ) && ! empty( $na_cats ) ) {
+        $na_by_reason = [];
+        foreach ( $na_cats as $na_key => $na_reason ) {
+            $na_by_reason[ $na_reason ][] = $cat_labels[ $na_key ] ?? $na_key;
+        }
+        $na_parts = [];
+        foreach ( $na_by_reason as $na_reason => $na_labels ) {
+            $na_parts[] = esc_html( implode( ', ', $na_labels ) ) . ' <em>(' . esc_html( $na_reason ) . ')</em>';
+        }
+        echo '<p style="margin:0 0 10px;font-size:12px;color:#50575e;">Niet van toepassing: ' . implode( '; ', $na_parts ) . '</p>';
+    }
     echo '<div id="aspera-grouped-view"></div>';
     echo '<div class="aspera-toggle-all-bar"><button type="button" class="aspera-toggle-all-btn" data-state="mixed">&#x2195;&nbsp;Alles uit-/inklappen</button></div>';
     echo '<div style="border:1px solid #dcdcde;border-radius:4px;overflow:hidden;margin-bottom:12px;">';
@@ -11821,7 +11859,43 @@ add_action( 'rest_api_init', function () {
             ];
 
             // ── Helper: interne REST call ─────────────────────────────────
-            $call = function ( string $route, array $params = [] ): array {
+            // ── Stack-afhankelijke categorieën ────────────────────────────
+            // Regels voor Impreza of WPBakery zijn niet van toepassing op een
+            // site zonder dat onderdeel (bv. na migratie naar een eigen thema).
+            // Zulke categorieën worden niet aangeroepen, tellen niet mee in de
+            // score en komen in 'not_applicable' terecht.
+            $has_impreza  = aspera_impreza_installed();
+            $has_wpbakery = aspera_wpbakery_installed();
+            $na_routes    = []; // route => categorie
+            if ( ! $has_wpbakery ) {
+                $na_routes += [
+                    'wpb/validate/all'       => 'wpb',
+                    'wpb/modules/validate'   => 'wpb_modules',
+                    'wpb/templates/validate' => 'wpb_templates',
+                    'css/unused'             => 'css',
+                ];
+            }
+            if ( ! $has_impreza ) {
+                $na_routes += [
+                    'grid/validate'     => 'grid',
+                    'colors/validate'   => 'colors',
+                    'theme/breakpoints' => 'theme_breakpoints',
+                    'header/validate'   => 'header_config',
+                    'naming/validate'   => 'naming',
+                    'forms/validate'    => 'forms',
+                ];
+            }
+            $not_applicable = [];
+            foreach ( $na_routes as $na_cat ) {
+                $not_applicable[ $na_cat ] = in_array( $na_cat, [ 'wpb', 'wpb_modules', 'wpb_templates', 'css' ], true )
+                    ? 'WPBakery niet geïnstalleerd'
+                    : 'Impreza niet geïnstalleerd';
+            }
+
+            $call = function ( string $route, array $params = [] ) use ( $na_routes ): array {
+                if ( isset( $na_routes[ $route ] ) ) {
+                    return []; // niet van toepassing; categorie wordt hieronder verwijderd
+                }
                 $request = new WP_REST_Request( 'GET', '/aspera/v1/' . $route );
                 foreach ( $params as $k => $v ) {
                     $request->set_param( $k, $v );
@@ -12501,14 +12575,16 @@ add_action( 'rest_api_init', function () {
             $theme_name = wp_get_theme()->get( 'Name' );
             $is_aspera  = ( stripos( $stylesheet, 'aspera' ) !== false )
                        || ( stripos( $theme_name, 'aspera' ) !== false );
-            if ( ! $is_aspera ) {
+            // Zonder Impreza draait de site op een eigen thema: Aspera Child
+            // en de framework-licentie zijn dan niet van toepassing.
+            if ( $has_impreza && ! $is_aspera ) {
                 $theme_violations[] = [
                     'rule'     => 'wrong_active_theme',
                     'severity' => 'observation',
                     'detail'   => 'Actief thema: ' . $theme_name . ' (' . $stylesheet . ')',
                 ];
             }
-            $license = aspera_impreza_license_state();
+            $license = $has_impreza ? aspera_impreza_license_state() : [ 'status' => 'n/a' ];
             if ( $license['status'] === 'inactive' ) {
                 $theme_violations[] = [
                     'rule'     => 'impreza_license_inactive',
@@ -12525,11 +12601,13 @@ add_action( 'rest_api_init', function () {
                     'detail'   => 'Licentie is als dev-licentie geactiveerd; het framework forceert maintenance mode',
                 ];
             }
-            // Geinstalleerde thema's: alleen aspera/impreza toegestaan
-            $allowed_substrings = [ 'aspera', 'impreza' ];
+            // Geinstalleerde thema's: alleen aspera/impreza toegestaan.
+            // Zonder Impreza: alleen het actieve thema en zijn parent.
+            $allowed_substrings = $has_impreza ? [ 'aspera', 'impreza' ] : [];
+            $allowed_slugs      = $has_impreza ? [] : array_unique( [ get_stylesheet(), get_template() ] );
             foreach ( wp_get_themes() as $installed_slug => $theme_obj ) {
                 $installed_name = $theme_obj->get( 'Name' );
-                $is_allowed = false;
+                $is_allowed = in_array( (string) $installed_slug, $allowed_slugs, true );
                 foreach ( $allowed_substrings as $needle ) {
                     if ( stripos( $installed_slug, $needle ) !== false || stripos( $installed_name, $needle ) !== false ) {
                         $is_allowed = true;
@@ -13051,6 +13129,11 @@ add_action( 'rest_api_init', function () {
                 'error'           => null,
             ];
 
+            // ── Niet-toepasselijke categorieën verwijderen ──────────────
+            foreach ( array_keys( $not_applicable ) as $na_cat ) {
+                unset( $categories[ $na_cat ] );
+            }
+
             // ── Uitzonderingen laden en markeren ─────────────────────────
             $exc_raw   = get_option( 'aspera_audit_exceptions', [] );
             $exc_index = [];
@@ -13210,6 +13293,7 @@ add_action( 'rest_api_init', function () {
             ] ), false );
             // Volledig snapshot met violations — gebruikt door dashboard widget
             update_option( 'aspera_audit_snapshot', wp_json_encode( $categories_output ), false );
+            update_option( 'aspera_audit_not_applicable', $not_applicable, false );
 
             return [
                 'health_score'     => $health_score,
@@ -13218,6 +13302,7 @@ add_action( 'rest_api_init', function () {
                 'severity_counts'  => $severity_counts,
                 'category_scores'  => $category_scores,
                 'categories'       => $categories_output,
+                'not_applicable'   => $not_applicable,
                 'audit_date'       => $audit_date,
             ];
         },
