@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.25.1
+ * Version: 3.26.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.25.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.26.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -7937,6 +7937,8 @@ add_action( 'rest_api_init', function () {
             // flaggen, maar wel apart waarschuwen zodra hij actief is (maintenance_mode_active)
             $whitelist_slugs   = array_keys( $essential );
             $whitelist_slugs[] = 'burst-statistics';
+            // Secure Custom Fields: gelijkwaardig alternatief voor ACF PRO (zelfde datamodel en functies)
+            $whitelist_slugs[] = 'secure-custom-fields';
             $whitelist_slugs[] = 'redis-cache';
             $whitelist_slugs[] = 'duplicator';
             $whitelist_slugs[] = 'duplicator-pro';
@@ -7957,6 +7959,31 @@ add_action( 'rest_api_init', function () {
                         ];
                     } else {
                         $known_status[] = [ 'name' => $name, 'slug' => $slug, 'status' => 'not_installed' ];
+                    }
+                    continue;
+                }
+
+                // ACF PRO of Secure Custom Fields: één van beide volstaat. Rapporteer de actieve variant;
+                // zijn beide inactief, dan ACF PRO (indien aanwezig), anders SCF. SCF deactiveert ACF PRO
+                // bij activatie, dus tijdens een overstap staan ze naast elkaar met één actief.
+                if ( $slug === 'advanced-custom-fields-pro' ) {
+                    if ( ! empty( $installed['secure-custom-fields']['active'] ) ) {
+                        $acf_slug = 'secure-custom-fields';
+                    } elseif ( isset( $installed['advanced-custom-fields-pro'] ) ) {
+                        $acf_slug = 'advanced-custom-fields-pro';
+                    } else {
+                        $acf_slug = isset( $installed['secure-custom-fields'] ) ? 'secure-custom-fields' : null;
+                    }
+                    if ( $acf_slug ) {
+                        $actual         = $installed[ $acf_slug ];
+                        $known_status[] = [
+                            'name'    => $actual['name'],
+                            'slug'    => $acf_slug,
+                            'version' => $actual['version'],
+                            'status'  => $actual['active'] ? 'active' : 'inactive',
+                        ];
+                    } else {
+                        $known_status[] = [ 'name' => $name . ' of Secure Custom Fields', 'slug' => $slug, 'status' => 'not_installed' ];
                     }
                     continue;
                 }
