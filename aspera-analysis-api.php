@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.26.1
+ * Version: 3.27.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.26.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.27.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -3019,19 +3019,56 @@ function aspera_admin_page_pdf_export(): void {
 // hernoemen of hergebruiken, anders verschuiven bestaande vinkjes.
 
 const ASPERA_CHECKLIST_PAGE_SLUG = 'aspera-launch-checklist';
-const ASPERA_CHECKLIST_VERSION   = '1.3.0';
+const ASPERA_CHECKLIST_VERSION   = '1.4.0';
 const ASPERA_CHECKLIST_OPTION    = 'aspera_launch_checklist';
+
+/**
+ * Item-keys die alleen relevant zijn met Impreza (of een child daarvan) als
+ * actief thema. Op maatwerk-sites zonder Impreza worden ze uit de definitie
+ * gehaald, zodat ze niet getoond worden en niet meetellen.
+ */
+const ASPERA_CHECKLIST_IMPREZA_ONLY = [
+    'opt_uptime_monitor',
+    'opt_afbeeldingformaten',
+    'thema_lazy_loading',
+    'thema_standaard_layout',
+    'thema_wpb_templates',
+    'thema_api_koppelen',
+    'thema_kleurprofiel',
+    'thema_optimalisatie',
+    'thema_backup_opties',
+    'thema_schema',
+    'plugins_wpb_modules',
+    'gb_wpb_rechten',
+];
 
 /**
  * Checklist-definitie: categorieën met items. Bij uitbreiding altijd een
  * nieuwe key toevoegen en de ASPERA_CHECKLIST_VERSION bumpen.
+ * Zonder actief Impreza(-child)thema vallen de ASPERA_CHECKLIST_IMPREZA_ONLY
+ * items weg; een categorie die daardoor leeg raakt verdwijnt ook.
  */
 function aspera_checklist_definition(): array {
+    $definition = aspera_checklist_definition_full();
+    if ( strtolower( (string) get_template() ) === 'impreza' ) return $definition;
+
+    foreach ( $definition as $cat => $items ) {
+        foreach ( ASPERA_CHECKLIST_IMPREZA_ONLY as $key ) unset( $items[ $key ] );
+        if ( empty( $items ) ) unset( $definition[ $cat ] );
+        else $definition[ $cat ] = $items;
+    }
+    return $definition;
+}
+
+/**
+ * Volledige checklist-definitie, ongeacht het actieve thema.
+ */
+function aspera_checklist_definition_full(): array {
     return [
         'Aspera' => [
             'aspera_full_audit' => 'Full site audit',
         ],
-        'WPForms' => [
+        'Formulieren' => [
             'wpf_verzending'    => 'Verzending en aankomst controleren',
             'wpf_instellingen'  => 'Formulier instellingen controleren',
             'wpf_privacy'       => 'Privacyvermelding onder formulier(en)',
@@ -8017,6 +8054,9 @@ add_action( 'rest_api_init', function () {
             $whitelist_slugs[] = 'duplicator';
             $whitelist_slugs[] = 'duplicator-pro';
             $whitelist_slugs[] = 'slim-maintenance-mode';
+            // WP Consent API: standaard-API voor cookietoestemming, door consent- en statistiekplugins
+            // (o.a. WPConsent, Burst) gebruikt om toestemming door te geven; ondersteunend, geen extra plugin
+            $whitelist_slugs[] = 'wp-consent-api';
 
             $known_status = [];
             foreach ( $essential as $slug => $name ) {
@@ -10951,8 +10991,12 @@ add_action( 'rest_api_init', function () {
             }
 
             // 4. Beheerder-rol: post types moeten disabled zijn (vc_access_rules_post_types === false)
+            //    Overslaan als er naast de Aspera-account geen andere users zijn: dan is er
+            //    niemand wiens rechten of zichtbaarheid beperkt hoeft te worden.
+            $only_aspera_user = count( get_users( [ 'number' => 2, 'fields' => 'ID' ] ) ) <= 1
+                || empty( get_users( [ 'login__not_in' => [ 'aspera' ], 'number' => 1, 'fields' => 'ID' ] ) );
             $beheerder_role = null;
-            if ( function_exists( 'wp_roles' ) ) {
+            if ( ! $only_aspera_user && function_exists( 'wp_roles' ) ) {
                 $all_roles = wp_roles()->roles ?? [];
                 foreach ( $all_roles as $slug => $data ) {
                     if ( strtolower( $slug ) === 'beheerder' ) {
@@ -10980,6 +11024,7 @@ add_action( 'rest_api_init', function () {
                 'active_modules'  => $active_modules,
                 'module_settings' => $modules,
                 'beheerder_role'  => $beheerder_role !== null ? [ 'slug' => $beheerder_role['slug'], 'name' => $beheerder_role['name'] ] : null,
+                'beheerder_check_skipped' => $only_aspera_user ? 'geen andere users dan Aspera' : null,
             ];
         },
     ] );
