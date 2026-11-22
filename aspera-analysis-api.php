@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.26.0
+ * Version: 3.26.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.26.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.26.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -439,6 +439,90 @@ function aspera_acf_meta_key_matches_field( string $meta_key, array $field, arra
     $pattern = '/^' . implode( '_\d+_', $parts ) . '$/';
 
     return (bool) preg_match( $pattern, $meta_key );
+}
+
+/**
+ * Alle actieve ACF-velden, uit de database én uit de local store (Local JSON en
+ * acf_add_local_field_group() in PHP). Rijen in de vorm die
+ * aspera_acf_meta_key_matches_field() verwacht: ID, post_parent, field_key, field_slug.
+ *
+ * Alleen de database lezen is niet genoeg: een site die zijn veldgroepen als Local
+ * JSON vastlegt heeft geen acf-field posts, waardoor elke ACF-waarde als verweesd
+ * zou gelden en de bijbehorende fix-actie de content zou wissen.
+ *
+ * Local velden krijgen een synthetische negatieve ID; hun parent (een field key bij
+ * repeater-/flexible-subvelden, een group key bij top-level velden) wordt naar die ID
+ * vertaald, zodat de parent-keten in de matcher ook voor local velden werkt.
+ * Bestaat een field key zowel in de database als lokaal, dan wint de database.
+ */
+function aspera_acf_active_fields(): array {
+    static $cached = null;
+    if ( $cached !== null ) return $cached;
+
+    global $wpdb;
+    $rows = (array) $wpdb->get_results(
+        "SELECT ID, post_parent, post_name AS field_key, post_excerpt AS field_slug
+         FROM {$wpdb->posts}
+         WHERE post_type = 'acf-field'
+           AND post_status = 'publish'
+           AND post_name LIKE 'field_%'",
+        ARRAY_A
+    );
+
+    $key_to_id = [];
+    foreach ( $rows as $row ) {
+        if ( ! empty( $row['field_key'] ) ) {
+            $key_to_id[ $row['field_key'] ] = (int) $row['ID'];
+        }
+    }
+
+    if ( function_exists( 'acf_get_local_fields' ) ) {
+        $local   = [];
+        $next_id = -1;
+        foreach ( (array) acf_get_local_fields() as $field ) {
+            $key = (string) ( $field['key'] ?? '' );
+            if ( strpos( $key, 'field_' ) !== 0 || isset( $key_to_id[ $key ] ) ) continue;
+            $key_to_id[ $key ] = $next_id--;
+            $local[]           = $field;
+        }
+        foreach ( $local as $field ) {
+            $parent = $field['parent'] ?? 0;
+            $rows[] = [
+                'ID'          => $key_to_id[ $field['key'] ],
+                'post_parent' => is_string( $parent ) ? ( $key_to_id[ $parent ] ?? 0 ) : 0,
+                'field_key'   => (string) $field['key'],
+                'field_slug'  => (string) ( $field['name'] ?? '' ),
+            ];
+        }
+    }
+
+    return $cached = $rows;
+}
+
+/**
+ * Menu-slugs van alle actieve ACF option pages: uit acf-ui-options-page posts én
+ * in code geregistreerde pagina's (acf_add_options_page()).
+ */
+function aspera_acf_active_options_page_slugs(): array {
+    global $wpdb;
+    $slugs = [];
+    $posts = $wpdb->get_col(
+        "SELECT post_content FROM {$wpdb->posts}
+         WHERE post_type = 'acf-ui-options-page'
+           AND post_status = 'publish'"
+    );
+    foreach ( $posts as $content ) {
+        $data = maybe_unserialize( $content );
+        if ( is_array( $data ) && ! empty( $data['menu_slug'] ) ) {
+            $slugs[] = $data['menu_slug'];
+        }
+    }
+    if ( function_exists( 'acf_get_options_pages' ) ) {
+        foreach ( (array) acf_get_options_pages() as $slug => $page ) {
+            $slugs[] = (string) ( $page['menu_slug'] ?? $slug );
+        }
+    }
+    return array_values( array_unique( array_filter( $slugs ) ) );
 }
 
 /**
@@ -3684,12 +3768,7 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             if ( empty( $refs ) ) {
                 wp_send_json_error( 'Verificatie mislukt: geen field_* referentie meer voor "' . $meta_key . '". Voer audit opnieuw uit.' );
             }
-            $acf_fields   = $wpdb->get_results(
-                "SELECT ID, post_parent, post_name AS field_key, post_excerpt AS field_slug
-                 FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-field' AND post_status = 'publish'",
-                ARRAY_A
-            );
+            $acf_fields   = aspera_acf_active_fields(); // DB + Local JSON/PHP, zelfde bron als /meta/validate
             $fields_by_key = [];
             $fields_by_id  = [];
             foreach ( $acf_fields as $af ) {
@@ -3726,13 +3805,8 @@ add_action( 'wp_ajax_aspera_apply_fix', function () {
             if ( ! $option_prefix ) {
                 wp_send_json_error( 'option_prefix ontbreekt.' );
             }
-            // Re-verify: haal actieve ACF field keys op
-            $active_field_keys = $wpdb->get_col(
-                "SELECT post_name FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-field'
-                   AND post_status = 'publish'
-                   AND post_name LIKE 'field_%'"
-            );
+            // Re-verify: actieve ACF field keys, DB + Local JSON/PHP (zelfde bron als /options/validate)
+            $active_field_keys = array_column( aspera_acf_active_fields(), 'field_key' );
             // Haal alle _options_* refs op met field_* waarden (zelfde query als options/validate)
             $refs = $wpdb->get_results(
                 "SELECT option_name, option_value FROM {$wpdb->options}
@@ -8090,14 +8164,9 @@ add_action( 'rest_api_init', function () {
             //     post_excerpt = veldslug zoals bu_cpt_links_1)
             //    ID en post_parent zijn nodig om subvelden van repeaters en flexible
             //    content te herkennen, zie aspera_acf_meta_key_matches_field().
-            $active_fields = $wpdb->get_results(
-                "SELECT ID, post_parent, post_name AS field_key, post_excerpt AS field_slug
-                 FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-field'
-                   AND post_status = 'publish'
-                   AND post_name LIKE 'field_%'",
-                ARRAY_A
-            );
+            //    Sinds v3.26.1 inclusief local velden (Local JSON / PHP), zie
+            //    aspera_acf_active_fields().
+            $active_fields = aspera_acf_active_fields();
             $active_field_keys  = array_column( $active_fields, 'field_key' );
             $active_field_slugs = array_flip( array_filter( array_column( $active_fields, 'field_slug' ) ) );
             $active_field_keys  = array_values( array_filter( $active_field_keys ) );
@@ -8250,27 +8319,12 @@ add_action( 'rest_api_init', function () {
             global $wpdb;
 
             // 1. Actieve ACF field keys
-            $active_field_keys = $wpdb->get_col(
-                "SELECT post_name FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-field'
-                   AND post_status = 'publish'
-                   AND post_name LIKE 'field_%'"
-            );
-            $active_field_keys = array_values( array_filter( $active_field_keys ) );
+            //    DB + Local JSON/PHP (v3.26.1), zie aspera_acf_active_fields().
+            $active_field_keys = array_values( array_filter( array_column( aspera_acf_active_fields(), 'field_key' ) ) );
 
-            // 2. Actieve option page slugs (uit acf-ui-options-page posts)
-            $active_slugs  = [];
-            $option_pages  = $wpdb->get_results(
-                "SELECT post_content FROM {$wpdb->posts}
-                 WHERE post_type = 'acf-ui-options-page'
-                   AND post_status = 'publish'"
-            );
-            foreach ( $option_pages as $op ) {
-                $data = maybe_unserialize( $op->post_content );
-                if ( is_array( $data ) && ! empty( $data['menu_slug'] ) ) {
-                    $active_slugs[] = $data['menu_slug'];
-                }
-            }
+            // 2. Actieve option page slugs: acf-ui-options-page posts én
+            //    acf_add_options_page() in code (v3.26.1)
+            $active_slugs = aspera_acf_active_options_page_slugs();
 
             // 3. Alle _options_* referenties met field_* waarden.
             //    Filter op option_value LIKE 'field_%' garandeert ACF-herkomst,
