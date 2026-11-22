@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.27.0
+ * Version: 3.27.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.27.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.27.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -65,6 +65,20 @@ function aspera_strip_empty( array $data ): array {
             if ( $value === [] ) continue;
         }
         $result[ $key ] = $value;
+    }
+    return $result;
+}
+
+/**
+ * True als er naast de Aspera-account geen andere users op de site zijn.
+ * Regels die rechten of zichtbaarheid voor klant-rollen beperken, zijn dan
+ * niet van toepassing: er is niemand voor wie iets afgeschermd hoeft te worden.
+ */
+function aspera_only_aspera_user(): bool {
+    static $result = null;
+    if ( $result === null ) {
+        $result = count( get_users( [ 'number' => 2, 'fields' => 'ID' ] ) ) <= 1
+            || empty( get_users( [ 'login__not_in' => [ 'aspera' ], 'number' => 1, 'fields' => 'ID' ] ) );
     }
     return $result;
 }
@@ -10993,8 +11007,7 @@ add_action( 'rest_api_init', function () {
             // 4. Beheerder-rol: post types moeten disabled zijn (vc_access_rules_post_types === false)
             //    Overslaan als er naast de Aspera-account geen andere users zijn: dan is er
             //    niemand wiens rechten of zichtbaarheid beperkt hoeft te worden.
-            $only_aspera_user = count( get_users( [ 'number' => 2, 'fields' => 'ID' ] ) ) <= 1
-                || empty( get_users( [ 'login__not_in' => [ 'aspera' ], 'number' => 1, 'fields' => 'ID' ] ) );
+            $only_aspera_user = aspera_only_aspera_user();
             $beheerder_role = null;
             if ( ! $only_aspera_user && function_exists( 'wp_roles' ) ) {
                 $all_roles = wp_roles()->roles ?? [];
@@ -11639,9 +11652,11 @@ add_action( 'rest_api_init', function () {
                 $violations[] = [ 'rule' => 'cache_language_not_english', 'detail' => 'wpFastestCacheLanguage="' . $lang . '" (verwacht: en_*)' ];
             }
 
-            $toolbar_raw = get_option( 'WpFastestCacheToolbarSettings' );
-            $toolbar     = is_array( $toolbar_raw ) ? $toolbar_raw : ( is_string( $toolbar_raw ) ? maybe_unserialize( $toolbar_raw ) : [] );
-            if ( ! is_array( $toolbar ) || ( $toolbar['wpfc_toolbar_beheerder'] ?? '' ) !== '1' ) {
+            // Toolbar beperken tot beheerder is alleen zinvol als er naast Aspera andere users zijn.
+            $toolbar_skip = aspera_only_aspera_user();
+            $toolbar_raw  = get_option( 'WpFastestCacheToolbarSettings' );
+            $toolbar      = is_array( $toolbar_raw ) ? $toolbar_raw : ( is_string( $toolbar_raw ) ? maybe_unserialize( $toolbar_raw ) : [] );
+            if ( ! $toolbar_skip && ( ! is_array( $toolbar ) || ( $toolbar['wpfc_toolbar_beheerder'] ?? '' ) !== '1' ) ) {
                 $violations[] = [ 'rule' => 'cache_toolbar_admin_only_missing', 'detail' => 'wpfc_toolbar_beheerder != "1"' ];
             }
 
@@ -11654,6 +11669,7 @@ add_action( 'rest_api_init', function () {
                     'language'       => $lang,
                     'timeout_events' => count( $timeout_events ),
                 ],
+                'toolbar_check_skipped' => $toolbar_skip ? 'geen andere users dan Aspera' : null,
             ];
         },
     ] );
