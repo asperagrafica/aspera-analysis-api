@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.28.0
+ * Version: 3.29.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.28.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.29.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -1699,6 +1699,185 @@ function aspera_wpbakery_installed(): bool {
 }
 
 /**
+ * Draait de site op een maatwerkthema?
+ * Vuistregel: elk actief thema dat niet Impreza is en geen Impreza als parent
+ * heeft (Impreza Child, Aspera Child). Alleen dan geldt de categorie
+ * `security`: een deel van de AIOS-opties werkt niet of slecht samen met
+ * Impreza, dus op Impreza-sites wordt de categorie overgeslagen.
+ */
+function aspera_custom_theme_active(): bool {
+    return strtolower( (string) get_template() ) !== 'impreza';
+}
+
+/**
+ * ─── AIOS-contract ───────────────────────────────────────────────────────────
+ * De AIOS-specifieke namen van de categorie `security` op één plek.
+ * Geverifieerd tegen All-In-One Security 5.5.1
+ * (`classes/wp-security-configure-settings.php`, `classes/wp-security-file-scanner.php`).
+ * `probe_key` moet in de config-array bestaan; ontbreekt hij, dan degradeert de
+ * categorie naar één observation in plaats van onjuiste meldingen.
+ */
+const ASPERA_AIOS = [
+    'verified_against' => 'AIOS 5.5.1',
+    'slug'             => 'all-in-one-wp-security-and-firewall',
+    'option'           => 'aio_wp_security_configs',
+    'probe_key'        => 'aiowps_disable_file_editing',
+    // Markeringen die AIOS in .htaccess zet (classes/wp-security-utility-htaccess.php).
+    // Voor deze opties telt wat er in .htaccess staat, niet alleen de schakelaar.
+    'htaccess_markers' => [
+        'aiowps_enable_basic_firewall'       => '#AIOWPS_BASIC_HTACCESS_RULES_START',
+        'aiowps_block_debug_log_file_access' => '#AIOWPS_DEBUG_LOG_BLOCK_HTACCESS_RULES_START',
+        'aiowps_disable_index_views'         => '#AIOWPS_DISABLE_INDEX_VIEWS_START',
+    ],
+];
+
+/**
+ * Regels van de categorie `security` (alleen op maatwerkthema's).
+ * Eén bron voor detectie, severity, regelregister, uitleg en de locatieknop.
+ * - `keys`: AIOS-instellingen waarvan er minstens één op '1' moet staan.
+ *   Regels zonder `keys` worden apart gedetecteerd in `/site/audit`.
+ * - `tab`:  AIOS-adminpagina voor de locatieknop (`admin.php?page=...`).
+ *
+ * @return array<string,array{severity:string,keys?:string[],tab:?string,label:string,explanation:string,action:string}>
+ */
+function aspera_security_rules(): array {
+    return [
+        'security_aios_inactive' => [
+            'severity' => 'critical', 'tab' => null,
+            'label' => 'AIOS niet actief',
+            'explanation' => 'Op een maatwerkthema is All-In-One Security (AIOS) de beveiligingslaag van de site. Zonder actieve AIOS wordt geen enkele beveiligingsinstelling afgedwongen.',
+            'action' => 'Plugins > All-In-One Security installeren en activeren, daarna de Aspera-standaard instellen.',
+        ],
+        'security_aios_config_unreadable' => [
+            'severity' => 'observation', 'tab' => 'aiowpsec',
+            'label' => 'AIOS-instellingen niet leesbaar',
+            'explanation' => 'De optie aio_wp_security_configs ontbreekt of heeft een onverwachte opbouw. Mogelijk is AIOS gewijzigd sinds ' . ASPERA_AIOS['verified_against'] . '; de beveiligingsregels kunnen daardoor niets vaststellen.',
+            'action' => 'AIOS-instellingen een keer opslaan. Blijft de melding staan, dan het AIOS-contract in de plugin bijwerken.',
+        ],
+        'security_file_editing_enabled' => [
+            'severity' => 'critical', 'keys' => [ 'aiowps_disable_file_editing' ], 'tab' => 'aiowpsec_filesystem&tab=file-protection',
+            'label' => 'PHP-bestanden bewerkbaar in wp-admin',
+            'explanation' => 'Via de thema- en plugin-editor kan iedere beheerder code uitvoeren. Een aanvaller met een gestolen wachtwoord gebruikt dit als eerste.',
+            'action' => 'AIOS > File security > File protection > "Disable ability to edit PHP files" aan. AIOS zet dan DISALLOW_FILE_EDIT in wp-config.php.',
+        ],
+        'security_default_wp_files_exposed' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_auto_delete_default_wp_files', 'aiowps_prevent_default_wp_file_access' ], 'tab' => 'aiowpsec_filesystem&tab=file-protection',
+            'label' => 'Standaard WP-bestanden bereikbaar',
+            'explanation' => 'readme.html, license.txt en wp-config-sample.php verraden de WordPress-versie.',
+            'action' => 'AIOS > File security > File protection > standaardbestanden automatisch verwijderen of de toegang blokkeren.',
+        ],
+        'security_wp_version_visible' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_remove_wp_generator_meta_info' ], 'tab' => 'aiowpsec_settings&tab=wp-version-info',
+            'label' => 'WordPress-versie zichtbaar',
+            'explanation' => 'De generator-metatag toont de WordPress-versie, zodat bekende kwetsbaarheden gericht te proberen zijn.',
+            'action' => 'AIOS > Settings > WP version info > "Remove WP generator meta info" aan.',
+        ],
+        'security_login_lockdown_disabled' => [
+            'severity' => 'critical', 'keys' => [ 'aiowps_enable_login_lockdown' ], 'tab' => 'aiowpsec_usersec&tab=login-lockout',
+            'label' => 'Login lockout uit',
+            'explanation' => 'Zonder lockout kan een bot onbeperkt wachtwoorden proberen.',
+            'action' => 'AIOS > User security > Login lockout > "Enable login lockout feature" aan.',
+        ],
+        'security_invalid_username_lockdown_disabled' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_enable_invalid_username_lockdown' ], 'tab' => 'aiowpsec_usersec&tab=login-lockout',
+            'label' => 'Geen lockout bij onbekende gebruikersnaam',
+            'explanation' => 'Pogingen met niet-bestaande gebruikersnamen worden niet direct geblokkeerd.',
+            'action' => 'AIOS > User security > Login lockout > "Immediately lock invalid usernames" aan.',
+        ],
+        'security_login_honeypot_disabled' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_enable_login_honeypot' ], 'tab' => 'aiowpsec_brute_force&tab=honeypot',
+            'label' => 'Login honeypot uit',
+            'explanation' => 'Een verborgen veld op het loginformulier vangt bots af voordat ze een wachtwoord kunnen proberen.',
+            'action' => 'AIOS > Brute force > Honeypot > honeypot op de loginpagina aan.',
+        ],
+        'security_login_page_not_renamed' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_enable_rename_login_page' ], 'tab' => 'aiowpsec_brute_force&tab=rename-login',
+            'label' => 'Loginpagina niet hernoemd',
+            'explanation' => 'wp-login.php is het standaardadres waar bots hun aanvallen op richten.',
+            'action' => 'AIOS > Brute force > Rename login page aan, met een eigen slug.',
+        ],
+        'security_login_captcha_disabled' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_enable_login_captcha' ], 'tab' => 'aiowpsec_brute_force&tab=captcha-settings',
+            'label' => 'Geen captcha op het loginformulier',
+            'explanation' => 'Zonder captcha kunnen geautomatiseerde loginpogingen ongehinderd doorgaan.',
+            'action' => 'AIOS > Brute force > CAPTCHA settings > captcha-type kiezen en "Enable CAPTCHA on login page" aan.',
+        ],
+        'security_xmlrpc_pingback_enabled' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_disable_xmlrpc_pingback_methods' ], 'tab' => 'aiowpsec_firewall&tab=php-rules',
+            'label' => 'XML-RPC pingback open',
+            'explanation' => 'Pingback via XML-RPC wordt misbruikt voor DDoS-aanvallen op andere sites en voor het aftasten van de server.',
+            'action' => 'AIOS > Firewall > PHP rules > "Disable pingback functionality from XML-RPC" aan.',
+        ],
+        'security_rss_feeds_enabled' => [
+            'severity' => 'observation', 'keys' => [ 'aiowps_disable_rss_and_atom_feeds' ], 'tab' => 'aiowpsec_firewall&tab=php-rules',
+            'label' => 'RSS- en Atom-feeds open',
+            'explanation' => 'Feeds worden gebruikt om content geautomatiseerd over te nemen. Alleen open laten als de site een feed bewust aanbiedt.',
+            'action' => 'AIOS > Firewall > PHP rules > "Disable RSS and ATOM feeds" aan, of als uitzondering markeren.',
+        ],
+        'security_basic_firewall_disabled' => [
+            'severity' => 'critical', 'keys' => [ 'aiowps_enable_basic_firewall' ], 'tab' => 'aiowpsec_firewall&tab=htaccess-rules',
+            'label' => 'Basic firewall uit',
+            'explanation' => 'De basisregels in .htaccess beschermen onder meer wp-config.php en blokkeren bekende kwaadaardige verzoeken.',
+            'action' => 'AIOS > Firewall > .htaccess rules > Basic firewall settings aan. Opslaan via wp-admin, zodat AIOS de .htaccess bijwerkt.',
+        ],
+        'security_debug_log_accessible' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_block_debug_log_file_access' ], 'tab' => 'aiowpsec_firewall&tab=htaccess-rules',
+            'label' => 'debug.log niet afgeschermd',
+            'explanation' => 'Een debug.log kan paden, foutmeldingen en soms gegevens van bezoekers bevatten en is zonder blokkade via de browser op te vragen.',
+            'action' => 'AIOS > Firewall > .htaccess rules > Block debug log > aan. Opslaan via wp-admin, zodat AIOS de .htaccess bijwerkt.',
+        ],
+        'security_index_views_enabled' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_disable_index_views' ], 'tab' => 'aiowpsec_firewall&tab=htaccess-rules',
+            'label' => 'Directory listing mogelijk',
+            'explanation' => 'Mappen zonder index-bestand tonen hun inhoud, bijvoorbeeld acf-json/ in het thema.',
+            'action' => 'AIOS > Firewall > .htaccess rules > Listing directory content > "Disable index views" aan. Opslaan via wp-admin.',
+        ],
+        'security_iframe_allowed' => [
+            'severity' => 'warning', 'keys' => [ 'aiowps_prevent_site_display_inside_frame' ], 'tab' => 'aiowpsec_filesystem&tab=frames',
+            'label' => 'Site in iframe te tonen',
+            'explanation' => 'Een andere site kan deze site in een iframe laden en bezoekers laten klikken op iets wat ze niet zien (clickjacking).',
+            'action' => 'AIOS > File security > Frames > "Prevent showing site in iframe" aan.',
+        ],
+        'security_hotlinking_allowed' => [
+            'severity' => 'observation', 'keys' => [ 'aiowps_prevent_hotlinking' ], 'tab' => 'aiowpsec_filesystem&tab=file-protection',
+            'label' => 'Hotlinken van afbeeldingen toegestaan',
+            'explanation' => 'Andere sites kunnen afbeeldingen rechtstreeks van deze server laden en zo bandbreedte verbruiken.',
+            'action' => 'AIOS > File security > File protection > "Prevent image hotlinking" aan.',
+        ],
+        'security_fcd_disabled' => [
+            'severity' => 'critical', 'keys' => [ 'aiowps_enable_automated_fcd_scan' ], 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
+            'label' => 'File change detection uit',
+            'explanation' => 'Zonder automatische scan valt een gewijzigd of toegevoegd bestand in het thema, de root of uploads niemand op.',
+            'action' => 'AIOS > Scanner > File change detection > automatische scan aan (minimaal wekelijks, met mail), volgens de Aspera-standaard.',
+        ],
+        'security_fcd_interval_too_long' => [
+            'severity' => 'warning', 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
+            'label' => 'File change detection scant te weinig',
+            'explanation' => 'De scan draait minder vaak dan wekelijks, waardoor een hack weken onopgemerkt kan blijven.',
+            'action' => 'AIOS > Scanner > File change detection > Scan time interval op maximaal 1 week.',
+        ],
+        'security_fcd_email_disabled' => [
+            'severity' => 'warning', 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
+            'label' => 'Geen mail bij bestandswijziging',
+            'explanation' => 'De scan draait, maar niemand krijgt bericht als er iets verandert.',
+            'action' => 'AIOS > Scanner > File change detection > "Send an email when a file change is detected" aan, met een adres.',
+        ],
+        'security_fcd_theme_excluded' => [
+            'severity' => 'critical', 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
+            'label' => 'Thema valt buiten de file change detection',
+            'explanation' => 'AIOS behandelt elke uitsluiting als stuk tekst ergens in het pad. Een uitsluiting of een genegeerd bestandstype raakt hier het actieve thema, zodat wijzigingen daarin niet gemeld worden.',
+            'action' => 'AIOS > Scanner > File change detection > de genoemde uitsluiting of het bestandstype verwijderen.',
+        ],
+        'security_fcd_change_detected' => [
+            'severity' => 'warning', 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
+            'label' => 'AIOS meldt gewijzigde bestanden',
+            'explanation' => 'De laatste scan heeft gewijzigde, nieuwe of verwijderde bestanden gevonden die nog niet bekeken zijn.',
+            'action' => 'AIOS > Scanner > resultaten bekijken. Eigen wijziging: Scan now voor een nieuwe nulmeting. Onbekende wijziging: bestand vergelijken met de bron.',
+        ],
+    ];
+}
+
+/**
  * Bekende post_types van plugins die orphaned data achterlaten wanneer ze
  * gedeactiveerd/verwijderd worden. Gedeeld tussen /db/tables/validate en
  * /taxonomy/validate zodat beide dezelfde herkomst-herkenning gebruiken.
@@ -2850,6 +3029,7 @@ function aspera_site_health_test(): array {
         'media'         => 'Media-instellingen',
         'cache'         => 'Cache',
         'smtp'          => 'SMTP',
+        'security'      => 'Beveiliging',
     ];
 
     $rows = '';
@@ -4294,6 +4474,13 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
         case 'smtp':
             return [ 'url' => admin_url( 'admin.php?page=wp-mail-smtp' ), 'title' => 'WP Mail SMTP' ];
 
+        case 'security':
+            $sec_tab = aspera_security_rules()[ $rule ]['tab'] ?? null;
+            if ( $sec_tab === null ) {
+                return [ 'url' => admin_url( 'plugins.php' ), 'title' => 'Plugins' ];
+            }
+            return [ 'url' => admin_url( 'admin.php?page=' . $sec_tab ), 'title' => 'All-In-One Security' ];
+
         case 'theme_check':
             switch ( $rule ) {
                 case 'impreza_license_inactive':
@@ -4391,6 +4578,7 @@ function aspera_get_rules_per_category(): array {
         'wp_settings' => [ 'search_engine_noindex','missing_favicon','permalink_structure_invalid','posts_per_page_invalid','posts_per_rss_invalid','homepage_on_latest_posts','homepage_missing','homepage_unexpected_title','date_format_invalid','timezone_invalid','site_language_invalid','start_of_week_invalid','default_role_invalid','users_can_register_enabled','admin_email_invalid','php_version_critical','php_version_outdated','php_memory_limit_low','orphaned_wpforms_scheduled_actions' ],
         'smtp' => [ 'smtp_plugin_inactive','smtp_announcements_visible','smtp_dashboard_widget_visible','smtp_summary_email_enabled','smtp_brevo_api_key_missing','smtp_from_email_not_forced','smtp_from_name_not_forced','smtp_mailer_not_allowed','smtp_do_not_send_enabled','smtp_delivery_errors_hidden','smtp_usage_tracking_enabled','smtp_optimize_sending_enabled' ],
         'cache' => [ 'cache_disabled','cache_preload_disabled','cache_preload_homepage_missing','cache_preload_post_missing','cache_preload_page_missing','cache_preload_cpt_missing','cache_preload_threads_missing','cache_preload_restart_missing','cache_purge_on_new_post_missing','cache_purge_on_update_post_missing','cache_minify_html_disabled','cache_minify_css_disabled','cache_combine_css_disabled','cache_minify_js_enabled','cache_combine_js_enabled','cache_gzip_disabled','cache_browser_caching_disabled','cache_emojis_enabled','cache_mobile_theme_enabled','cache_logged_in_user_enabled','cache_timeout_missing','cache_timeout_not_daily','cache_timeout_scope_partial','cache_language_not_english','cache_toolbar_admin_only_missing' ],
+        'security' => array_keys( aspera_security_rules() ),
     ];
     return $reg;
 }
@@ -4662,6 +4850,10 @@ function aspera_get_rule_context(): array {
         'wrong_option_syntax' => [ 'label' => 'Verkeerde opt_-syntax in shortcode', 'explanation' => 'opt_-veld wordt niet correct gerefereerd.', 'action' => 'Pas opt_field-syntax aan.' ],
         'breakpoint_convention_deviation' => [ 'label' => 'Breakpoint wijkt van conventie af', 'explanation' => 'Niet-standaard breakpoint-waarde.', 'action' => 'Bevestigen of harmoniseren.' ],
     ];
+    // Beveiliging: uitleg komt uit de centrale regeldefinitie.
+    foreach ( aspera_security_rules() as $sec_rule => $sec_def ) {
+        $ctx[ $sec_rule ] = [ 'label' => $sec_def['label'], 'explanation' => $sec_def['explanation'], 'action' => $sec_def['action'] ];
+    }
     return $ctx;
 }
 
@@ -4702,6 +4894,7 @@ function aspera_dashboard_widget_render(): void {
         'media'            => 'Media-instellingen',
         'cache'            => 'Cache',
         'smtp'             => 'SMTP',
+        'security'         => 'Beveiliging',
     ];
 
     $sev_colors = [
@@ -11964,6 +12157,9 @@ add_action( 'rest_api_init', function () {
                 'cache_toolbar_admin_only_missing'       => 'critical',
             ];
 
+            // Beveiliging: severity komt uit de centrale regeldefinitie.
+            $severity_map += array_map( function ( $d ) { return $d['severity']; }, aspera_security_rules() );
+
             // ── Per-categorie caps ────────────────────────────────────────
             $category_caps = [
                 'wpb'        => 15,
@@ -11993,6 +12189,7 @@ add_action( 'rest_api_init', function () {
                 'media'            =>  10,
                 'cache'            =>   5,
                 'smtp'             =>   5,
+                'security'         =>  20,
             ];
 
             $severity_points = [
@@ -13272,6 +13469,135 @@ add_action( 'rest_api_init', function () {
                 'violations'      => $smtp_violations,
                 'error'           => null,
             ];
+
+            // ── Beveiliging (alleen maatwerkthema) ───────────────────────
+            // Op een site zonder Impreza(-child) als actief thema is AIOS de
+            // beveiligingslaag en moet die volgens de Aspera-standaard staan.
+            // Op Impreza-sites niet van toepassing: een deel van deze opties
+            // werkt daar niet of slecht.
+            if ( ! aspera_custom_theme_active() ) {
+                $not_applicable['security'] = 'Impreza-thema actief';
+            } else {
+                $sec_rules      = aspera_security_rules();
+                $sec_violations = [];
+                $sec_add        = function ( string $rule, string $detail ) use ( &$sec_violations, $sec_rules ) {
+                    $sec_violations[] = [
+                        'rule'     => $rule,
+                        'severity' => $sec_rules[ $rule ]['severity'],
+                        'detail'   => $detail,
+                    ];
+                };
+                $sec_slugs  = aspera_get_plugin_slugs();
+                $aios_cfg   = get_option( ASPERA_AIOS['option'] );
+
+                if ( ! in_array( ASPERA_AIOS['slug'], $sec_slugs['active'], true ) ) {
+                    $sec_add( 'security_aios_inactive', in_array( ASPERA_AIOS['slug'], $sec_slugs['installed'], true )
+                        ? 'AIOS is geinstalleerd maar niet geactiveerd'
+                        : 'AIOS is niet geinstalleerd' );
+                    // Zonder actieve AIOS wordt geen enkele instelling afgedwongen.
+                    foreach ( $sec_rules as $rule => $def ) {
+                        if ( ! empty( $def['keys'] ) ) {
+                            $sec_add( $rule, 'AIOS niet actief: ' . implode( ' / ', $def['keys'] ) . ' wordt niet afgedwongen' );
+                        }
+                    }
+                } elseif ( ! is_array( $aios_cfg ) || ! array_key_exists( ASPERA_AIOS['probe_key'], $aios_cfg ) ) {
+                    $sec_add( 'security_aios_config_unreadable', ASPERA_AIOS['option'] . ' ontbreekt of mist ' . ASPERA_AIOS['probe_key'] . ' (gecontroleerd tegen ' . ASPERA_AIOS['verified_against'] . ')' );
+                } else {
+                    $aios_on = function ( string $key ) use ( $aios_cfg ): bool {
+                        return (string) ( $aios_cfg[ $key ] ?? '' ) === '1';
+                    };
+
+                    // .htaccess lezen zoals AIOS hem schrijft (home path). Niet
+                    // leesbaar (bv. Nginx): terugvallen op de opgeslagen schakelaar.
+                    if ( ! function_exists( 'get_home_path' ) ) {
+                        require_once ABSPATH . 'wp-admin/includes/file.php';
+                    }
+                    $ht_path    = get_home_path() . '.htaccess';
+                    $ht_content = is_readable( $ht_path ) ? (string) file_get_contents( $ht_path ) : null;
+
+                    // Aan/uit-instellingen uit de centrale regeldefinitie.
+                    foreach ( $sec_rules as $rule => $def ) {
+                        if ( empty( $def['keys'] ) ) continue;
+                        $on = false;
+                        foreach ( $def['keys'] as $k ) {
+                            if ( $aios_on( $k ) ) { $on = true; break; }
+                        }
+                        $marker = ASPERA_AIOS['htaccess_markers'][ $def['keys'][0] ] ?? null;
+                        if ( $marker !== null && $ht_content !== null ) {
+                            // Effect is leidend: staat de regel in .htaccess, dan is de site beschermd.
+                            if ( strpos( $ht_content, $marker ) === false ) {
+                                $sec_add( $rule, $on
+                                    ? $def['keys'][0] . ' staat aan in AIOS, maar de regel ontbreekt in .htaccess (opnieuw opslaan in AIOS)'
+                                    : $def['keys'][0] . ' staat uit en de regel ontbreekt in .htaccess' );
+                            }
+                            continue;
+                        }
+                        if ( ! $on ) {
+                            $sec_add( $rule, implode( ' / ', $def['keys'] ) . ' staat uit'
+                                . ( $marker !== null ? ' (.htaccess niet leesbaar, alleen de instelling gecontroleerd)' : '' ) );
+                        }
+                    }
+
+                    // Effect controleren waar de instelling alleen een schakelaar is.
+                    if ( $aios_on( 'aiowps_disable_file_editing' ) && ! ( defined( 'DISALLOW_FILE_EDIT' ) && DISALLOW_FILE_EDIT ) ) {
+                        $sec_add( 'security_file_editing_enabled', 'Staat aan in AIOS, maar DISALLOW_FILE_EDIT is niet actief (wp-config.php niet bijgewerkt?)' );
+                    }
+                    if ( $aios_on( 'aiowps_enable_rename_login_page' ) && trim( (string) ( $aios_cfg['aiowps_login_page_slug'] ?? '' ) ) === '' ) {
+                        $sec_add( 'security_login_page_not_renamed', 'Rename login page staat aan, maar aiowps_login_page_slug is leeg' );
+                    }
+                    if ( $aios_on( 'aiowps_enable_login_captcha' ) && in_array( (string) ( $aios_cfg['aiowps_default_captcha'] ?? '' ), [ '', 'none' ], true ) ) {
+                        $sec_add( 'security_login_captcha_disabled', 'Login-captcha staat aan, maar er is geen captcha-type gekozen (aiowps_default_captcha)' );
+                    }
+
+                    // File change detection: interval, mail, bereik en openstaande meldingen.
+                    if ( $aios_on( 'aiowps_enable_automated_fcd_scan' ) ) {
+                        $fcd_freq  = max( 1, abs( (int) ( $aios_cfg['aiowps_fcd_scan_frequency'] ?? 4 ) ) );
+                        $fcd_unit  = (string) ( $aios_cfg['aiowps_fcd_scan_interval'] ?? '2' ); // 0 uren, 1 dagen, 2 weken
+                        $fcd_hours = $fcd_freq * ( [ '0' => 1, '1' => 24 ][ $fcd_unit ] ?? 168 );
+                        if ( $fcd_hours > 168 ) {
+                            $unit_label = [ '0' => 'uur', '1' => 'dag(en)' ][ $fcd_unit ] ?? 'week/weken';
+                            $sec_add( 'security_fcd_interval_too_long', 'Scan elke ' . $fcd_freq . ' ' . $unit_label . ' (' . $fcd_hours . ' uur), verwacht maximaal 1 week (168 uur)' );
+                        }
+
+                        if ( ! $aios_on( 'aiowps_send_fcd_scan_email' ) || trim( (string) ( $aios_cfg['aiowps_fcd_scan_email_address'] ?? '' ) ) === '' ) {
+                            $sec_add( 'security_fcd_email_disabled', 'aiowps_send_fcd_scan_email staat uit of aiowps_fcd_scan_email_address is leeg' );
+                        }
+
+                        // AIOS scant vanaf ABSPATH en sluit uit op deeltekst van het
+                        // relatieve pad (strpos), dus dezelfde test op een themabestand.
+                        $abs_norm   = trailingslashit( wp_normalize_path( ABSPATH ) );
+                        $theme_norm = trailingslashit( wp_normalize_path( get_stylesheet_directory() ) );
+                        if ( strpos( $theme_norm, $abs_norm ) !== 0 ) {
+                            $sec_add( 'security_fcd_theme_excluded', 'Thema staat buiten ABSPATH (' . $theme_norm . '); AIOS scant alleen vanaf ' . $abs_norm );
+                        } else {
+                            $theme_probe = substr( $theme_norm, strlen( $abs_norm ) ) . 'functions.php';
+                            $fcd_lines   = function ( string $key ) use ( $aios_cfg ): array {
+                                return array_values( array_filter( array_map( 'trim', preg_split( '/\R/', (string) ( $aios_cfg[ $key ] ?? '' ) ) ), 'strlen' ) );
+                            };
+                            foreach ( $fcd_lines( 'aiowps_fcd_exclude_files' ) as $excl ) {
+                                if ( strpos( $theme_probe, $excl ) !== false ) {
+                                    $sec_add( 'security_fcd_theme_excluded', 'Uitsluiting "' . $excl . '" raakt ' . $theme_probe );
+                                }
+                            }
+                            $bad_types = array_intersect( [ 'php', 'js', 'css' ], array_map( 'strtolower', $fcd_lines( 'aiowps_fcd_exclude_filetypes' ) ) );
+                            if ( $bad_types ) {
+                                $sec_add( 'security_fcd_theme_excluded', 'Genegeerde bestandstypen: ' . implode( ', ', $bad_types ) );
+                            }
+                        }
+
+                        if ( ! empty( $aios_cfg['aiowps_fcds_change_detected'] ) ) {
+                            $last_scan = (int) ( $aios_cfg['aiowps_last_fcd_scan_time'] ?? 0 );
+                            $sec_add( 'security_fcd_change_detected', 'Wijzigingen gevonden bij de scan' . ( $last_scan ? ' van ' . wp_date( 'Y-m-d H:i', $last_scan ) : '' ) );
+                        }
+                    }
+                }
+
+                $categories['security'] = [
+                    'violation_count' => count( $sec_violations ),
+                    'violations'      => $sec_violations,
+                    'error'           => null,
+                ];
+            }
 
             // ── Niet-toepasselijke categorieën verwijderen ──────────────
             foreach ( array_keys( $not_applicable ) as $na_cat ) {
