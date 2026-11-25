@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.30.1
+ * Version: 3.30.2
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.30.1' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.30.2' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -1763,8 +1763,8 @@ function aspera_aios_firewall_config(): array {
 }
 
 /**
- * AIOS-baseline voor maatwerkthema's: instellingen die op de referentiesite
- * (bgwadvies.nl) aan staan en nog geen eigen regel hebben. Elke afwijking
+ * AIOS-baseline voor maatwerkthema's: instellingen van de Aspera-standaard
+ * die nog geen eigen regel hebben. Referentiesite en werkwijze: zie handboek. Elke afwijking
  * geeft `security_baseline_setting_off`, met de sleutel voorop in de detail.
  * - `store`: `configs` (database, aio_wp_security_configs) of `firewall`
  *   (PHP-firewallconfig, zie aspera_aios_firewall_config()).
@@ -1776,6 +1776,7 @@ function aspera_security_baseline(): array {
     return [
         'aiowps_enable_rename_login_redirect' => [ 'store' => 'configs', 'label' => 'Redirect van wp-admin en wp-login.php na hernoemde login', 'tab' => 'aiowpsec_brute_force&tab=rename-login' ],
         'aiowps_allow_unlock_requests'        => [ 'store' => 'configs', 'label' => 'Unlock requests toestaan bij login lockout',             'tab' => 'aiowpsec_usersec&tab=login-lockout' ],
+        'aiowps_enable_email_notify'          => [ 'store' => 'configs', 'label' => 'Mail bij login lockout (Notify by email)',               'tab' => 'aiowpsec_usersec&tab=login-lockout' ],
         'aiowps_enable_pingback_firewall'     => [ 'store' => 'firewall', 'label' => 'XML-RPC volledig blokkeren (pingback firewall)',          'tab' => 'aiowpsec_firewall&tab=php-rules' ],
         'aiowps_deny_bad_query_strings'       => [ 'store' => 'firewall', 'label' => 'Verdachte query strings blokkeren',                       'tab' => 'aiowpsec_firewall&tab=php-rules' ],
         'aiowps_advanced_char_string_filter'  => [ 'store' => 'firewall', 'label' => 'Advanced character string filter (XSS-patronen blokkeren)', 'tab' => 'aiowpsec_firewall&tab=php-rules' ],
@@ -1899,7 +1900,7 @@ function aspera_security_rules(): array {
         'security_baseline_setting_off' => [
             'severity' => 'warning', 'tab' => 'aiowpsec',
             'label' => 'AIOS-instelling wijkt af van de baseline',
-            'explanation' => 'Deze AIOS-instelling staat op de referentiesite (bgwadvies.nl) aan en hoort op elke site met een maatwerkthema aan te staan.',
+            'explanation' => 'Deze AIOS-instelling hoort volgens de Aspera-standaard aan te staan op elke site met een maatwerkthema.',
             'action' => 'De genoemde instelling in AIOS aanzetten en opslaan via wp-admin, of als uitzondering markeren als de site hem bewust niet gebruikt.',
         ],
         'security_aios_firewall_unreadable' => [
