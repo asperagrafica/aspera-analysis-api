@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.30.0
+ * Version: 3.30.1
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.30.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.30.1' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -1776,6 +1776,10 @@ function aspera_security_baseline(): array {
     return [
         'aiowps_enable_rename_login_redirect' => [ 'store' => 'configs', 'label' => 'Redirect van wp-admin en wp-login.php na hernoemde login', 'tab' => 'aiowpsec_brute_force&tab=rename-login' ],
         'aiowps_allow_unlock_requests'        => [ 'store' => 'configs', 'label' => 'Unlock requests toestaan bij login lockout',             'tab' => 'aiowpsec_usersec&tab=login-lockout' ],
+        'aiowps_enable_pingback_firewall'     => [ 'store' => 'firewall', 'label' => 'XML-RPC volledig blokkeren (pingback firewall)',          'tab' => 'aiowpsec_firewall&tab=php-rules' ],
+        'aiowps_deny_bad_query_strings'       => [ 'store' => 'firewall', 'label' => 'Verdachte query strings blokkeren',                       'tab' => 'aiowpsec_firewall&tab=php-rules' ],
+        'aiowps_advanced_char_string_filter'  => [ 'store' => 'firewall', 'label' => 'Advanced character string filter (XSS-patronen blokkeren)', 'tab' => 'aiowpsec_firewall&tab=php-rules' ],
+        'aiowps_forbid_proxy_comments'        => [ 'store' => 'firewall', 'label' => 'Reacties via proxyservers blokkeren',                      'tab' => 'aiowpsec_firewall&tab=php-rules' ],
     ];
 }
 
