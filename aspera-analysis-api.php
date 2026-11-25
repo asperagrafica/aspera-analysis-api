@@ -2,7 +2,7 @@
 /**
  * Plugin Name: AsperAi Site Tools
  * Description: Server-side site-audit en herstel-acties voor Aspera-websites. Read-only REST-endpoints voor analyse (WPBakery, ACF, headers, kleuren, navigatie, widgets, cache, theme-instellingen, site-health) plus deterministische fix-acties via wp-admin (orphaned meta, scheduled actions, shortcode-correcties).
- * Version: 3.29.0
+ * Version: 3.30.0
  * Requires PHP: 8.0
  * Author: Aspera
  */
@@ -10,7 +10,7 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 if ( ! defined( 'ASPERA_ANALYSIS_API_VERSION' ) ) {
-    define( 'ASPERA_ANALYSIS_API_VERSION', '3.29.0' );
+    define( 'ASPERA_ANALYSIS_API_VERSION', '3.30.0' );
 }
 
 // PHP-versiedrempels op een Aspera-site, in twee trappen:
@@ -1732,6 +1732,54 @@ const ASPERA_AIOS = [
 ];
 
 /**
+ * Leest de PHP-firewallconfig van AIOS. Die staat niet in de database maar in
+ * `{uploads}/aios/firewall-rules/settings.php` (een PHP-prefix gevolgd door JSON).
+ * Eerst via het object dat AIOS zelf laadt, anders door het bestand te parsen.
+ *
+ * @return array{contents:?array,source:string}
+ */
+function aspera_aios_firewall_config(): array {
+    $obj = $GLOBALS['aiowps_firewall_config'] ?? null;
+    if ( is_object( $obj ) && method_exists( $obj, 'get_contents' ) ) {
+        $c = $obj->get_contents();
+        if ( is_array( $c ) ) {
+            return [ 'contents' => $c, 'source' => 'AIOS firewall-object' ];
+        }
+    }
+    $path = ( class_exists( 'AIOWPSecurity_Utility_Firewall' ) && method_exists( 'AIOWPSecurity_Utility_Firewall', 'get_firewall_rules_path' ) )
+        ? AIOWPSecurity_Utility_Firewall::get_firewall_rules_path() . 'settings.php'
+        : trailingslashit( wp_get_upload_dir()['basedir'] ) . 'aios/firewall-rules/settings.php';
+    if ( ! is_readable( $path ) ) {
+        return [ 'contents' => null, 'source' => $path . ' (niet leesbaar)' ];
+    }
+    $raw = (string) file_get_contents( $path );
+    if ( preg_match( '/\{.*\}/s', $raw, $m ) ) {
+        $c = json_decode( $m[0], true );
+        if ( is_array( $c ) ) {
+            return [ 'contents' => $c, 'source' => $path ];
+        }
+    }
+    return [ 'contents' => null, 'source' => $path . ' (geen geldige JSON)' ];
+}
+
+/**
+ * AIOS-baseline voor maatwerkthema's: instellingen die op de referentiesite
+ * (bgwadvies.nl) aan staan en nog geen eigen regel hebben. Elke afwijking
+ * geeft `security_baseline_setting_off`, met de sleutel voorop in de detail.
+ * - `store`: `configs` (database, aio_wp_security_configs) of `firewall`
+ *   (PHP-firewallconfig, zie aspera_aios_firewall_config()).
+ * Nieuwe baseline-instelling: alleen hier toevoegen.
+ *
+ * @return array<string,array{store:string,label:string,tab:string}>
+ */
+function aspera_security_baseline(): array {
+    return [
+        'aiowps_enable_rename_login_redirect' => [ 'store' => 'configs', 'label' => 'Redirect van wp-admin en wp-login.php na hernoemde login', 'tab' => 'aiowpsec_brute_force&tab=rename-login' ],
+        'aiowps_allow_unlock_requests'        => [ 'store' => 'configs', 'label' => 'Unlock requests toestaan bij login lockout',             'tab' => 'aiowpsec_usersec&tab=login-lockout' ],
+    ];
+}
+
+/**
  * Regels van de categorie `security` (alleen op maatwerkthema's).
  * Eén bron voor detectie, severity, regelregister, uitleg en de locatieknop.
  * - `keys`: AIOS-instellingen waarvan er minstens één op '1' moet staan.
@@ -1843,6 +1891,18 @@ function aspera_security_rules(): array {
             'label' => 'Hotlinken van afbeeldingen toegestaan',
             'explanation' => 'Andere sites kunnen afbeeldingen rechtstreeks van deze server laden en zo bandbreedte verbruiken.',
             'action' => 'AIOS > File security > File protection > "Prevent image hotlinking" aan.',
+        ],
+        'security_baseline_setting_off' => [
+            'severity' => 'warning', 'tab' => 'aiowpsec',
+            'label' => 'AIOS-instelling wijkt af van de baseline',
+            'explanation' => 'Deze AIOS-instelling staat op de referentiesite (bgwadvies.nl) aan en hoort op elke site met een maatwerkthema aan te staan.',
+            'action' => 'De genoemde instelling in AIOS aanzetten en opslaan via wp-admin, of als uitzondering markeren als de site hem bewust niet gebruikt.',
+        ],
+        'security_aios_firewall_unreadable' => [
+            'severity' => 'observation', 'tab' => 'aiowpsec_firewall',
+            'label' => 'AIOS-firewallconfig niet leesbaar',
+            'explanation' => 'De PHP-firewallinstellingen van AIOS staan in uploads/aios/firewall-rules/settings.php. Dat bestand ontbreekt of is niet te lezen, waardoor de firewall-onderdelen van de baseline niet te controleren zijn.',
+            'action' => 'AIOS > Firewall openen en de instellingen een keer opslaan, zodat AIOS het bestand opnieuw schrijft.',
         ],
         'security_fcd_disabled' => [
             'severity' => 'critical', 'keys' => [ 'aiowps_enable_automated_fcd_scan' ], 'tab' => 'aiowpsec_filescan&tab=file-change-detect',
@@ -4476,6 +4536,10 @@ function aspera_get_violation_admin_link( string $category, string $rule, $post_
 
         case 'security':
             $sec_tab = aspera_security_rules()[ $rule ]['tab'] ?? null;
+            if ( $rule === 'security_baseline_setting_off' ) {
+                $bl_key  = strtok( $detail, ' ' );
+                $sec_tab = aspera_security_baseline()[ $bl_key ]['tab'] ?? $sec_tab;
+            }
             if ( $sec_tab === null ) {
                 return [ 'url' => admin_url( 'plugins.php' ), 'title' => 'Plugins' ];
             }
@@ -11866,6 +11930,41 @@ add_action( 'rest_api_init', function () {
         },
     ] );
 
+    // ── AIOS-instellingen uitlezen (read-only) ──────────────────────────────
+    // Beide opslagplekken van AIOS: database en PHP-firewallconfig. Secrets
+    // worden gemaskeerd, lange lijsten (IP-ranges, blocklists) als aantal.
+    register_rest_route( 'aspera/v1', '/security/aios', [
+        'methods'             => 'GET',
+        'permission_callback' => 'aspera_check_key',
+        'callback'            => function () {
+            $mask = function ( $data ) {
+                if ( ! is_array( $data ) ) return $data;
+                $out = [];
+                foreach ( $data as $k => $v ) {
+                    if ( preg_match( '/secret|password|_key$|salt|cookie_name|secret_word|session_path/i', (string) $k ) ) {
+                        $out[ $k ] = ( $v === '' || $v === null ) ? $v : '••••';
+                    } elseif ( is_array( $v ) && count( $v ) > 10 ) {
+                        $out[ $k ] = [ '_count' => count( $v ) ];
+                    } else {
+                        $out[ $k ] = $v;
+                    }
+                }
+                return $out;
+            };
+            $slugs = aspera_get_plugin_slugs();
+            $fw    = aspera_aios_firewall_config();
+            return [
+                'aios_active'       => in_array( ASPERA_AIOS['slug'], $slugs['active'], true ),
+                'aios_version'      => defined( 'AIO_WP_SECURITY_VERSION' ) ? AIO_WP_SECURITY_VERSION : null,
+                'verified_against'  => ASPERA_AIOS['verified_against'],
+                'custom_theme'      => aspera_custom_theme_active(),
+                'configs'           => $mask( get_option( ASPERA_AIOS['option'] ) ),
+                'firewall'          => $mask( $fw['contents'] ),
+                'firewall_source'   => $fw['source'],
+            ];
+        },
+    ] );
+
     register_rest_route( 'aspera/v1', '/site/audit', [
         'methods'             => 'GET',
         'permission_callback' => 'aspera_check_key',
@@ -13547,6 +13646,28 @@ add_action( 'rest_api_init', function () {
                     }
                     if ( $aios_on( 'aiowps_enable_login_captcha' ) && in_array( (string) ( $aios_cfg['aiowps_default_captcha'] ?? '' ), [ '', 'none' ], true ) ) {
                         $sec_add( 'security_login_captcha_disabled', 'Login-captcha staat aan, maar er is geen captcha-type gekozen (aiowps_default_captcha)' );
+                    }
+
+                    // Baseline van de referentiesite (database en PHP-firewallconfig).
+                    $sec_baseline = aspera_security_baseline();
+                    $fw_cfg       = null;
+                    if ( in_array( 'firewall', array_column( $sec_baseline, 'store' ), true ) ) {
+                        $fw_read = aspera_aios_firewall_config();
+                        $fw_cfg  = $fw_read['contents'];
+                        if ( $fw_cfg === null ) {
+                            $sec_add( 'security_aios_firewall_unreadable', $fw_read['source'] );
+                        }
+                    }
+                    foreach ( $sec_baseline as $bl_key => $bl ) {
+                        if ( $bl['store'] === 'firewall' ) {
+                            if ( $fw_cfg === null ) continue; // al gemeld als niet leesbaar
+                            $bl_on = ! empty( $fw_cfg[ $bl_key ] );
+                        } else {
+                            $bl_on = $aios_on( $bl_key );
+                        }
+                        if ( ! $bl_on ) {
+                            $sec_add( 'security_baseline_setting_off', $bl_key . ' staat uit: ' . $bl['label'] );
+                        }
                     }
 
                     // File change detection: interval, mail, bereik en openstaande meldingen.
